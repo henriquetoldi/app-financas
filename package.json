@@ -17,15 +17,13 @@
     "googleapis": "^118.0.0",
     "csv-parser": "^3.0.0",
     "uuid": "^9.0.0",
-    "axios": "^1.6.0"
-  },
-  "devDependencies": {
+    "axios": "^1.6.0",
     "vite": "^5.0.0",
     "@vitejs/plugin-react": "^4.0.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
   },
   "engines": {
-    "node": "18.x"
+    "node": ">=18"
   }
 }
