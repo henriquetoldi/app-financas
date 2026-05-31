@@ -9,6 +9,8 @@ const { Pool } = require('pg');
 const jwt = require('jsonwebtoken');
 const { google } = require('googleapis');
 const path = require('path');
+const fs = require('fs');
+const crypto = require('crypto');
 const csv = require('csv-parser');
 const { Readable } = require('stream');
 
@@ -29,7 +31,7 @@ app.use(cors({
   credentials: true
 }));
 app.use(express.json());
-app.use(express.urlencoded({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // ============================================================================
 // DATABASE
@@ -344,7 +346,7 @@ app.post('/api/importar/:arquivoId', verificarToken, async (req, res) => {
             [crypto.randomUUID(), contaId, tx.data, tx.descricao, tx.valor, tx.tipo, tx.hash]
           );
 
-          inserida++;
+          inseridas++;
         }
 
         res.json({
@@ -490,16 +492,25 @@ app.get('/api/health', (req, res) => {
 // FRONTEND STATIC FILES
 // ===========================================================================
 
+const distPath = path.join(__dirname, 'dist');
+const indexPath = path.join(distPath, 'index.html');
+
 // Serve static files from React build
-app.use(express.static(path.join(__dirname, 'dist')));
+app.use(express.static(distPath));
 
 // Fallback: send index.html for all non-API routes (SPA)
 app.get('*', (req, res) => {
-    if (!req.path.startsWith('/api') && !req.path.startsWith('/auth')) {
-          res.sendFile(path.join(__dirname, 'dist', 'index.html'));
-    } else {
-          res.status(404).json({ erro: 'Rota nao encontrada' });
-    }
+  if (req.path.startsWith('/api') || req.path.startsWith('/auth')) {
+    return res.status(404).json({ erro: 'Rota nao encontrada' });
+  }
+
+  if (!fs.existsSync(indexPath)) {
+    return res.status(503).send(
+      'Frontend build not found. Run `npm run build` before starting the server.'
+    );
+  }
+
+  return res.sendFile(indexPath);
 });
 
 const PORT = process.env.PORT || 3000;

@@ -1,13 +1,12 @@
 // ============================================================================
 // FRONTEND: React App
 // npm create vite@latest -- --template react
-// npm install axios react-router-dom
 // ============================================================================
 
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000/api';
+const API_URL = import.meta.env.VITE_API_URL || '/api';
 
 // ============================================================================
 // FUNÇÕES AUXILIARES
@@ -134,7 +133,7 @@ function Dashboard({ usuario, token, onLogout }) {
       carregarContas();
       setModo('transacoes');
     } catch (error) {
-      alert('Erro: ' + error.response?.data?.erro || error.message);
+      alert('Erro: ' + (error.response?.data?.erro || error.message));
     } finally {
       setCarregando(false);
     }
@@ -474,7 +473,7 @@ function TelaTransacoes({ conta, token }) {
 // APP PRINCIPAL
 // ============================================================================
 
-export default function App() {
+function App() {
   const [logado, setLogado] = useState(false);
   const [usuario, setUsuario] = useState(null);
   const [token, setToken] = useState(null);
@@ -528,3 +527,5 @@ export default function App() {
     />
   );
 }
+
+export default App;
