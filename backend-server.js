@@ -112,12 +112,12 @@ app.get('/api/auth/google/url', (req, res) => {
     'https://www.googleapis.com/auth/userinfo.profile',
   ];
 
-  const authUrl = oauth2Client.generateAuthUrl({
-    access_type: 'offline',
-    scope: scopes,h
-        redirect_uri: process.env.GOOGLE_REDIRECT_URI,
-    prompt: 'consent',
-  });
+const authUrl = oauth2Client.generateAuthUrl({
+  access_type: 'offline',
+  scope: scopes,
+  redirect_uri: process.env.GOOGLE_REDIRECT_URI,
+  prompt: 'consent',
+});
 
   res.json({ url: authUrl });
 });
