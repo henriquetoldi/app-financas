@@ -156,10 +156,7 @@ app.post('/api/auth/google/callback', async (req, res) => {
       { expiresIn: '7d' }
     );
 
-    res.json({
-      token: jwtToken,
-      usuario: { id: usuario_id, email, nome: name, foto: picture },
-    });
+    res.redirect('/?token=' + encodeURIComponent(jwtToken));
   } catch (error) {
     console.error('Erro auth:', error);
     res.status(500).json({ erro: error.message });
