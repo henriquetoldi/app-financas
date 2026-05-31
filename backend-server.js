@@ -13,6 +13,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const csv = require('csv-parser');
 const { Readable } = require('stream');
+const axios = require('axios');
 
 dotenv.config();
 
@@ -112,83 +113,67 @@ app.get('/api/auth/google/url', (req, res) => {
     'https://www.googleapis.com/auth/userinfo.profile',
   ];
 
-const authUrl = oauth2Client.generateAuthUrl({
-  access_type: 'offline',
-  scope: scopes,
-  redirect_uri: process.env.GOOGLE_REDIRECT_URI,
-  prompt: 'consent',
-});
+  const authUrl = oauth2Client.generateAuthUrl({
+    access_type: 'offline',
+    scope: scopes,
+    redirect_uri: process.env.GOOGLE_REDIRECT_URI,
+    prompt: 'consent',
+  });
 
   res.json({ url: authUrl });
 });
 
-
 // GET /api/auth/google/callback - Callback do Google, redireciona para frontend com JWT
 app.get('/api/auth/google/callback', async (req, res) => {
-  const { code, state, error } = req.query;
+  const { code, error } = req.query;
 
-    if (error) {
-        return res.redirect(`/?auth_error=${encodeURIComponent(error)}`);
-          }
+  if (error) {
+    return res.redirect(`/?auth_error=${encodeURIComponent(error)}`);
+  }
 
-            if (!code) {
-                return res.redirect('/?auth_error=Codigo nao fornecido');
-                  }
+  if (!code) {
+    return res.redirect('/?auth_error=Codigo nao fornecido');
+  }
 
-                    try {
-                        // 1. Trocar code por tokens do Google
-                            const tokenResponse = await axios.post('https://oauth2.googleapis.com/token', {
-                                  code,
-                                        client_id: process.env.GOOGLE_CLIENT_ID,
-                                              client_secret: process.env.GOOGLE_CLIENT_SECRET,
-                                                    redirect_uri: process.env.GOOGLE_REDIRECT_URI,
-                                                          grant_type: 'authorization_code'
-                                                              });
+  try {
+    const { tokens } = await oauth2Client.getToken(code);
+    oauth2Client.setCredentials(tokens);
 
-                                                                  const { access_token } = tokenResponse.data;
+    const oauth2 = google.oauth2({ version: 'v2', auth: oauth2Client });
+    const userInfo = await oauth2.userinfo.get();
 
-                                                                      // 2. Buscar dados do usuário
-                                                                          const userResponse = await axios.get(
-                                                                                'https://www.googleapis.com/oauth2/v2/userinfo',
-                                                                                      { headers: { Authorization: `Bearer ${access_token}` } }
-                                                                                          );
+    const { email, name, picture, id } = userInfo.data;
 
-                                                                                              const { email, name, picture } = userResponse.data;
+    // Verificar/criar usuário
+    const result = await pool.query(
+      `INSERT INTO usuarios (email, nome, foto_url, google_id, access_token, refresh_token) 
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (google_id) DO UPDATE SET
+       nome = $2, foto_url = $3, access_token = $5, refresh_token = $6, atualizado_em = CURRENT_TIMESTAMP
+       RETURNING id`,
+      [email, name, picture, id, 
+       Buffer.from(tokens.access_token).toString('base64'),
+       tokens.refresh_token ? Buffer.from(tokens.refresh_token).toString('base64') : null
+      ]
+    );
 
-                                                                                                  // 3. Criar/atualizar usuário no banco
-                                                                                                      let usuario = await db.query(
-                                                                                                            'SELECT * FROM users WHERE email = $1',
-                                                                                                                  [email]
-                                                                                                                      );
+    const usuario_id = result.rows[0].id;
 
-                                                                                                                          if (usuario.rows.length === 0) {
-                                                                                                                                await db.query(
-                                                                                                                                        'INSERT INTO users (email, nome, foto_url) VALUES ($1, $2, $3)',
-                                                                                                                                                [email, name, picture]
-                                                                                                                                                      );
-                                                                                                                                                          } else {
-                                                                                                                                                                await db.query(
-                                                                                                                                                                        'UPDATE users SET nome = $1, foto_url = $2 WHERE email = $3',
-                                                                                                                                                                                [name, picture, email]
-                                                                                                                                                                                      );
-                                                                                                                                                                                          }
+    // Gerar JWT com dados do usuário no payload
+    const jwtToken = jwt.sign(
+      { usuario_id, email, nome: name, foto_url: picture },
+      process.env.JWT_SECRET || 'seu_secret_aqui',
+      { expiresIn: '7d' }
+    );
 
-                                                                                                                                                                                              // 4. Gerar JWT com dados do usuário
-                                                                                                                                                                                                  const jwtToken = jwt.sign(
-                                                                                                                                                                                                        { email, nome: name, foto_url: picture },
-                                                                                                                                                                                                              process.env.JWT_SECRET,
-                                                                                                                                                                                                                    { expiresIn: '7d' }
-                                                                                                                                                                                                                        );
+    res.redirect('/?token=' + encodeURIComponent(jwtToken));
+  } catch (error) {
+    console.error('Erro no callback do Google:', error);
+    res.redirect(`/?auth_error=${encodeURIComponent(error.message)}`);
+  }
+});
 
-                                                                                                                                                                                                                            // 5. Redirecionar para o frontend com o token
-                                                                                                                                                                                                                                res.redirect(`/?token=${encodeURIComponent(jwtToken)}`);
-
-                                                                                                                                                                                                                                  } catch (error) {
-                                                                                                                                                                                                                                      console.error('Erro no callback do Google:', error);
-                                                                                                                                                                                                                                          res.redirect(`/?auth_error=${encodeURIComponent(error.message)}`);
-                                                                                                                                                                                                                                            }
-                                                                                                                                                                                                                                            });
-                                                                                                                                                                                                                                            
+// POST /api/auth/google/callback - Callback legacy (JSON para compatibilidade)
 app.post('/api/auth/google/callback', async (req, res) => {
   try {
     const { code } = req.body;
@@ -218,15 +203,23 @@ app.post('/api/auth/google/callback', async (req, res) => {
 
     // Gerar JWT
     const jwtToken = jwt.sign(
-      { usuario_id, email },
+      { usuario_id, email, nome: name, foto_url: picture },
       process.env.JWT_SECRET || 'seu_secret_aqui',
       { expiresIn: '7d' }
     );
 
-    res.redirect('/?token=' + encodeURIComponent(jwtToken));
+    res.json({ 
+      token: jwtToken,
+      usuario: {
+        id: usuario_id,
+        email,
+        nome: name,
+        foto_url: picture
+      }
+    });
   } catch (error) {
     console.error('Erro auth:', error);
-    res.status(500).json({ erro: error.message });
+    res.status(400).json({ erro: error.message });
   }
 });
 
@@ -550,12 +543,8 @@ app.get('/api/health', (req, res) => {
 });
 
 // ============================================================================
-// INICIAR SERVER
-// ============================================================================
-
-// ===========================================================================
 // FRONTEND STATIC FILES
-// ===========================================================================
+// ============================================================================
 
 const distPath = path.join(__dirname, 'dist');
 const indexPath = path.join(distPath, 'index.html');
@@ -571,12 +560,16 @@ app.get('*', (req, res) => {
 
   if (!fs.existsSync(indexPath)) {
     return res.status(503).send(
-      'Frontend build not found. Run `npm run build` before starting the server.'
+      'Frontend build not found. Run npm run build before starting the server.'
     );
   }
 
   return res.sendFile(indexPath);
 });
+
+// ============================================================================
+// INICIAR SERVER
+// ============================================================================
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
