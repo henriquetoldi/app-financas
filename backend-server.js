@@ -75,7 +75,7 @@ function parseDataNubank(dataStr) {
     if (match) {
       if (!isNaN(match[2])) {
         // DD/MM/YYYY
-        return new Date(match[3], parseInt(match[2]) - 1, match[1]);
+        return new Date(parseInt(match[3]), parseInt(match[2]) - 1, parseInt(match[1]));
       } else {
         // DDMMMYYYY - converter mês por nome
         const meses = {
