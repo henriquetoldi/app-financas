@@ -1,7 +1,8 @@
 {
         "name": "finance-app",
         "version": "1.0.0",
-        "description": "App de financas pessoais com integracao Google Drive",
+        "description": "App de financas pessoais com integracao Google Drive",,
+                "private": true,
         "scripts": {
                   "dev": "node backend-server.js",
                   "build": "vite build",
