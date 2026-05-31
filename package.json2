@@ -1,0 +1,64 @@
+diff --git a/package.json b/package.json
+index 048079dd52ebe6e3264e82d7b5c0cf6ddac268ff..bec5f4c36dd3a4a2b79d676f5776d58977e91e2a 100644
+--- a/package.json
++++ b/package.json
+@@ -1,30 +1,31 @@
+ {
+-          "name": "finance-app",
+-          "version": "1.0.0",
+-          "description": "App de financas pessoais com integracao Google Drive",
+-          "private": true,
+-          "scripts": {
+-                      "dev": "node backend-server.js",
+-                      "build": "vite build",
+-                      "start": "node backend-server.js"
+-          },
+-          "dependencies": {
+-                      "express": "^4.18.2",
+-                      "cors": "^2.8.5",
+-                      "dotenv": "^16.3.1",
+-                      "pg": "^8.11.2",
+-                      "jsonwebtoken": "^9.0.2",
+-                      "googleapis": "^118.0.0",
+-                      "csv-parser": "^3.0.0",
+-                      "uuid": "^9.0.0"
+-          },
+-          "devDependencies": {
+-                      "vite": "^5.0.0",
+-                      "@vitejs/plugin-react": "^4.0.0",
+-                      "react": "^18.2.0",
+-                      "react-dom": "^18.2.0"
+-          },
+-          "engines": {
+-                      "node": "18.x"
+-          }
++  "name": "finance-app",
++  "version": "1.0.0",
++  "description": "App de financas pessoais com integracao Google Drive",
++  "private": true,
++  "scripts": {
++    "dev": "node backend-server.js",
++    "build": "vite build",
++    "start": "node backend-server.js"
++  },
++  "dependencies": {
++    "express": "^4.18.2",
++    "cors": "^2.8.5",
++    "dotenv": "^16.3.1",
++    "pg": "^8.11.2",
++    "jsonwebtoken": "^9.0.2",
++    "googleapis": "^118.0.0",
++    "csv-parser": "^3.0.0",
++    "uuid": "^9.0.0",
++    "axios": "^1.6.0"
++  },
++  "devDependencies": {
++    "vite": "^5.0.0",
++    "@vitejs/plugin-react": "^4.0.0",
++    "react": "^18.2.0",
++    "react-dom": "^18.2.0"
++  },
++  "engines": {
++    "node": "18.x"
++  }
+ }
