@@ -8,7 +8,7 @@ const dotenv = require('dotenv');
 const { Pool } = require('pg');
 const jwt = require('jsonwebtoken');
 const { google } = require('googleapis');
-const crypto = require('crypto');
+const path = require('path');
 const csv = require('csv-parser');
 const { Readable } = require('stream');
 
@@ -485,6 +485,22 @@ app.get('/api/health', (req, res) => {
 // ============================================================================
 // INICIAR SERVER
 // ============================================================================
+
+// ===========================================================================
+// FRONTEND STATIC FILES
+// ===========================================================================
+
+// Serve static files from React build
+app.use(express.static(path.join(__dirname, 'dist')));
+
+// Fallback: send index.html for all non-API routes (SPA)
+app.get('*', (req, res) => {
+    if (!req.path.startsWith('/api') && !req.path.startsWith('/auth')) {
+          res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+    } else {
+          res.status(404).json({ erro: 'Rota nao encontrada' });
+    }
+});
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
