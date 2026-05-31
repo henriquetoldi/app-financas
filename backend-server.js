@@ -114,7 +114,8 @@ app.get('/api/auth/google/url', (req, res) => {
 
   const authUrl = oauth2Client.generateAuthUrl({
     access_type: 'offline',
-    scope: scopes,
+    scope: scopes,h
+      redirect_uri: process.env.GOOGLE_REDIRECT_URI,
     prompt: 'consent',
   });
 
