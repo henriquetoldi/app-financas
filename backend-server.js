@@ -122,6 +122,73 @@ const authUrl = oauth2Client.generateAuthUrl({
   res.json({ url: authUrl });
 });
 
+
+// GET /api/auth/google/callback - Callback do Google, redireciona para frontend com JWT
+app.get('/api/auth/google/callback', async (req, res) => {
+  const { code, state, error } = req.query;
+
+    if (error) {
+        return res.redirect(`/?auth_error=${encodeURIComponent(error)}`);
+          }
+
+            if (!code) {
+                return res.redirect('/?auth_error=Codigo nao fornecido');
+                  }
+
+                    try {
+                        // 1. Trocar code por tokens do Google
+                            const tokenResponse = await axios.post('https://oauth2.googleapis.com/token', {
+                                  code,
+                                        client_id: process.env.GOOGLE_CLIENT_ID,
+                                              client_secret: process.env.GOOGLE_CLIENT_SECRET,
+                                                    redirect_uri: process.env.GOOGLE_REDIRECT_URI,
+                                                          grant_type: 'authorization_code'
+                                                              });
+
+                                                                  const { access_token } = tokenResponse.data;
+
+                                                                      // 2. Buscar dados do usuário
+                                                                          const userResponse = await axios.get(
+                                                                                'https://www.googleapis.com/oauth2/v2/userinfo',
+                                                                                      { headers: { Authorization: `Bearer ${access_token}` } }
+                                                                                          );
+
+                                                                                              const { email, name, picture } = userResponse.data;
+
+                                                                                                  // 3. Criar/atualizar usuário no banco
+                                                                                                      let usuario = await db.query(
+                                                                                                            'SELECT * FROM users WHERE email = $1',
+                                                                                                                  [email]
+                                                                                                                      );
+
+                                                                                                                          if (usuario.rows.length === 0) {
+                                                                                                                                await db.query(
+                                                                                                                                        'INSERT INTO users (email, nome, foto_url) VALUES ($1, $2, $3)',
+                                                                                                                                                [email, name, picture]
+                                                                                                                                                      );
+                                                                                                                                                          } else {
+                                                                                                                                                                await db.query(
+                                                                                                                                                                        'UPDATE users SET nome = $1, foto_url = $2 WHERE email = $3',
+                                                                                                                                                                                [name, picture, email]
+                                                                                                                                                                                      );
+                                                                                                                                                                                          }
+
+                                                                                                                                                                                              // 4. Gerar JWT com dados do usuário
+                                                                                                                                                                                                  const jwtToken = jwt.sign(
+                                                                                                                                                                                                        { email, nome: name, foto_url: picture },
+                                                                                                                                                                                                              process.env.JWT_SECRET,
+                                                                                                                                                                                                                    { expiresIn: '7d' }
+                                                                                                                                                                                                                        );
+
+                                                                                                                                                                                                                            // 5. Redirecionar para o frontend com o token
+                                                                                                                                                                                                                                res.redirect(`/?token=${encodeURIComponent(jwtToken)}`);
+
+                                                                                                                                                                                                                                  } catch (error) {
+                                                                                                                                                                                                                                      console.error('Erro no callback do Google:', error);
+                                                                                                                                                                                                                                          res.redirect(`/?auth_error=${encodeURIComponent(error.message)}`);
+                                                                                                                                                                                                                                            }
+                                                                                                                                                                                                                                            });
+                                                                                                                                                                                                                                            
 app.post('/api/auth/google/callback', async (req, res) => {
   try {
     const { code } = req.body;
