@@ -84,6 +84,37 @@ function criarUsuarioDoToken(token) {
   };
 }
 
+function decodificarPayloadJwt(token) {
+  try {
+    const payload = token.split('.')[1];
+    const base64 = payload.replace(/-/g, '+').replace(/_/g, '/');
+    const json = decodeURIComponent(
+      atob(base64)
+        .split('')
+        .map((char) => `%${char.charCodeAt(0).toString(16).padStart(2, '0')}`)
+        .join('')
+    );
+
+    return JSON.parse(json);
+  } catch (error) {
+    console.error('Erro ao decodificar token:', error);
+    return null;
+  }
+}
+
+function criarUsuarioDoToken(token) {
+  const payload = decodificarPayloadJwt(token);
+
+  if (!payload) return null;
+
+  return {
+    id: payload.usuario_id,
+    email: payload.email,
+    nome: payload.nome || payload.email,
+    foto_url: payload.foto_url
+  };
+}
+
 // ============================================================================
 // LOGIN
 // ============================================================================
@@ -801,6 +832,10 @@ function App() {
     const tokenSalvo = localStorage.getItem('token');
     const usuarioSalvo = localStorage.getItem('usuario');
 
+    // Verificar se tem token salvo
+    const tokenSalvo = localStorage.getItem('token');
+    const usuarioSalvo = localStorage.getItem('usuario');
+
     if (tokenSalvo && usuarioSalvo) {
       setToken(tokenSalvo);
       setUsuario(JSON.parse(usuarioSalvo));
@@ -808,17 +843,21 @@ function App() {
       return;
     }
 
-// Verificar se tem token salvo
-const tokenSalvo = localStorage.getItem('token');
-const usuarioSalvo = localStorage.getItem('usuario');
-
-if (tokenSalvo && usuarioSalvo) {
-  setToken(tokenSalvo);
-  setUsuario(JSON.parse(usuarioSalvo));
-  setLogado(true);
-  return;
-}
+    // Compatibilidade com callbacks antigos que chegavam no frontend com code
     if (code) {
+      axios.post(`${API_URL}/auth/google/callback`, { code })
+        .then(response => {
+          localStorage.setItem('token', response.data.token);
+          localStorage.setItem('usuario', JSON.stringify(response.data.usuario));
+          setToken(response.data.token);
+          setUsuario(response.data.usuario);
+          setLogado(true);
+          window.history.replaceState({}, document.title, '/');
+        })
+        .catch(error => {
+          alert('Erro ao fazer login: ' + (error.response?.data?.erro || error.message));
+        });
+    }    if (code) {
       axios.post(`${API_URL}/auth/google/callback`, { code })
         .then(response => {
           localStorage.setItem('token', response.data.token);
