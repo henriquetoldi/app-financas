@@ -221,6 +221,37 @@ function parseValorNubank(valorStr) {
   );
 }
 
+const PLACEHOLDER_FOLDER_ID = 'seu_folder_id_aqui';
+
+function normalizarFolderId(folderId) {
+  if (!folderId || folderId.trim() === '' || folderId.trim() === PLACEHOLDER_FOLDER_ID) {
+    return null;
+  }
+
+  return folderId.trim();
+}
+
+function getDriveFinancasFolderId() {
+  return normalizarFolderId(
+    process.env.DRIVE_FINANCAS_FOLDER_ID ||
+    process.env.DRIVE_FINANÇAS_FOLDER_ID
+  );
+}
+
+function getDriveImportacoesFolderId() {
+  return normalizarFolderId(process.env.DRIVE_IMPORTACOES_FOLDER_ID) || getDriveFinancasFolderId();
+}
+
+function getDriveBackupsFolderId() {
+  return normalizarFolderId(process.env.DRIVE_BACKUPS_FOLDER_ID) || getDriveFinancasFolderId();
+}
+
+function criarErroDriveFinancasNaoConfigurado() {
+  return {
+    erro: 'Configure DRIVE_FINANCAS_FOLDER_ID no Railway com o ID da pasta principal de armazenamento financeiro do Google Drive.'
+  };
+}
+
 // ============================================================================
 // ROTAS: AUTENTICAÇÃO
 // ============================================================================
@@ -397,11 +428,15 @@ app.get('/api/drive/pastas', verificarToken, async (req, res) => {
 
     const drive = google.drive({ version: 'v3', auth: oauth2Client });
 
-    // Listar pastas em FINANÇAS_PESSOAIS
-    const finançasFolderId = process.env.DRIVE_FINANÇAS_FOLDER_ID;
+    // Listar pastas dentro da pasta de armazenamento configurada no Google Drive
+    const financasFolderId = getDriveFinancasFolderId();
+
+    if (!financasFolderId) {
+      return res.status(400).json(criarErroDriveFinancasNaoConfigurado());
+    }
 
     const res1 = await drive.files.list({
-      q: `'${finançasFolderId}' in parents and mimeType='application/vnd.google-apps.folder'`,
+      q: `'${financasFolderId}' in parents and mimeType='application/vnd.google-apps.folder'`,
       fields: 'files(id, name)',
       pageSize: 50,
     });
