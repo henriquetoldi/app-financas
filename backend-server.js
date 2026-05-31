@@ -13,8 +13,6 @@ const fs = require('fs');
 const crypto = require('crypto');
 const csv = require('csv-parser');
 const { Readable } = require('stream');
-const axios = require('axios');
-
 
 dotenv.config();
 
@@ -391,7 +389,124 @@ app.get('/api/drive/pastas', verificarToken, async (req, res) => {
     );
 
     if (!usuarioResult.rows[0]) {
-@@ -316,150 +510,150 @@ app.post('/api/importar/:arquivoId', verificarToken, async (req, res) => {
+      return res.status(404).json({ erro: 'Usuário não encontrado' });
+    }
+
+    const accessToken = Buffer.from(usuarioResult.rows[0].access_token, 'base64').toString();
+    oauth2Client.setCredentials({ access_token: accessToken });
+
+    const drive = google.drive({ version: 'v3', auth: oauth2Client });
+
+    // Listar pastas em FINANÇAS_PESSOAIS
+    const finançasFolderId = process.env.DRIVE_FINANÇAS_FOLDER_ID;
+
+    const res1 = await drive.files.list({
+      q: `'${finançasFolderId}' in parents and mimeType='application/vnd.google-apps.folder'`,
+      fields: 'files(id, name)',
+      pageSize: 50,
+    });
+
+    res.json({ pastas: res1.data.files });
+  } catch (error) {
+    console.error('Erro ao listar pastas:', error);
+    res.status(500).json({ erro: error.message });
+  }
+});
+
+app.get('/api/drive/arquivos/:pastaId', verificarToken, async (req, res) => {
+  try {
+    const usuarioResult = await pool.query(
+      'SELECT access_token FROM usuarios WHERE id = $1',
+      [req.usuario.usuario_id]
+    );
+
+    const accessToken = Buffer.from(usuarioResult.rows[0].access_token, 'base64').toString();
+    oauth2Client.setCredentials({ access_token: accessToken });
+
+    const drive = google.drive({ version: 'v3', auth: oauth2Client });
+
+    const res1 = await drive.files.list({
+      q: `'${req.params.pastaId}' in parents and mimeType='text/csv'`,
+      fields: 'files(id, name, modifiedTime)',
+      pageSize: 100,
+      orderBy: 'modifiedTime desc'
+    });
+
+    res.json({ arquivos: res1.data.files });
+  } catch (error) {
+    console.error('Erro ao listar arquivos:', error);
+    res.status(500).json({ erro: error.message });
+  }
+});
+
+// ============================================================================
+// ROTAS: IMPORTAÇÃO
+// ============================================================================
+
+app.post('/api/importar/:arquivoId', verificarToken, async (req, res) => {
+  try {
+    const { nomePasta } = req.body;
+
+    const usuarioResult = await pool.query(
+      'SELECT access_token FROM usuarios WHERE id = $1',
+      [req.usuario.usuario_id]
+    );
+
+    const accessToken = Buffer.from(usuarioResult.rows[0].access_token, 'base64').toString();
+    oauth2Client.setCredentials({ access_token: accessToken });
+
+    const drive = google.drive({ version: 'v3', auth: oauth2Client });
+
+    // Download do arquivo
+    const fileRes = await drive.files.get(
+      { fileId: req.params.arquivoId, alt: 'media' },
+      { responseType: 'stream' }
+    );
+
+    let conteudo = '';
+    fileRes.data.on('data', chunk => {
+      conteudo += chunk.toString('utf-8');
+    });
+
+    fileRes.data.on('end', async () => {
+      try {
+        // Parse CSV
+        const transacoes = [];
+        const linhas = conteudo.split('\n').filter(l => l.trim());
+
+        // Detectar tipo de conta (Corrente ou Cartão)
+        const eh_corrente = nomePasta.includes('CORRENTE') || nomePasta.includes('CONTA');
+
+        for (let i = 1; i < linhas.length; i++) {
+          const partes = linhas[i].split(',').map(p => p.trim());
+
+          if (partes.length < 3) continue;
+
+          const data = parseDataNubank(partes[0]);
+          if (!data) continue;
+
+          let descricao = partes[1];
+          let valor = 0;
+          let tipo = 'DEBITO';
+
+          if (eh_corrente) {
+            // Conta: [data, descricao, tipo, valor]
+            valor = parseValorNubank(partes[3] || partes[2]);
+            tipo = partes[2].includes('Crédito') || partes[3]?.includes('Crédito') ? 'CREDITO' : 'DEBITO';
+          } else {
+            // Cartão: [data, descricao, categoria, valor, saldo]
+            valor = parseValorNubank(partes[3] || partes[2]);
+            tipo = valor < 0 ? 'DEBITO' : 'CREDITO';
+            valor = Math.abs(valor);
+          }
+
+          if (!descricao || valor === 0) continue;
+
+          transacoes.push({
+            data,
+            descricao,
+            valor,
+            tipo,
             hash: gerarHashTransacao({ data, descricao, valor })
           });
         }
@@ -542,7 +657,29 @@ app.get('/api/contas', verificarToken, async (req, res) => {
 
 app.get('/api/categorias', verificarToken, async (req, res) => {
   try {
-@@ -489,30 +683,44 @@ app.get('/api/health', (req, res) => {
+    const result = await pool.query(
+      'SELECT * FROM categorias WHERE usuario_id = $1 OR usuario_id IS NULL ORDER BY nome',
+      [req.usuario.usuario_id]
+    );
+
+    res.json({ categorias: result.rows });
+  } catch (error) {
+    res.status(500).json({ erro: error.message });
+  }
+});
+
+// ============================================================================
+// HEALTH CHECK
+// ============================================================================
+
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date() });
+});
+
+// ============================================================================
+// INICIAR SERVER
+// ============================================================================
+
 // ===========================================================================
 // FRONTEND STATIC FILES
 // ===========================================================================
