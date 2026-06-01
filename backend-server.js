@@ -30,8 +30,21 @@ app.use(cors({
   ],
   credentials: true
 }));
-app.use(express.json());
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+const uploadLimit = process.env.UPLOAD_LIMIT || '50mb';
+
+app.use(express.json({ limit: uploadLimit }));
+app.use(express.urlencoded({ extended: true, limit: uploadLimit }));
+
+app.use((error, req, res, next) => {
+  if (error?.type === 'entity.too.large' || error?.status === 413) {
+    return res.status(413).json({
+      erro: 'Arquivo grande demais para o limite atual do servidor.',
+      detalhes: `O limite atual para envio é ${uploadLimit}. Divida a planilha em arquivos menores ou remova abas, fórmulas e imagens desnecessárias.`,
+    });
+  }
+
+  return next(error);
+});
 
 // ============================================================================
 // DATABASE
@@ -121,6 +134,7 @@ async function inicializarBanco() {
 
   await pool.query('CREATE INDEX IF NOT EXISTS idx_categorias_usuario ON categorias(usuario_id)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_categorias_ativa ON categorias(ativa)');
+  await pool.query("CREATE UNIQUE INDEX IF NOT EXISTS idx_categorias_padrao_nome_tipo_unique ON categorias(nome, tipo) WHERE usuario_id IS NULL");
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS transacoes (
@@ -146,6 +160,57 @@ async function inicializarBanco() {
   await pool.query('CREATE INDEX IF NOT EXISTS idx_transacoes_categoria ON transacoes(categoria_id)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_transacoes_data ON transacoes(data)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_transacoes_hash ON transacoes(hash_transacao)');
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS backups_drive (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      usuario_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+      conta_id UUID REFERENCES contas(id) ON DELETE SET NULL,
+      nome_arquivo VARCHAR(255) NOT NULL,
+      arquivo_hash VARCHAR(64) NOT NULL,
+      drive_file_id VARCHAR(255),
+      status VARCHAR(20) DEFAULT 'pendente',
+      mensagem_erro TEXT,
+      total_transacoes INT DEFAULT 0,
+      data_importacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      data_backup TIMESTAMP,
+      tentativas INT DEFAULT 0,
+      proxima_tentativa TIMESTAMP
+    )
+  `);
+
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_backups_drive_usuario ON backups_drive(usuario_id)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_backups_drive_status ON backups_drive(status)');
+  await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_backups_drive_usuario_hash ON backups_drive(usuario_id, arquivo_hash)');
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS notificacoes (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      usuario_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+      tipo VARCHAR(50) NOT NULL,
+      titulo VARCHAR(255) NOT NULL,
+      mensagem TEXT NOT NULL,
+      prioridade VARCHAR(20) DEFAULT 'normal',
+      lida BOOLEAN DEFAULT false,
+      metadata JSONB DEFAULT '{}'::jsonb,
+      criada_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_notificacoes_usuario ON notificacoes(usuario_id)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_notificacoes_lida ON notificacoes(lida)');
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS preferencias_notificacoes (
+      usuario_id UUID PRIMARY KEY REFERENCES usuarios(id) ON DELETE CASCADE,
+      email_backup_sucesso BOOLEAN DEFAULT false,
+      email_backup_erro BOOLEAN DEFAULT true,
+      app_backup_sucesso BOOLEAN DEFAULT true,
+      app_backup_erro BOOLEAN DEFAULT true,
+      frequencia_resumo VARCHAR(20) DEFAULT 'diaria',
+      atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
 
   await pool.query(`
     INSERT INTO categorias (nome, tipo, emoji, customizada)
@@ -177,8 +242,174 @@ const oauth2Client = new google.auth.OAuth2(
 // ============================================================================
 
 function gerarHashTransacao(tx) {
-  const str = `${tx.data}|${tx.descricao}|${tx.valor}`;
+  const data = tx.data instanceof Date ? tx.data.toISOString().slice(0, 10) : String(tx.data || '').slice(0, 10);
+  const descricao = String(tx.descricao || '').trim().toLowerCase();
+  const valor = Number(tx.valor || 0).toFixed(2);
+  const tipo = String(tx.tipo || '').trim().toUpperCase();
+  const str = `${data}|${descricao}|${valor}|${tipo}`;
   return crypto.createHash('sha256').update(str).digest('hex');
+}
+
+function gerarHashArquivo(nomeArquivo, transacoes = []) {
+  const payload = JSON.stringify({ nomeArquivo, transacoes });
+  return crypto.createHash('sha256').update(payload).digest('hex');
+}
+
+function normalizarTipoTransacao(tipo) {
+  const valor = String(tipo || '').trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  if (['CREDITO', 'CRÉDITO', 'RECEITA', 'ENTRADA'].includes(valor)) return 'CREDITO';
+  return 'DEBITO';
+}
+
+function normalizarDataImportacao(data) {
+  const d = new Date(data);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString().slice(0, 10);
+}
+
+function validarTransacoesImportacao(transacoes) {
+  if (!Array.isArray(transacoes) || transacoes.length === 0) {
+    throw new Error('Envie ao menos uma transação para importar.');
+  }
+
+  return transacoes.map((tx, index) => {
+    const linha = index + 2;
+    const data = normalizarDataImportacao(tx.data);
+    const descricao = String(tx.descricao || '').trim();
+    const categoria = String(tx.categoria || '').trim() || 'Outros';
+    const valor = Math.abs(Number(tx.valor));
+    const tipo = normalizarTipoTransacao(tx.tipo);
+
+    if (!data) throw new Error(`Linha ${linha}: data inválida.`);
+    if (!descricao) throw new Error(`Linha ${linha}: descrição obrigatória.`);
+    if (!Number.isFinite(valor) || valor <= 0) throw new Error(`Linha ${linha}: valor inválido.`);
+
+    return { data, descricao, categoria, valor, tipo };
+  });
+}
+
+async function criarNotificacao(usuarioId, tipo, { titulo, mensagem, prioridade = 'normal', metadata = {} }) {
+  const prefs = await pool.query(
+    'SELECT * FROM preferencias_notificacoes WHERE usuario_id = $1',
+    [usuarioId]
+  );
+  const preferencias = prefs.rows[0];
+  const chavePref = tipo === 'backup_sucesso' ? 'app_backup_sucesso' : 'app_backup_erro';
+
+  if (preferencias && preferencias[chavePref] === false) {
+    return null;
+  }
+
+  const result = await pool.query(
+    `INSERT INTO notificacoes (usuario_id, tipo, titulo, mensagem, prioridade, metadata)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     RETURNING *`,
+    [usuarioId, tipo, titulo, mensagem, prioridade, metadata]
+  );
+
+  return result.rows[0];
+}
+
+async function obterOAuthUsuario(usuarioId) {
+  const usuarioResult = await pool.query(
+    'SELECT access_token, refresh_token FROM usuarios WHERE id = $1',
+    [usuarioId]
+  );
+
+  if (usuarioResult.rows.length === 0) {
+    throw new Error('Usuário não encontrado para backup no Drive.');
+  }
+
+  const usuario = usuarioResult.rows[0];
+  const credentials = {};
+  if (usuario.access_token) credentials.access_token = Buffer.from(usuario.access_token, 'base64').toString();
+  if (usuario.refresh_token) credentials.refresh_token = Buffer.from(usuario.refresh_token, 'base64').toString();
+  oauth2Client.setCredentials(credentials);
+  return oauth2Client;
+}
+
+async function buscarOuCriarPastaDrive(drive, nome, parentId) {
+  const nomeSeguro = nome.replace(/'/g, "\\'");
+  const parentQuery = parentId ? ` and '${parentId}' in parents` : '';
+  const existente = await drive.files.list({
+    q: `name='${nomeSeguro}' and mimeType='application/vnd.google-apps.folder' and trashed=false${parentQuery}`,
+    fields: 'files(id, name)',
+    pageSize: 1,
+  });
+
+  if (existente.data.files?.length) return existente.data.files[0].id;
+
+  const response = await drive.files.create({
+    requestBody: {
+      name,
+      mimeType: 'application/vnd.google-apps.folder',
+      parents: parentId ? [parentId] : undefined,
+    },
+    fields: 'id',
+  });
+
+  return response.data.id;
+}
+
+async function backupParaDrive({ backupId, usuarioId, contaId, nomeArquivo, transacoes, arquivoBase64 }) {
+  try {
+    const auth = await obterOAuthUsuario(usuarioId);
+    const drive = google.drive({ version: 'v3', auth });
+    const contaResult = await pool.query('SELECT nome FROM contas WHERE id = $1', [contaId]);
+    const contaNome = contaResult.rows[0]?.nome || 'Conta';
+    const baseFolderId = getDriveBackupsFolderId();
+    const raizId = baseFolderId || await buscarOuCriarPastaDrive(drive, 'FINANÇAS', null);
+    const contaFolderId = await buscarOuCriarPastaDrive(drive, contaNome, raizId);
+    const dataReferencia = transacoes[0]?.data || new Date().toISOString().slice(0, 10);
+    const mesFolderId = await buscarOuCriarPastaDrive(drive, String(dataReferencia).slice(0, 7), contaFolderId);
+    const buffer = arquivoBase64
+      ? Buffer.from(arquivoBase64, 'base64')
+      : Buffer.from(JSON.stringify(transacoes, null, 2));
+
+    const upload = await drive.files.create({
+      requestBody: {
+        name: nomeArquivo || `importacao_${Date.now()}.xlsx`,
+        parents: [mesFolderId],
+      },
+      media: {
+        mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        body: Readable.from(buffer),
+      },
+      fields: 'id',
+    });
+
+    await pool.query(
+      `UPDATE backups_drive
+       SET status = 'sucesso', drive_file_id = $1, data_backup = NOW(), mensagem_erro = NULL, proxima_tentativa = NULL
+       WHERE id = $2`,
+      [upload.data.id, backupId]
+    );
+
+    await criarNotificacao(usuarioId, 'backup_sucesso', {
+      titulo: '✅ Backup Concluído',
+      mensagem: `${nomeArquivo} foi salvo no Google Drive.`,
+      prioridade: 'info',
+      metadata: { backupId, driveFileId: upload.data.id },
+    });
+  } catch (error) {
+    console.error('Erro no backup para Drive:', error);
+    const mensagemDrive = 'Não foi possível salvar o backup no Google Drive. A importação foi concluída, mas o backup será tentado novamente em segundo plano.';
+    const detalhesDrive = error.message || 'Erro desconhecido no Google Drive.';
+
+    await pool.query(
+      `UPDATE backups_drive
+       SET status = 'erro', mensagem_erro = $1, tentativas = tentativas + 1, proxima_tentativa = NOW() + INTERVAL '1 hour'
+       WHERE id = $2`,
+      [`${mensagemDrive} Detalhes: ${detalhesDrive}`, backupId]
+    );
+
+    await criarNotificacao(usuarioId, 'backup_erro', {
+      titulo: '❌ Erro no Backup',
+      mensagem: `${mensagemDrive} Detalhes: ${detalhesDrive}`,
+      prioridade: 'alta',
+      metadata: { backupId },
+    });
+  }
 }
 
 function parseDataNubank(dataStr) {
@@ -258,6 +489,7 @@ function criarErroDriveFinancasNaoConfigurado() {
 
 app.get('/api/auth/google/url', (req, res) => {
   const scopes = [
+    'https://www.googleapis.com/auth/drive.file',
     'https://www.googleapis.com/auth/drive.readonly',
     'https://www.googleapis.com/auth/userinfo.email',
     'https://www.googleapis.com/auth/userinfo.profile',
@@ -585,11 +817,202 @@ app.post('/api/importar/:arquivoId', verificarToken, async (req, res) => {
         });
       } catch (parseError) {
         console.error('Erro ao processar CSV:', parseError);
-        res.status(400).json({ erro: parseError.message });
+        res.status(400).json({
+          erro: 'Não foi possível importar o arquivo porque os dados estão inválidos.',
+          detalhes: parseError.message,
+        });
       }
     });
   } catch (error) {
     console.error('Erro ao importar:', error);
+    res.status(500).json({
+      erro: 'Não foi possível concluir a importação do arquivo.',
+      detalhes: error.message || 'Erro inesperado no servidor.',
+    });
+  }
+});
+
+app.post('/api/importar', verificarToken, async (req, res) => {
+  try {
+    const {
+      conta_id,
+      conta_nome,
+      banco = 'Importação Manual',
+      tipo_conta = 'CHECKING',
+      transacoes,
+      nome_arquivo = `importacao_${new Date().toISOString().slice(0, 10)}.xlsx`,
+      arquivo_base64,
+    } = req.body;
+
+    const transacoesValidadas = validarTransacoesImportacao(transacoes);
+    let contaId = conta_id;
+
+    if (contaId) {
+      const conta = await pool.query(
+        'SELECT id FROM contas WHERE id = $1 AND usuario_id = $2 AND ativo = true',
+        [contaId, req.usuario.usuario_id]
+      );
+
+      if (conta.rows.length === 0) {
+        return res.status(404).json({ erro: 'Conta não encontrada para este usuário.' });
+      }
+    } else {
+      const nomeConta = String(conta_nome || 'Importação XLSX').trim();
+      contaId = await buscarConta(req.usuario.usuario_id, nomeConta);
+      if (!contaId) {
+        const id = crypto.randomUUID();
+        await pool.query(
+          `INSERT INTO contas (id, usuario_id, nome, banco, tipo)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [id, req.usuario.usuario_id, nomeConta, banco, tipo_conta]
+        );
+        contaId = id;
+      }
+    }
+
+    let inseridas = 0;
+    let duplicadas = 0;
+
+    for (const tx of transacoesValidadas) {
+      const hash = gerarHashTransacao(tx);
+      const insert = await pool.query(
+        `INSERT INTO transacoes (conta_id, data, descricao, valor, tipo, hash_transacao, criado_em)
+         VALUES ($1, $2, $3, $4, $5, $6, NOW())
+         ON CONFLICT (hash_transacao) DO NOTHING
+         RETURNING id`,
+        [contaId, tx.data, tx.descricao, tx.valor, tx.tipo, hash]
+      );
+
+      if (insert.rows.length === 0) {
+        duplicadas++;
+      } else {
+        inseridas++;
+      }
+    }
+
+    const arquivoHash = gerarHashArquivo(nome_arquivo, transacoesValidadas);
+    const backup = await pool.query(
+      `INSERT INTO backups_drive (usuario_id, conta_id, nome_arquivo, arquivo_hash, status, total_transacoes)
+       VALUES ($1, $2, $3, $4, 'pendente', $5)
+       ON CONFLICT (usuario_id, arquivo_hash) DO UPDATE SET
+         conta_id = EXCLUDED.conta_id,
+         nome_arquivo = EXCLUDED.nome_arquivo,
+         total_transacoes = EXCLUDED.total_transacoes,
+         data_importacao = NOW(),
+         status = 'pendente',
+         mensagem_erro = NULL
+       RETURNING id`,
+      [req.usuario.usuario_id, contaId, nome_arquivo, arquivoHash, transacoesValidadas.length]
+    );
+
+    setImmediate(() => {
+      backupParaDrive({
+        backupId: backup.rows[0].id,
+        usuarioId: req.usuario.usuario_id,
+        contaId,
+        nomeArquivo: nome_arquivo,
+        transacoes: transacoesValidadas,
+        arquivoBase64: arquivo_base64,
+      });
+    });
+
+    res.json({
+      sucesso: true,
+      contaId,
+      inseridas,
+      duplicadas,
+      total: transacoesValidadas.length,
+      backupId: backup.rows[0].id,
+      mensagem: `✅ ${inseridas} transações importadas. Backup agendado em segundo plano.`,
+    });
+  } catch (error) {
+    console.error('Erro ao importar XLSX:', error);
+
+    if (error?.code) {
+      return res.status(500).json({
+        erro: 'Não foi possível salvar a importação no banco de dados.',
+        detalhes: error.detail || error.message || 'Erro interno do banco de dados.',
+      });
+    }
+
+    if (error?.message) {
+      return res.status(400).json({
+        erro: 'Não foi possível importar a planilha porque há dados inválidos.',
+        detalhes: error.message,
+      });
+    }
+
+    return res.status(500).json({
+      erro: 'Erro inesperado ao importar. Tente novamente ou contate o suporte.',
+    });
+  }
+});
+
+app.get('/api/notificacoes', verificarToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT * FROM notificacoes
+       WHERE usuario_id = $1
+       ORDER BY criada_em DESC
+       LIMIT 50`,
+      [req.usuario.usuario_id]
+    );
+    const naoLidas = result.rows.filter((notificacao) => !notificacao.lida).length;
+    res.json({ notificacoes: result.rows, naoLidas });
+  } catch (error) {
+    res.status(500).json({ erro: error.message });
+  }
+});
+
+app.patch('/api/notificacoes/:id/lida', verificarToken, async (req, res) => {
+  try {
+    await pool.query(
+      'UPDATE notificacoes SET lida = true WHERE id = $1 AND usuario_id = $2',
+      [req.params.id, req.usuario.usuario_id]
+    );
+    res.json({ sucesso: true });
+  } catch (error) {
+    res.status(500).json({ erro: error.message });
+  }
+});
+
+app.delete('/api/notificacoes/:id', verificarToken, async (req, res) => {
+  try {
+    await pool.query(
+      'DELETE FROM notificacoes WHERE id = $1 AND usuario_id = $2',
+      [req.params.id, req.usuario.usuario_id]
+    );
+    res.json({ sucesso: true });
+  } catch (error) {
+    res.status(500).json({ erro: error.message });
+  }
+});
+
+app.get('/api/admin/backups', verificarToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT b.*, c.nome AS conta_nome
+       FROM backups_drive b
+       LEFT JOIN contas c ON c.id = b.conta_id
+       WHERE b.usuario_id = $1
+       ORDER BY b.data_importacao DESC
+       LIMIT 100`,
+      [req.usuario.usuario_id]
+    );
+    const total = result.rows.length;
+    const sucessos = result.rows.filter((backup) => backup.status === 'sucesso').length;
+    const erros = result.rows.filter((backup) => backup.status === 'erro').length;
+    res.json({
+      backups: result.rows,
+      stats: {
+        total,
+        sucessos,
+        erros,
+        pendentes: result.rows.filter((backup) => backup.status === 'pendente').length,
+        taxaSucesso: total ? Math.round((sucessos / total) * 100) : 0,
+      },
+    });
+  } catch (error) {
     res.status(500).json({ erro: error.message });
   }
 });
@@ -693,11 +1116,15 @@ app.get('/api/contas', verificarToken, async (req, res) => {
 app.get('/api/categorias', verificarToken, async (req, res) => {
   try {
     const result = await pool.query(
-      'SELECT * FROM categorias WHERE usuario_id = $1 OR usuario_id IS NULL ORDER BY nome',
+      `SELECT DISTINCT ON (COALESCE(usuario_id::text, 'padrao'), nome, tipo) *
+       FROM categorias
+       WHERE (usuario_id = $1 OR usuario_id IS NULL) AND ativa = true
+       ORDER BY COALESCE(usuario_id::text, 'padrao'), nome, tipo, criado_em`,
       [req.usuario.usuario_id]
     );
 
-    res.json({ categorias: result.rows });
+    const categorias = result.rows.sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+    res.json({ categorias });
   } catch (error) {
     res.status(500).json({ erro: error.message });
   }
