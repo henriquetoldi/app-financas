@@ -53,7 +53,6 @@ function criarUsuarioDoToken(token) {
   };
 }
 
-
 function excelSerialParaData(serial) {
   const utcDays = Math.floor(Number(serial) - 25569);
   const utcValue = utcDays * 86400;
@@ -146,6 +145,7 @@ async function lerXlsxPadrao(file) {
   const sharedStrings = sharedStringsXml
     ? Array.from(parser.parseFromString(sharedStringsXml, 'application/xml').querySelectorAll('si')).map((si) => textoNoXml(si))
     : [];
+
   const sheetPath = resolverPrimeiraPlanilha(arquivos);
   const sheetXml = arquivos[sheetPath] || arquivos['xl/worksheets/sheet1.xml'];
   if (!sheetXml) throw new Error('Nenhuma planilha encontrada no XLSX.');
@@ -153,16 +153,20 @@ async function lerXlsxPadrao(file) {
   const sheet = parser.parseFromString(sheetXml, 'application/xml');
   const linhas = Array.from(sheet.querySelectorAll('sheetData row')).map((row) => {
     const valores = [];
+
     Array.from(row.querySelectorAll('c')).forEach((cell) => {
       const ref = cell.getAttribute('r') || '';
       const colLetters = ref.replace(/[0-9]/g, '');
       const colIndex = colLetters.split('').reduce((acc, char) => acc * 26 + char.charCodeAt(0) - 64, 0) - 1;
       const tipo = cell.getAttribute('t');
       let valor = textoNoXml(cell.querySelector('v'));
+
       if (tipo === 's') valor = sharedStrings[Number(valor)] || '';
       if (tipo === 'inlineStr') valor = textoNoXml(cell.querySelector('is'));
+
       valores[colIndex] = valor;
     });
+
     return valores;
   });
 
@@ -176,6 +180,7 @@ async function lerXlsxPadrao(file) {
     valor: cabecalho.indexOf('valor'),
     tipo: cabecalho.indexOf('tipo'),
   };
+
   const faltantes = Object.entries(indices)
     .filter(([, indice]) => indice === -1)
     .map(([coluna]) => coluna === 'descricao' ? 'Descrição' : coluna.charAt(0).toUpperCase() + coluna.slice(1));
@@ -184,13 +189,16 @@ async function lerXlsxPadrao(file) {
     throw new Error(`Colunas obrigatórias não encontradas: ${faltantes.join(', ')}.`);
   }
 
-  return linhas.slice(1).filter((linha) => linha.some((valor) => String(valor || '').trim())).map((linha) => ({
-    data: linha[indices.data],
-    descricao: linha[indices.descricao],
-    categoria: linha[indices.categoria],
-    valor: linha[indices.valor],
-    tipo: linha[indices.tipo],
-  }));
+  return linhas
+    .slice(1)
+    .filter((linha) => linha.some((valor) => String(valor || '').trim()))
+    .map((linha) => ({
+      data: linha[indices.data],
+      descricao: linha[indices.descricao],
+      categoria: linha[indices.categoria],
+      valor: linha[indices.valor],
+      tipo: linha[indices.tipo],
+    }));
 }
 
 function normalizarDataLinha(valor) {
@@ -202,8 +210,10 @@ function normalizarDataLinha(valor) {
   const texto = String(valor || '').trim();
   const br = texto.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
   if (br) return `${br[3]}-${br[2].padStart(2, '0')}-${br[1].padStart(2, '0')}`;
+
   const data = new Date(texto);
   if (Number.isNaN(data.getTime())) return null;
+
   return data.toISOString().slice(0, 10);
 }
 
@@ -282,19 +292,64 @@ function NotificacoesBell({ token }) {
 
   return (
     <div style={{ position: 'relative' }}>
-      <button onClick={() => setAberto(!aberto)} style={{ background: 'rgba(255,255,255,0.2)', color: 'white', border: '1px solid rgba(255,255,255,0.3)', padding: '8px 12px', borderRadius: '6px', cursor: 'pointer' }}>
+      <button
+        onClick={() => setAberto(!aberto)}
+        style={{
+          background: 'rgba(255,255,255,0.2)',
+          color: 'white',
+          border: '1px solid rgba(255,255,255,0.3)',
+          padding: '8px 12px',
+          borderRadius: '6px',
+          cursor: 'pointer'
+        }}
+      >
         🔔 {naoLidas > 0 && `(${naoLidas})`}
       </button>
+
       {aberto && (
-        <div style={{ position: 'absolute', right: 0, top: '45px', width: '340px', background: 'white', color: '#111827', borderRadius: '12px', boxShadow: '0 20px 50px rgba(0,0,0,0.25)', zIndex: 10, overflow: 'hidden' }}>
-          <div style={{ padding: '14px 16px', borderBottom: '1px solid #e5e7eb', fontWeight: 'bold' }}>🔔 Notificações</div>
-          {notificacoes.length === 0 ? <p style={{ padding: '16px', color: '#6b7280' }}>Nenhuma notificação.</p> : notificacoes.map((item) => (
-            <div key={item.id} style={{ padding: '14px 16px', borderBottom: '1px solid #f3f4f6' }}>
-              <strong>{item.titulo}</strong>
-              <p style={{ margin: '6px 0', color: '#4b5563', fontSize: '14px' }}>{item.mensagem}</p>
-              <button onClick={() => deletar(item.id)} style={{ background: '#fee2e2', color: '#991b1b', border: 'none', borderRadius: '6px', padding: '6px 8px', cursor: 'pointer' }}>Deletar</button>
-            </div>
-          ))}
+        <div
+          style={{
+            position: 'absolute',
+            right: 0,
+            top: '45px',
+            width: '340px',
+            background: 'white',
+            color: '#111827',
+            borderRadius: '12px',
+            boxShadow: '0 20px 50px rgba(0,0,0,0.25)',
+            zIndex: 10,
+            overflow: 'hidden'
+          }}
+        >
+          <div style={{ padding: '14px 16px', borderBottom: '1px solid #e5e7eb', fontWeight: 'bold' }}>
+            🔔 Notificações
+          </div>
+
+          {notificacoes.length === 0 ? (
+            <p style={{ padding: '16px', color: '#6b7280' }}>Nenhuma notificação.</p>
+          ) : (
+            notificacoes.map((item) => (
+              <div key={item.id} style={{ padding: '14px 16px', borderBottom: '1px solid #f3f4f6' }}>
+                <strong>{item.titulo}</strong>
+                <p style={{ margin: '6px 0', color: '#4b5563', fontSize: '14px' }}>
+                  {item.mensagem}
+                </p>
+                <button
+                  onClick={() => deletar(item.id)}
+                  style={{
+                    background: '#fee2e2',
+                    color: '#991b1b',
+                    border: 'none',
+                    borderRadius: '6px',
+                    padding: '6px 8px',
+                    cursor: 'pointer'
+                  }}
+                >
+                  Deletar
+                </button>
+              </div>
+            ))
+          )}
         </div>
       )}
     </div>
@@ -312,6 +367,7 @@ function ImportarExcel({ contas, token, onConcluida }) {
     setArquivo(file);
     setValidacao(null);
     setCarregando(true);
+
     try {
       const dados = await lerXlsxPadrao(file);
       setValidacao(validarExcelImportacao(dados));
@@ -324,7 +380,9 @@ function ImportarExcel({ contas, token, onConcluida }) {
 
   const importar = async () => {
     if (!validacao?.valido) return;
+
     setCarregando(true);
+
     try {
       const response = await axios.post(`${API_URL}/importar`, {
         conta_id: contaId || undefined,
@@ -332,7 +390,9 @@ function ImportarExcel({ contas, token, onConcluida }) {
         transacoes: validacao.transacoes,
         nome_arquivo: arquivo.name,
         arquivo_base64: await arquivoParaBase64(arquivo),
-      }, { headers: { Authorization: `Bearer ${token}` } });
+      }, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
 
       alert(`${response.data.mensagem}\n${response.data.duplicadas || 0} duplicadas ignoradas.`);
       onConcluida();
@@ -345,25 +405,92 @@ function ImportarExcel({ contas, token, onConcluida }) {
 
   return (
     <div>
-      <h2>📊 Importar Transações XLSX</h2>
-      <p style={{ color: '#6b7280' }}>Formato esperado: Data, Descrição, Categoria, Valor e Tipo.</p>
+      <h2>📊 Importar transações por planilha XLSX</h2>
 
-      <div style={{ margin: '18px 0' }}>
-        <label style={{ display: 'block', fontWeight: 'bold', marginBottom: '8px' }}>Conta de destino</label>
+      <div style={{ background: '#f8fafc', border: '1px solid #e5e7eb', borderRadius: '14px', padding: '16px', marginTop: '12px' }}>
+        <p style={{ color: '#374151', marginTop: 0 }}>
+          Use esta tela para trazer para o app as transações que você organizou em uma planilha Excel.
+          Antes de enviar, o sistema confere se os dados estão no formato esperado.
+        </p>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '12px' }}>
+          <div style={{ background: 'white', border: '1px solid #e5e7eb', borderRadius: '10px', padding: '12px' }}>
+            <strong>Colunas obrigatórias</strong>
+            <p style={{ color: '#6b7280', marginBottom: 0 }}>
+              Data, Descrição, Categoria, Valor e Tipo.
+            </p>
+          </div>
+
+          <div style={{ background: 'white', border: '1px solid #e5e7eb', borderRadius: '10px', padding: '12px' }}>
+            <strong>Exemplo de linha válida</strong>
+            <p style={{ color: '#6b7280', marginBottom: 0 }}>
+              2026-01-15 | Supermercado | Alimentação | 150,50 | Débito
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ margin: '18px 0', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '14px', padding: '16px' }}>
+        <label style={{ display: 'block', fontWeight: 'bold', marginBottom: '8px' }}>
+          Conta de destino
+        </label>
+
+        <p style={{ color: '#92400e', marginTop: 0 }}>
+          Conta de destino é a conta, cartão ou carteira onde essas movimentações serão registradas.
+          Todas as transações importadas deste arquivo serão vinculadas à conta escolhida abaixo.
+        </p>
+
         {contas.length > 0 && (
-          <select value={contaId} onChange={(event) => setContaId(event.target.value)} style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db', marginRight: '10px' }}>
-            {contas.map((conta) => <option key={conta.id} value={conta.id}>{conta.nome}</option>)}
+          <select
+            value={contaId}
+            onChange={(event) => setContaId(event.target.value)}
+            style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db', marginRight: '10px' }}
+          >
+            {contas.map((conta) => (
+              <option key={conta.id} value={conta.id}>{conta.nome}</option>
+            ))}
             <option value="">+ Criar nova conta</option>
           </select>
         )}
+
         {(!contaId || contas.length === 0) && (
-          <input value={novaConta} onChange={(event) => setNovaConta(event.target.value)} placeholder="Nome da nova conta" style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} />
+          <input
+            value={novaConta}
+            onChange={(event) => setNovaConta(event.target.value)}
+            placeholder="Nome da nova conta"
+            style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}
+          />
         )}
       </div>
 
-      <label style={{ display: 'block', border: '2px dashed #93c5fd', borderRadius: '14px', padding: '34px', textAlign: 'center', background: '#eff6ff', cursor: 'pointer' }}>
-        <input type="file" accept=".xlsx" onChange={(event) => event.target.files?.[0] && processarArquivo(event.target.files[0])} style={{ display: 'none' }} />
-        {arquivo ? `📄 ${arquivo.name}` : 'Clique para selecionar um arquivo .xlsx'}
+      <label
+        onDragOver={(event) => event.preventDefault()}
+        onDrop={(event) => {
+          event.preventDefault();
+          if (event.dataTransfer.files?.[0]) processarArquivo(event.dataTransfer.files[0]);
+        }}
+        style={{
+          display: 'block',
+          border: '2px dashed #93c5fd',
+          borderRadius: '14px',
+          padding: '34px',
+          textAlign: 'center',
+          background: '#eff6ff',
+          cursor: 'pointer'
+        }}
+      >
+        <input
+          type="file"
+          accept=".xlsx"
+          onChange={(event) => event.target.files?.[0] && processarArquivo(event.target.files[0])}
+          style={{ display: 'none' }}
+        />
+
+        <strong>{arquivo ? `📄 ${arquivo.name}` : 'Clique aqui ou arraste sua planilha .xlsx'}</strong>
+
+        <p style={{ color: '#2563eb', marginBottom: 0 }}>
+          Selecione o arquivo Excel no formato explicado acima.
+        </p>
       </label>
 
       {carregando && <p>Processando...</p>}
@@ -371,20 +498,47 @@ function ImportarExcel({ contas, token, onConcluida }) {
       {validacao?.erros?.length > 0 && (
         <div style={{ background: '#fef2f2', color: '#991b1b', borderRadius: '10px', padding: '14px', marginTop: '16px' }}>
           <strong>❌ Erros encontrados:</strong>
-          <ul>{validacao.erros.slice(0, 10).map((erro) => <li key={erro}>{erro}</li>)}</ul>
+          <ul>
+            {validacao.erros.slice(0, 10).map((erro) => (
+              <li key={erro}>{erro}</li>
+            ))}
+          </ul>
           {validacao.erros.length > 10 && <p>...e mais {validacao.erros.length - 10} erros.</p>}
         </div>
       )}
 
       {validacao?.valido && (
         <div style={{ background: '#ecfdf5', color: '#065f46', borderRadius: '10px', padding: '14px', marginTop: '16px' }}>
-          ✅ {validacao.transacoes.length} linhas validadas e prontas para importar.
+          ✅ {validacao.transacoes.length} linhas validadas e prontas para importar na conta selecionada.
         </div>
       )}
 
       <div style={{ marginTop: '18px', display: 'flex', gap: '10px' }}>
-        <button onClick={importar} disabled={!validacao?.valido || carregando} style={{ background: '#10b981', color: 'white', border: 'none', padding: '12px 18px', borderRadius: '8px', cursor: validacao?.valido ? 'pointer' : 'not-allowed', opacity: validacao?.valido ? 1 : 0.6 }}>IMPORTAR</button>
-        <button onClick={() => { setArquivo(null); setValidacao(null); }} style={{ background: '#e5e7eb', border: 'none', padding: '12px 18px', borderRadius: '8px', cursor: 'pointer' }}>LIMPAR</button>
+        <button
+          onClick={importar}
+          disabled={!validacao?.valido || carregando}
+          style={{
+            background: '#10b981',
+            color: 'white',
+            border: 'none',
+            padding: '12px 18px',
+            borderRadius: '8px',
+            cursor: validacao?.valido ? 'pointer' : 'not-allowed',
+            opacity: validacao?.valido ? 1 : 0.6
+          }}
+        >
+          Importar transações
+        </button>
+
+        <button
+          onClick={() => {
+            setArquivo(null);
+            setValidacao(null);
+          }}
+          style={{ background: '#e5e7eb', border: 'none', padding: '12px 18px', borderRadius: '8px', cursor: 'pointer' }}
+        >
+          LIMPAR
+        </button>
       </div>
     </div>
   );
@@ -402,11 +556,33 @@ function AdminBackups({ token }) {
   return (
     <div>
       <h2>📊 Painel de Backups</h2>
-      <p>Total: {dados.stats.total || 0} | Sucessos: {dados.stats.sucessos || 0} | Erros: {dados.stats.erros || 0} | Taxa: {dados.stats.taxaSucesso || 0}%</p>
+      <p>
+        Total: {dados.stats.total || 0} | Sucessos: {dados.stats.sucessos || 0} | Erros: {dados.stats.erros || 0} | Taxa: {dados.stats.taxaSucesso || 0}%
+      </p>
+
       <div style={{ overflowX: 'auto' }}>
         <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-          <thead><tr><th style={{ textAlign: 'left', padding: '10px' }}>Data</th><th style={{ textAlign: 'left', padding: '10px' }}>Arquivo</th><th style={{ textAlign: 'left', padding: '10px' }}>Status</th><th style={{ textAlign: 'left', padding: '10px' }}>Transações</th></tr></thead>
-          <tbody>{dados.backups.map((backup) => <tr key={backup.id} style={{ borderTop: '1px solid #e5e7eb' }}><td style={{ padding: '10px' }}>{formatarData(backup.data_importacao)}</td><td style={{ padding: '10px' }}>{backup.nome_arquivo}</td><td style={{ padding: '10px' }}>{backup.status === 'sucesso' ? '✅ Sucesso' : backup.status === 'erro' ? '❌ Erro' : '⏳ Pendente'}</td><td style={{ padding: '10px' }}>{backup.total_transacoes}</td></tr>)}</tbody>
+          <thead>
+            <tr>
+              <th style={{ textAlign: 'left', padding: '10px' }}>Data</th>
+              <th style={{ textAlign: 'left', padding: '10px' }}>Arquivo</th>
+              <th style={{ textAlign: 'left', padding: '10px' }}>Status</th>
+              <th style={{ textAlign: 'left', padding: '10px' }}>Transações</th>
+            </tr>
+          </thead>
+
+          <tbody>
+            {dados.backups.map((backup) => (
+              <tr key={backup.id} style={{ borderTop: '1px solid #e5e7eb' }}>
+                <td style={{ padding: '10px' }}>{formatarData(backup.data_importacao)}</td>
+                <td style={{ padding: '10px' }}>{backup.nome_arquivo}</td>
+                <td style={{ padding: '10px' }}>
+                  {backup.status === 'sucesso' ? '✅ Sucesso' : backup.status === 'erro' ? '❌ Erro' : '⏳ Pendente'}
+                </td>
+                <td style={{ padding: '10px' }}>{backup.total_transacoes}</td>
+              </tr>
+            ))}
+          </tbody>
         </table>
       </div>
     </div>
@@ -631,20 +807,22 @@ function Dashboard({ usuario, token, onLogout }) {
           >
             Backups
           </button>
+
           <NotificacoesBell token={token} />
-        <button
-          onClick={onLogout}
-          style={{
-            background: 'rgba(255,255,255,0.2)',
-            color: 'white',
-            border: '1px solid rgba(255,255,255,0.3)',
-            padding: '8px 16px',
-            borderRadius: '6px',
-            cursor: 'pointer'
-          }}
-        >
-          Sair
-        </button>
+
+          <button
+            onClick={onLogout}
+            style={{
+              background: 'rgba(255,255,255,0.2)',
+              color: 'white',
+              border: '1px solid rgba(255,255,255,0.3)',
+              padding: '8px 16px',
+              borderRadius: '6px',
+              cursor: 'pointer'
+            }}
+          >
+            Sair
+          </button>
         </div>
       </div>
 
@@ -792,6 +970,7 @@ function Dashboard({ usuario, token, onLogout }) {
             >
               ← Voltar
             </button>
+
             <AdminBackups token={token} />
           </div>
         )}
@@ -1077,7 +1256,6 @@ function App() {
       }
     }
 
-    // Verificar se tem token salvo
     const tokenSalvo = localStorage.getItem('token');
     const usuarioSalvo = localStorage.getItem('usuario');
 
@@ -1087,7 +1265,7 @@ function App() {
       setLogado(true);
       return;
     }
-    // Compatibilidade com callbacks antigos que chegavam no frontend com code
+
     if (code) {
       axios.post(`${API_URL}/auth/google/callback`, { code })
         .then(response => {
