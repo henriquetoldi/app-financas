@@ -53,66 +53,364 @@ function criarUsuarioDoToken(token) {
   };
 }
 
-function decodificarPayloadJwt(token) {
-  try {
-    const payload = token.split('.')[1];
-    const base64 = payload.replace(/-/g, '+').replace(/_/g, '/');
-    const json = decodeURIComponent(
-      atob(base64)
-        .split('')
-        .map((char) => `%${char.charCodeAt(0).toString(16).padStart(2, '0')}`)
-        .join('')
-    );
 
-    return JSON.parse(json);
-  } catch (error) {
-    console.error('Erro ao decodificar token:', error);
-    return null;
+function excelSerialParaData(serial) {
+  const utcDays = Math.floor(Number(serial) - 25569);
+  const utcValue = utcDays * 86400;
+  return new Date(utcValue * 1000).toISOString().slice(0, 10);
+}
+
+function normalizarTextoColuna(valor) {
+  return String(valor || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
+async function inflarDeflateRaw(bytes) {
+  if (!('DecompressionStream' in window)) {
+    throw new Error('Seu navegador não suporta leitura XLSX local. Atualize o navegador ou exporte em outro computador.');
   }
+
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
-function criarUsuarioDoToken(token) {
-  const payload = decodificarPayloadJwt(token);
+async function lerArquivoZipXlsx(arrayBuffer) {
+  const bytes = new Uint8Array(arrayBuffer);
+  const view = new DataView(arrayBuffer);
+  let eocdOffset = -1;
 
-  if (!payload) return null;
-
-  return {
-    id: payload.usuario_id,
-    email: payload.email,
-    nome: payload.nome || payload.email,
-    foto_url: payload.foto_url
-  };
-}
-
-function decodificarPayloadJwt(token) {
-  try {
-    const payload = token.split('.')[1];
-    const base64 = payload.replace(/-/g, '+').replace(/_/g, '/');
-    const json = decodeURIComponent(
-      atob(base64)
-        .split('')
-        .map((char) => `%${char.charCodeAt(0).toString(16).padStart(2, '0')}`)
-        .join('')
-    );
-
-    return JSON.parse(json);
-  } catch (error) {
-    console.error('Erro ao decodificar token:', error);
-    return null;
+  for (let i = bytes.length - 22; i >= 0; i--) {
+    if (view.getUint32(i, true) === 0x06054b50) {
+      eocdOffset = i;
+      break;
+    }
   }
+
+  if (eocdOffset === -1) throw new Error('Arquivo XLSX inválido.');
+
+  const totalEntradas = view.getUint16(eocdOffset + 10, true);
+  let centralOffset = view.getUint32(eocdOffset + 16, true);
+  const arquivos = {};
+  const decoder = new TextDecoder('utf-8');
+
+  for (let i = 0; i < totalEntradas; i++) {
+    if (view.getUint32(centralOffset, true) !== 0x02014b50) break;
+
+    const metodo = view.getUint16(centralOffset + 10, true);
+    const tamanhoComprimido = view.getUint32(centralOffset + 20, true);
+    const tamanhoNome = view.getUint16(centralOffset + 28, true);
+    const tamanhoExtra = view.getUint16(centralOffset + 30, true);
+    const tamanhoComentario = view.getUint16(centralOffset + 32, true);
+    const localOffset = view.getUint32(centralOffset + 42, true);
+    const nome = decoder.decode(bytes.slice(centralOffset + 46, centralOffset + 46 + tamanhoNome));
+
+    const localNome = view.getUint16(localOffset + 26, true);
+    const localExtra = view.getUint16(localOffset + 28, true);
+    const inicioDados = localOffset + 30 + localNome + localExtra;
+    const dadosComprimidos = bytes.slice(inicioDados, inicioDados + tamanhoComprimido);
+    const dados = metodo === 0 ? dadosComprimidos : await inflarDeflateRaw(dadosComprimidos);
+    arquivos[nome] = decoder.decode(dados);
+
+    centralOffset += 46 + tamanhoNome + tamanhoExtra + tamanhoComentario;
+  }
+
+  return arquivos;
 }
 
-function criarUsuarioDoToken(token) {
-  const payload = decodificarPayloadJwt(token);
+function textoNoXml(no) {
+  return no?.textContent || '';
+}
 
-  if (!payload) return null;
+function resolverPrimeiraPlanilha(arquivos) {
+  if (!arquivos['xl/workbook.xml'] || !arquivos['xl/_rels/workbook.xml.rels']) return 'xl/worksheets/sheet1.xml';
 
-  return {
-    id: payload.usuario_id,
-    email: payload.email,
-    nome: payload.nome || payload.email,
-    foto_url: payload.foto_url
+  const parser = new DOMParser();
+  const workbook = parser.parseFromString(arquivos['xl/workbook.xml'], 'application/xml');
+  const primeira = workbook.querySelector('sheet');
+  const relId = primeira?.getAttribute('r:id');
+  if (!relId) return 'xl/worksheets/sheet1.xml';
+
+  const rels = parser.parseFromString(arquivos['xl/_rels/workbook.xml.rels'], 'application/xml');
+  const rel = Array.from(rels.querySelectorAll('Relationship')).find((item) => item.getAttribute('Id') === relId);
+  const target = rel?.getAttribute('Target') || 'worksheets/sheet1.xml';
+  return `xl/${target.replace(/^\//, '')}`;
+}
+
+async function lerXlsxPadrao(file) {
+  const arquivos = await lerArquivoZipXlsx(await file.arrayBuffer());
+  const parser = new DOMParser();
+  const sharedStringsXml = arquivos['xl/sharedStrings.xml'];
+  const sharedStrings = sharedStringsXml
+    ? Array.from(parser.parseFromString(sharedStringsXml, 'application/xml').querySelectorAll('si')).map((si) => textoNoXml(si))
+    : [];
+  const sheetPath = resolverPrimeiraPlanilha(arquivos);
+  const sheetXml = arquivos[sheetPath] || arquivos['xl/worksheets/sheet1.xml'];
+  if (!sheetXml) throw new Error('Nenhuma planilha encontrada no XLSX.');
+
+  const sheet = parser.parseFromString(sheetXml, 'application/xml');
+  const linhas = Array.from(sheet.querySelectorAll('sheetData row')).map((row) => {
+    const valores = [];
+    Array.from(row.querySelectorAll('c')).forEach((cell) => {
+      const ref = cell.getAttribute('r') || '';
+      const colLetters = ref.replace(/[0-9]/g, '');
+      const colIndex = colLetters.split('').reduce((acc, char) => acc * 26 + char.charCodeAt(0) - 64, 0) - 1;
+      const tipo = cell.getAttribute('t');
+      let valor = textoNoXml(cell.querySelector('v'));
+      if (tipo === 's') valor = sharedStrings[Number(valor)] || '';
+      if (tipo === 'inlineStr') valor = textoNoXml(cell.querySelector('is'));
+      valores[colIndex] = valor;
+    });
+    return valores;
+  });
+
+  if (linhas.length < 2) throw new Error('A planilha precisa ter cabeçalho e ao menos uma linha de dados.');
+
+  const cabecalho = linhas[0].map(normalizarTextoColuna);
+  const indices = {
+    data: cabecalho.indexOf('data'),
+    descricao: cabecalho.indexOf('descricao'),
+    categoria: cabecalho.indexOf('categoria'),
+    valor: cabecalho.indexOf('valor'),
+    tipo: cabecalho.indexOf('tipo'),
   };
+  const faltantes = Object.entries(indices)
+    .filter(([, indice]) => indice === -1)
+    .map(([coluna]) => coluna === 'descricao' ? 'Descrição' : coluna.charAt(0).toUpperCase() + coluna.slice(1));
+
+  if (faltantes.length > 0) {
+    throw new Error(`Colunas obrigatórias não encontradas: ${faltantes.join(', ')}.`);
+  }
+
+  return linhas.slice(1).filter((linha) => linha.some((valor) => String(valor || '').trim())).map((linha) => ({
+    data: linha[indices.data],
+    descricao: linha[indices.descricao],
+    categoria: linha[indices.categoria],
+    valor: linha[indices.valor],
+    tipo: linha[indices.tipo],
+  }));
+}
+
+function normalizarDataLinha(valor) {
+  if (typeof valor === 'number' || /^\d+(\.\d+)?$/.test(String(valor || '').trim())) {
+    const numero = Number(valor);
+    if (numero > 20000 && numero < 80000) return excelSerialParaData(numero);
+  }
+
+  const texto = String(valor || '').trim();
+  const br = texto.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (br) return `${br[3]}-${br[2].padStart(2, '0')}-${br[1].padStart(2, '0')}`;
+  const data = new Date(texto);
+  if (Number.isNaN(data.getTime())) return null;
+  return data.toISOString().slice(0, 10);
+}
+
+function normalizarValorLinha(valor) {
+  if (typeof valor === 'number') return valor;
+  return Number(String(valor || '').replace(/R\$/g, '').replace(/\./g, '').replace(',', '.').trim());
+}
+
+function validarExcelImportacao(dados) {
+  const erros = [];
+  const transacoes = [];
+
+  dados.forEach((linha, index) => {
+    const numeroLinha = index + 2;
+    const data = normalizarDataLinha(linha.data);
+    const descricao = String(linha.descricao || '').trim();
+    const categoria = String(linha.categoria || '').trim() || 'Outros';
+    const valor = normalizarValorLinha(linha.valor);
+    const tipoTexto = normalizarTextoColuna(linha.tipo);
+
+    if (!data) erros.push(`Linha ${numeroLinha}: Data inválida.`);
+    if (!descricao) erros.push(`Linha ${numeroLinha}: Descrição obrigatória.`);
+    if (!Number.isFinite(valor) || valor <= 0) erros.push(`Linha ${numeroLinha}: Valor inválido.`);
+    if (!['debito', 'credito'].includes(tipoTexto)) erros.push(`Linha ${numeroLinha}: Tipo deve ser Débito ou Crédito.`);
+
+    if (data && descricao && Number.isFinite(valor) && valor > 0 && ['debito', 'credito'].includes(tipoTexto)) {
+      transacoes.push({
+        data,
+        descricao,
+        categoria,
+        valor: Math.abs(valor),
+        tipo: tipoTexto === 'credito' ? 'CREDITO' : 'DEBITO',
+      });
+    }
+  });
+
+  return { valido: erros.length === 0, erros, transacoes };
+}
+
+function arquivoParaBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(',')[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function NotificacoesBell({ token }) {
+  const [aberto, setAberto] = useState(false);
+  const [notificacoes, setNotificacoes] = useState([]);
+  const [naoLidas, setNaoLidas] = useState(0);
+
+  const authHeaders = { Authorization: `Bearer ${token}` };
+
+  const carregarNotificacoes = async () => {
+    try {
+      const response = await axios.get(`${API_URL}/notificacoes`, { headers: authHeaders });
+      setNotificacoes(response.data.notificacoes || []);
+      setNaoLidas(response.data.naoLidas || 0);
+    } catch (error) {
+      console.error('Erro ao carregar notificações:', error);
+    }
+  };
+
+  useEffect(() => {
+    carregarNotificacoes();
+    const interval = setInterval(carregarNotificacoes, 30000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const deletar = async (id) => {
+    await axios.delete(`${API_URL}/notificacoes/${id}`, { headers: authHeaders });
+    carregarNotificacoes();
+  };
+
+  return (
+    <div style={{ position: 'relative' }}>
+      <button onClick={() => setAberto(!aberto)} style={{ background: 'rgba(255,255,255,0.2)', color: 'white', border: '1px solid rgba(255,255,255,0.3)', padding: '8px 12px', borderRadius: '6px', cursor: 'pointer' }}>
+        🔔 {naoLidas > 0 && `(${naoLidas})`}
+      </button>
+      {aberto && (
+        <div style={{ position: 'absolute', right: 0, top: '45px', width: '340px', background: 'white', color: '#111827', borderRadius: '12px', boxShadow: '0 20px 50px rgba(0,0,0,0.25)', zIndex: 10, overflow: 'hidden' }}>
+          <div style={{ padding: '14px 16px', borderBottom: '1px solid #e5e7eb', fontWeight: 'bold' }}>🔔 Notificações</div>
+          {notificacoes.length === 0 ? <p style={{ padding: '16px', color: '#6b7280' }}>Nenhuma notificação.</p> : notificacoes.map((item) => (
+            <div key={item.id} style={{ padding: '14px 16px', borderBottom: '1px solid #f3f4f6' }}>
+              <strong>{item.titulo}</strong>
+              <p style={{ margin: '6px 0', color: '#4b5563', fontSize: '14px' }}>{item.mensagem}</p>
+              <button onClick={() => deletar(item.id)} style={{ background: '#fee2e2', color: '#991b1b', border: 'none', borderRadius: '6px', padding: '6px 8px', cursor: 'pointer' }}>Deletar</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ImportarExcel({ contas, token, onConcluida }) {
+  const [arquivo, setArquivo] = useState(null);
+  const [contaId, setContaId] = useState(contas[0]?.id || '');
+  const [novaConta, setNovaConta] = useState('Importação XLSX');
+  const [validacao, setValidacao] = useState(null);
+  const [carregando, setCarregando] = useState(false);
+
+  const processarArquivo = async (file) => {
+    setArquivo(file);
+    setValidacao(null);
+    setCarregando(true);
+    try {
+      const dados = await lerXlsxPadrao(file);
+      setValidacao(validarExcelImportacao(dados));
+    } catch (error) {
+      setValidacao({ valido: false, erros: [error.message], transacoes: [] });
+    } finally {
+      setCarregando(false);
+    }
+  };
+
+  const importar = async () => {
+    if (!validacao?.valido) return;
+    setCarregando(true);
+    try {
+      const response = await axios.post(`${API_URL}/importar`, {
+        conta_id: contaId || undefined,
+        conta_nome: contaId ? undefined : novaConta,
+        transacoes: validacao.transacoes,
+        nome_arquivo: arquivo.name,
+        arquivo_base64: await arquivoParaBase64(arquivo),
+      }, { headers: { Authorization: `Bearer ${token}` } });
+
+      alert(`${response.data.mensagem}\n${response.data.duplicadas || 0} duplicadas ignoradas.`);
+      onConcluida();
+    } catch (error) {
+      alert('Erro ao importar: ' + (error.response?.data?.erro || error.message));
+    } finally {
+      setCarregando(false);
+    }
+  };
+
+  return (
+    <div>
+      <h2>📊 Importar Transações XLSX</h2>
+      <p style={{ color: '#6b7280' }}>Formato esperado: Data, Descrição, Categoria, Valor e Tipo.</p>
+
+      <div style={{ margin: '18px 0' }}>
+        <label style={{ display: 'block', fontWeight: 'bold', marginBottom: '8px' }}>Conta de destino</label>
+        {contas.length > 0 && (
+          <select value={contaId} onChange={(event) => setContaId(event.target.value)} style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db', marginRight: '10px' }}>
+            {contas.map((conta) => <option key={conta.id} value={conta.id}>{conta.nome}</option>)}
+            <option value="">+ Criar nova conta</option>
+          </select>
+        )}
+        {(!contaId || contas.length === 0) && (
+          <input value={novaConta} onChange={(event) => setNovaConta(event.target.value)} placeholder="Nome da nova conta" style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} />
+        )}
+      </div>
+
+      <label style={{ display: 'block', border: '2px dashed #93c5fd', borderRadius: '14px', padding: '34px', textAlign: 'center', background: '#eff6ff', cursor: 'pointer' }}>
+        <input type="file" accept=".xlsx" onChange={(event) => event.target.files?.[0] && processarArquivo(event.target.files[0])} style={{ display: 'none' }} />
+        {arquivo ? `📄 ${arquivo.name}` : 'Clique para selecionar um arquivo .xlsx'}
+      </label>
+
+      {carregando && <p>Processando...</p>}
+
+      {validacao?.erros?.length > 0 && (
+        <div style={{ background: '#fef2f2', color: '#991b1b', borderRadius: '10px', padding: '14px', marginTop: '16px' }}>
+          <strong>❌ Erros encontrados:</strong>
+          <ul>{validacao.erros.slice(0, 10).map((erro) => <li key={erro}>{erro}</li>)}</ul>
+          {validacao.erros.length > 10 && <p>...e mais {validacao.erros.length - 10} erros.</p>}
+        </div>
+      )}
+
+      {validacao?.valido && (
+        <div style={{ background: '#ecfdf5', color: '#065f46', borderRadius: '10px', padding: '14px', marginTop: '16px' }}>
+          ✅ {validacao.transacoes.length} linhas validadas e prontas para importar.
+        </div>
+      )}
+
+      <div style={{ marginTop: '18px', display: 'flex', gap: '10px' }}>
+        <button onClick={importar} disabled={!validacao?.valido || carregando} style={{ background: '#10b981', color: 'white', border: 'none', padding: '12px 18px', borderRadius: '8px', cursor: validacao?.valido ? 'pointer' : 'not-allowed', opacity: validacao?.valido ? 1 : 0.6 }}>IMPORTAR</button>
+        <button onClick={() => { setArquivo(null); setValidacao(null); }} style={{ background: '#e5e7eb', border: 'none', padding: '12px 18px', borderRadius: '8px', cursor: 'pointer' }}>LIMPAR</button>
+      </div>
+    </div>
+  );
+}
+
+function AdminBackups({ token }) {
+  const [dados, setDados] = useState({ backups: [], stats: {} });
+
+  useEffect(() => {
+    axios.get(`${API_URL}/admin/backups`, { headers: { Authorization: `Bearer ${token}` } })
+      .then((response) => setDados(response.data))
+      .catch((error) => console.error('Erro ao carregar backups:', error));
+  }, []);
+
+  return (
+    <div>
+      <h2>📊 Painel de Backups</h2>
+      <p>Total: {dados.stats.total || 0} | Sucessos: {dados.stats.sucessos || 0} | Erros: {dados.stats.erros || 0} | Taxa: {dados.stats.taxaSucesso || 0}%</p>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <thead><tr><th style={{ textAlign: 'left', padding: '10px' }}>Data</th><th style={{ textAlign: 'left', padding: '10px' }}>Arquivo</th><th style={{ textAlign: 'left', padding: '10px' }}>Status</th><th style={{ textAlign: 'left', padding: '10px' }}>Transações</th></tr></thead>
+          <tbody>{dados.backups.map((backup) => <tr key={backup.id} style={{ borderTop: '1px solid #e5e7eb' }}><td style={{ padding: '10px' }}>{formatarData(backup.data_importacao)}</td><td style={{ padding: '10px' }}>{backup.nome_arquivo}</td><td style={{ padding: '10px' }}>{backup.status === 'sucesso' ? '✅ Sucesso' : backup.status === 'erro' ? '❌ Erro' : '⏳ Pendente'}</td><td style={{ padding: '10px' }}>{backup.total_transacoes}</td></tr>)}</tbody>
+        </table>
+      </div>
+    </div>
+  );
 }
 
 // ============================================================================
@@ -319,6 +617,21 @@ function Dashboard({ usuario, token, onLogout }) {
           </p>
         </div>
 
+        <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+          <button
+            onClick={() => setModo('backups')}
+            style={{
+              background: 'rgba(255,255,255,0.2)',
+              color: 'white',
+              border: '1px solid rgba(255,255,255,0.3)',
+              padding: '8px 12px',
+              borderRadius: '6px',
+              cursor: 'pointer'
+            }}
+          >
+            Backups
+          </button>
+          <NotificacoesBell token={token} />
         <button
           onClick={onLogout}
           style={{
@@ -332,6 +645,7 @@ function Dashboard({ usuario, token, onLogout }) {
         >
           Sair
         </button>
+        </div>
       </div>
 
       <div style={{ padding: '20px', maxWidth: '1200px', margin: '0 auto' }}>
@@ -346,11 +660,11 @@ function Dashboard({ usuario, token, onLogout }) {
               }}>
                 <h2>Nenhuma conta importada</h2>
                 <p style={{ color: '#666', marginBottom: '20px' }}>
-                  Clique abaixo para importar seus extratos do Google Drive.
+                  Clique abaixo para importar uma planilha XLSX padronizada.
                 </p>
 
                 <button
-                  onClick={carregarPastas}
+                  onClick={() => setModo('importar')}
                   style={{
                     background: '#667eea',
                     color: 'white',
@@ -361,7 +675,7 @@ function Dashboard({ usuario, token, onLogout }) {
                     cursor: 'pointer'
                   }}
                 >
-                  📁 Importar Extratos
+                  📊 Importar XLSX
                 </button>
               </div>
             ) : (
@@ -375,7 +689,7 @@ function Dashboard({ usuario, token, onLogout }) {
                   <h2>Suas Contas</h2>
 
                   <button
-                    onClick={carregarPastas}
+                    onClick={() => setModo('importar')}
                     style={{
                       background: '#667eea',
                       color: 'white',
@@ -385,7 +699,7 @@ function Dashboard({ usuario, token, onLogout }) {
                       cursor: 'pointer'
                     }}
                   >
-                    📁 Importar Mais
+                    📊 Importar XLSX
                   </button>
                 </div>
 
@@ -435,11 +749,7 @@ function Dashboard({ usuario, token, onLogout }) {
             padding: '30px'
           }}>
             <button
-              onClick={() => {
-                setModo('home');
-                setPastaSelecionada(null);
-                setArquivos([]);
-              }}
+              onClick={() => setModo('home')}
               style={{
                 background: '#e5e7eb',
                 border: 'none',
@@ -452,89 +762,37 @@ function Dashboard({ usuario, token, onLogout }) {
               ← Voltar
             </button>
 
-            <h2>Importar Extratos</h2>
+            <ImportarExcel
+              contas={contas}
+              token={token}
+              onConcluida={async () => {
+                await carregarContas();
+                setModo('home');
+              }}
+            />
+          </div>
+        )}
 
-            {carregando && <p>Carregando...</p>}
-
-            {!pastaSelecionada && (
-              <>
-                <h3>Escolha uma pasta</h3>
-
-                <div style={{ display: 'grid', gap: '10px' }}>
-                  {pastas.map(pasta => (
-                    <button
-                      key={pasta.id}
-                      onClick={() => carregarArquivos(pasta)}
-                      style={{
-                        background: '#f3f4f6',
-                        border: '1px solid #e5e7eb',
-                        padding: '12px',
-                        borderRadius: '8px',
-                        textAlign: 'left',
-                        cursor: 'pointer'
-                      }}
-                    >
-                      📁 {pasta.name}
-                    </button>
-                  ))}
-                </div>
-
-                {!carregando && pastas.length === 0 && (
-                  <p style={{ color: '#666' }}>
-                    Nenhuma pasta encontrada no Google Drive.
-                  </p>
-                )}
-              </>
-            )}
-
-            {pastaSelecionada && (
-              <>
-                <h3>Arquivos em: {pastaSelecionada.name}</h3>
-
-                <button
-                  onClick={() => {
-                    setPastaSelecionada(null);
-                    setArquivos([]);
-                  }}
-                  style={{
-                    background: '#e5e7eb',
-                    border: 'none',
-                    padding: '8px 12px',
-                    borderRadius: '6px',
-                    cursor: 'pointer',
-                    marginBottom: '15px'
-                  }}
-                >
-                  Escolher outra pasta
-                </button>
-
-                <div style={{ display: 'grid', gap: '10px' }}>
-                  {arquivos.map(arquivo => (
-                    <button
-                      key={arquivo.id}
-                      onClick={() => importarArquivo(arquivo)}
-                      disabled={carregando}
-                      style={{
-                        background: '#f3f4f6',
-                        border: '1px solid #e5e7eb',
-                        padding: '12px',
-                        borderRadius: '8px',
-                        textAlign: 'left',
-                        cursor: carregando ? 'not-allowed' : 'pointer'
-                      }}
-                    >
-                      📄 {arquivo.name}
-                    </button>
-                  ))}
-                </div>
-
-                {!carregando && arquivos.length === 0 && (
-                  <p style={{ color: '#666' }}>
-                    Nenhum arquivo CSV encontrado nesta pasta.
-                  </p>
-                )}
-              </>
-            )}
+        {modo === 'backups' && (
+          <div style={{
+            background: 'white',
+            borderRadius: '12px',
+            padding: '30px'
+          }}>
+            <button
+              onClick={() => setModo('home')}
+              style={{
+                background: '#e5e7eb',
+                border: 'none',
+                padding: '8px 12px',
+                borderRadius: '6px',
+                cursor: 'pointer',
+                marginBottom: '20px'
+              }}
+            >
+              ← Voltar
+            </button>
+            <AdminBackups token={token} />
           </div>
         )}
       </div>
@@ -829,35 +1087,8 @@ function App() {
       setLogado(true);
       return;
     }
-    const tokenSalvo = localStorage.getItem('token');
-    const usuarioSalvo = localStorage.getItem('usuario');
-
-    // Verificar se tem token salvo
-    const tokenSalvo = localStorage.getItem('token');
-    const usuarioSalvo = localStorage.getItem('usuario');
-
-    if (tokenSalvo && usuarioSalvo) {
-      setToken(tokenSalvo);
-      setUsuario(JSON.parse(usuarioSalvo));
-      setLogado(true);
-      return;
-    }
-
     // Compatibilidade com callbacks antigos que chegavam no frontend com code
     if (code) {
-      axios.post(`${API_URL}/auth/google/callback`, { code })
-        .then(response => {
-          localStorage.setItem('token', response.data.token);
-          localStorage.setItem('usuario', JSON.stringify(response.data.usuario));
-          setToken(response.data.token);
-          setUsuario(response.data.usuario);
-          setLogado(true);
-          window.history.replaceState({}, document.title, '/');
-        })
-        .catch(error => {
-          alert('Erro ao fazer login: ' + (error.response?.data?.erro || error.message));
-        });
-    }    if (code) {
       axios.post(`${API_URL}/auth/google/callback`, { code })
         .then(response => {
           localStorage.setItem('token', response.data.token);
