@@ -30,8 +30,21 @@ app.use(cors({
   ],
   credentials: true
 }));
-app.use(express.json());
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+const uploadLimit = process.env.UPLOAD_LIMIT || '50mb';
+
+app.use(express.json({ limit: uploadLimit }));
+app.use(express.urlencoded({ extended: true, limit: uploadLimit }));
+
+app.use((error, req, res, next) => {
+  if (error?.type === 'entity.too.large' || error?.status === 413) {
+    return res.status(413).json({
+      erro: 'Arquivo grande demais para o limite atual do servidor.',
+      detalhes: `O limite atual para envio é ${uploadLimit}. Divida a planilha em arquivos menores ou remova abas, fórmulas e imagens desnecessárias.`,
+    });
+  }
+
+  return next(error);
+});
 
 // ============================================================================
 // DATABASE
@@ -379,16 +392,19 @@ async function backupParaDrive({ backupId, usuarioId, contaId, nomeArquivo, tran
     });
   } catch (error) {
     console.error('Erro no backup para Drive:', error);
+    const mensagemDrive = 'Não foi possível salvar o backup no Google Drive. A importação foi concluída, mas o backup será tentado novamente em segundo plano.';
+    const detalhesDrive = error.message || 'Erro desconhecido no Google Drive.';
+
     await pool.query(
       `UPDATE backups_drive
        SET status = 'erro', mensagem_erro = $1, tentativas = tentativas + 1, proxima_tentativa = NOW() + INTERVAL '1 hour'
        WHERE id = $2`,
-      [error.message, backupId]
+      [`${mensagemDrive} Detalhes: ${detalhesDrive}`, backupId]
     );
 
     await criarNotificacao(usuarioId, 'backup_erro', {
       titulo: '❌ Erro no Backup',
-      mensagem: `Falha ao salvar no Google Drive: ${error.message}`,
+      mensagem: `${mensagemDrive} Detalhes: ${detalhesDrive}`,
       prioridade: 'alta',
       metadata: { backupId },
     });
@@ -800,11 +816,202 @@ app.post('/api/importar/:arquivoId', verificarToken, async (req, res) => {
         });
       } catch (parseError) {
         console.error('Erro ao processar CSV:', parseError);
-        res.status(400).json({ erro: parseError.message });
+        res.status(400).json({
+          erro: 'Não foi possível importar o arquivo porque os dados estão inválidos.',
+          detalhes: parseError.message,
+        });
       }
     });
   } catch (error) {
     console.error('Erro ao importar:', error);
+    res.status(500).json({
+      erro: 'Não foi possível concluir a importação do arquivo.',
+      detalhes: error.message || 'Erro inesperado no servidor.',
+    });
+  }
+});
+
+app.post('/api/importar', verificarToken, async (req, res) => {
+  try {
+    const {
+      conta_id,
+      conta_nome,
+      banco = 'Importação Manual',
+      tipo_conta = 'CHECKING',
+      transacoes,
+      nome_arquivo = `importacao_${new Date().toISOString().slice(0, 10)}.xlsx`,
+      arquivo_base64,
+    } = req.body;
+
+    const transacoesValidadas = validarTransacoesImportacao(transacoes);
+    let contaId = conta_id;
+
+    if (contaId) {
+      const conta = await pool.query(
+        'SELECT id FROM contas WHERE id = $1 AND usuario_id = $2 AND ativo = true',
+        [contaId, req.usuario.usuario_id]
+      );
+
+      if (conta.rows.length === 0) {
+        return res.status(404).json({ erro: 'Conta não encontrada para este usuário.' });
+      }
+    } else {
+      const nomeConta = String(conta_nome || 'Importação XLSX').trim();
+      contaId = await buscarConta(req.usuario.usuario_id, nomeConta);
+      if (!contaId) {
+        const id = crypto.randomUUID();
+        await pool.query(
+          `INSERT INTO contas (id, usuario_id, nome, banco, tipo)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [id, req.usuario.usuario_id, nomeConta, banco, tipo_conta]
+        );
+        contaId = id;
+      }
+    }
+
+    let inseridas = 0;
+    let duplicadas = 0;
+
+    for (const tx of transacoesValidadas) {
+      const hash = gerarHashTransacao(tx);
+      const insert = await pool.query(
+        `INSERT INTO transacoes (conta_id, data, descricao, valor, tipo, hash_transacao, criado_em)
+         VALUES ($1, $2, $3, $4, $5, $6, NOW())
+         ON CONFLICT (hash_transacao) DO NOTHING
+         RETURNING id`,
+        [contaId, tx.data, tx.descricao, tx.valor, tx.tipo, hash]
+      );
+
+      if (insert.rows.length === 0) {
+        duplicadas++;
+      } else {
+        inseridas++;
+      }
+    }
+
+    const arquivoHash = gerarHashArquivo(nome_arquivo, transacoesValidadas);
+    const backup = await pool.query(
+      `INSERT INTO backups_drive (usuario_id, conta_id, nome_arquivo, arquivo_hash, status, total_transacoes)
+       VALUES ($1, $2, $3, $4, 'pendente', $5)
+       ON CONFLICT (usuario_id, arquivo_hash) DO UPDATE SET
+         conta_id = EXCLUDED.conta_id,
+         nome_arquivo = EXCLUDED.nome_arquivo,
+         total_transacoes = EXCLUDED.total_transacoes,
+         data_importacao = NOW(),
+         status = 'pendente',
+         mensagem_erro = NULL
+       RETURNING id`,
+      [req.usuario.usuario_id, contaId, nome_arquivo, arquivoHash, transacoesValidadas.length]
+    );
+
+    setImmediate(() => {
+      backupParaDrive({
+        backupId: backup.rows[0].id,
+        usuarioId: req.usuario.usuario_id,
+        contaId,
+        nomeArquivo: nome_arquivo,
+        transacoes: transacoesValidadas,
+        arquivoBase64: arquivo_base64,
+      });
+    });
+
+    res.json({
+      sucesso: true,
+      contaId,
+      inseridas,
+      duplicadas,
+      total: transacoesValidadas.length,
+      backupId: backup.rows[0].id,
+      mensagem: `✅ ${inseridas} transações importadas. Backup agendado em segundo plano.`,
+    });
+  } catch (error) {
+    console.error('Erro ao importar XLSX:', error);
+
+    if (error?.code) {
+      return res.status(500).json({
+        erro: 'Não foi possível salvar a importação no banco de dados.',
+        detalhes: error.detail || error.message || 'Erro interno do banco de dados.',
+      });
+    }
+
+    if (error?.message) {
+      return res.status(400).json({
+        erro: 'Não foi possível importar a planilha porque há dados inválidos.',
+        detalhes: error.message,
+      });
+    }
+
+    return res.status(500).json({
+      erro: 'Erro inesperado ao importar. Tente novamente ou contate o suporte.',
+    });
+  }
+});
+
+app.get('/api/notificacoes', verificarToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT * FROM notificacoes
+       WHERE usuario_id = $1
+       ORDER BY criada_em DESC
+       LIMIT 50`,
+      [req.usuario.usuario_id]
+    );
+    const naoLidas = result.rows.filter((notificacao) => !notificacao.lida).length;
+    res.json({ notificacoes: result.rows, naoLidas });
+  } catch (error) {
+    res.status(500).json({ erro: error.message });
+  }
+});
+
+app.patch('/api/notificacoes/:id/lida', verificarToken, async (req, res) => {
+  try {
+    await pool.query(
+      'UPDATE notificacoes SET lida = true WHERE id = $1 AND usuario_id = $2',
+      [req.params.id, req.usuario.usuario_id]
+    );
+    res.json({ sucesso: true });
+  } catch (error) {
+    res.status(500).json({ erro: error.message });
+  }
+});
+
+app.delete('/api/notificacoes/:id', verificarToken, async (req, res) => {
+  try {
+    await pool.query(
+      'DELETE FROM notificacoes WHERE id = $1 AND usuario_id = $2',
+      [req.params.id, req.usuario.usuario_id]
+    );
+    res.json({ sucesso: true });
+  } catch (error) {
+    res.status(500).json({ erro: error.message });
+  }
+});
+
+app.get('/api/admin/backups', verificarToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT b.*, c.nome AS conta_nome
+       FROM backups_drive b
+       LEFT JOIN contas c ON c.id = b.conta_id
+       WHERE b.usuario_id = $1
+       ORDER BY b.data_importacao DESC
+       LIMIT 100`,
+      [req.usuario.usuario_id]
+    );
+    const total = result.rows.length;
+    const sucessos = result.rows.filter((backup) => backup.status === 'sucesso').length;
+    const erros = result.rows.filter((backup) => backup.status === 'erro').length;
+    res.json({
+      backups: result.rows,
+      stats: {
+        total,
+        sucessos,
+        erros,
+        pendentes: result.rows.filter((backup) => backup.status === 'pendente').length,
+        taxaSucesso: total ? Math.round((sucessos / total) * 100) : 0,
+      },
+    });
+  } catch (error) {
     res.status(500).json({ erro: error.message });
   }
 });
