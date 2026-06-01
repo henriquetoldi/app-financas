@@ -176,6 +176,51 @@ CREATE INDEX idx_importacoes_conta ON importacoes(conta_id);
 CREATE INDEX idx_importacoes_status ON importacoes(status);
 CREATE INDEX idx_importacoes_data ON importacoes(criado_em);
 
+CREATE TABLE backups_drive (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  usuario_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+  conta_id UUID REFERENCES contas(id) ON DELETE SET NULL,
+  nome_arquivo VARCHAR(255) NOT NULL,
+  arquivo_hash VARCHAR(64) NOT NULL,
+  drive_file_id VARCHAR(255),
+  status VARCHAR(20) DEFAULT 'pendente',
+  mensagem_erro TEXT,
+  total_transacoes INT DEFAULT 0,
+  data_importacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  data_backup TIMESTAMP,
+  tentativas INT DEFAULT 0,
+  proxima_tentativa TIMESTAMP
+);
+
+CREATE INDEX idx_backups_drive_usuario ON backups_drive(usuario_id);
+CREATE INDEX idx_backups_drive_status ON backups_drive(status);
+CREATE UNIQUE INDEX idx_backups_drive_usuario_hash ON backups_drive(usuario_id, arquivo_hash);
+
+CREATE TABLE notificacoes (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  usuario_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+  tipo VARCHAR(50) NOT NULL,
+  titulo VARCHAR(255) NOT NULL,
+  mensagem TEXT NOT NULL,
+  prioridade VARCHAR(20) DEFAULT 'normal',
+  lida BOOLEAN DEFAULT false,
+  metadata JSONB DEFAULT '{}'::jsonb,
+  criada_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_notificacoes_usuario ON notificacoes(usuario_id);
+CREATE INDEX idx_notificacoes_lida ON notificacoes(lida);
+
+CREATE TABLE preferencias_notificacoes (
+  usuario_id UUID PRIMARY KEY REFERENCES usuarios(id) ON DELETE CASCADE,
+  email_backup_sucesso BOOLEAN DEFAULT false,
+  email_backup_erro BOOLEAN DEFAULT true,
+  app_backup_sucesso BOOLEAN DEFAULT true,
+  app_backup_erro BOOLEAN DEFAULT true,
+  frequencia_resumo VARCHAR(20) DEFAULT 'diaria',
+  atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- ============================================================================
 -- 6. TABELAS DE MAPEAMENTO AUTOMÁTICO
 -- ============================================================================
