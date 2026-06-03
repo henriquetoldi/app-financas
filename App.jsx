@@ -1074,6 +1074,23 @@ function TelaTransacoes({ conta, token, onVoltar }) {
     }
   };
 
+  const alternarSelecionada = (id) => {
+    setSelecionadas((atuais) => atuais.includes(id)
+      ? atuais.filter((item) => item !== id)
+      : [...atuais, id]);
+  };
+
+  const alternarTodasFiltradas = () => {
+    setSelecionadas((atuais) => {
+      if (todasFiltradasSelecionadas) return atuais.filter((id) => !idsFiltrados.includes(id));
+      return Array.from(new Set([...atuais, ...idsFiltrados]));
+    });
+  };
+
+  const limparFiltros = () => {
+    setFiltros({ busca: '', categoria: 'todas', status: 'todas', tipo: 'todos' });
+  };
+
   return (
     <div style={{ minHeight: '100vh', background: '#f5f5f5' }}>
       <div style={{ background: '#1f2937', color: 'white', padding: '20px' }}>
