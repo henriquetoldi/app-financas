@@ -1432,6 +1432,74 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
     }
   };
 
+  const alternarSelecionada = (id) => {
+    setSelecionadas((atuais) => atuais.includes(id)
+      ? atuais.filter((item) => item !== id)
+      : [...atuais, id]);
+  };
+
+  const alternarTodasFiltradas = () => {
+    setSelecionadas((atuais) => {
+      if (todasFiltradasSelecionadas) return atuais.filter((id) => !idsFiltrados.includes(id));
+      return Array.from(new Set([...atuais, ...idsFiltrados]));
+    });
+  };
+
+  const limparFiltros = () => {
+    setFiltros({ busca: '', categoria: 'todas', status: 'todas', tipo: 'todos' });
+    setDataInicial('');
+    setDataFinal('');
+  };
+
+  const abrirModalExclusao = (tx) => {
+    setTransacaoParaExcluir(tx);
+    setModalExclusaoAberto(true);
+  };
+
+  const fecharModalExclusao = () => {
+    if (excluindoTransacao) return;
+    setModalExclusaoAberto(false);
+    setTransacaoParaExcluir(null);
+  };
+
+  const handleExcluirTransacao = async () => {
+    if (!transacaoParaExcluir) return;
+
+    try {
+      setExcluindoTransacao(true);
+
+      await axios.delete(`${API_URL}/transacoes/${transacaoParaExcluir.id}`, {
+        headers: authHeaders,
+      });
+
+      setTransacoes((atuais) => atuais.filter((tx) => tx.id !== transacaoParaExcluir.id));
+      setSelecionadas((atuais) => atuais.filter((id) => id !== transacaoParaExcluir.id));
+      setModalExclusaoAberto(false);
+      setTransacaoParaExcluir(null);
+    } catch (error) {
+      alert('Erro ao excluir transação: ' + (error.response?.data?.erro || error.message));
+    } finally {
+      setExcluindoTransacao(false);
+    }
+  };
+
+  const alternarSelecionada = (id) => {
+    setSelecionadas((atuais) => atuais.includes(id)
+      ? atuais.filter((item) => item !== id)
+      : [...atuais, id]);
+  };
+
+  const alternarTodasFiltradas = () => {
+    setSelecionadas((atuais) => {
+      if (todasFiltradasSelecionadas) return atuais.filter((id) => !idsFiltrados.includes(id));
+      return Array.from(new Set([...atuais, ...idsFiltrados]));
+    });
+  };
+
+  const limparFiltros = () => {
+    setFiltros({ busca: '', categoria: 'todas', status: 'todas', tipo: 'todos' });
+  };
+
   return (
     <div style={{ minHeight: '100vh', background: '#f5f5f5' }}>
       <div style={{ background: '#1f2937', color: 'white', padding: '20px' }}>
