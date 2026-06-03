@@ -81,6 +81,10 @@ CREATE TABLE transacoes (
   
   -- Categorização
   categoria_id UUID REFERENCES categorias(id) ON DELETE SET NULL,
+  categoria_origem VARCHAR(20),
+  regra_categorizacao_id UUID,
+  eh_transferencia_interna BOOLEAN DEFAULT false,
+  transferencia_grupo_id UUID,
   subcategoria VARCHAR(255),
   
   -- Metadados
@@ -100,6 +104,8 @@ CREATE TABLE transacoes (
 
 CREATE INDEX idx_transacoes_conta ON transacoes(conta_id);
 CREATE INDEX idx_transacoes_categoria ON transacoes(categoria_id);
+CREATE INDEX idx_transacoes_categoria_origem ON transacoes(categoria_origem);
+CREATE INDEX idx_transacoes_transferencia_interna ON transacoes(eh_transferencia_interna, transferencia_grupo_id);
 CREATE INDEX idx_transacoes_data ON transacoes(data);
 CREATE INDEX idx_transacoes_tipo ON transacoes(tipo);
 CREATE INDEX idx_transacoes_hash ON transacoes(hash_transacao);
@@ -137,6 +143,33 @@ CREATE TABLE categorias (
 CREATE INDEX idx_categorias_usuario ON categorias(usuario_id);
 CREATE INDEX idx_categorias_pai ON categorias(categoria_pai_id);
 CREATE INDEX idx_categorias_ativa ON categorias(ativa);
+CREATE UNIQUE INDEX idx_categorias_padrao_nome_tipo_unique
+  ON categorias(nome, tipo)
+  WHERE usuario_id IS NULL;
+
+CREATE TABLE regras_categorizacao (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  usuario_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+  categoria_id UUID NOT NULL REFERENCES categorias(id) ON DELETE CASCADE,
+  termo TEXT NOT NULL,
+  termo_normalizado TEXT NOT NULL,
+  tipo_match VARCHAR(20) DEFAULT 'CONTAINS',
+  prioridade INT DEFAULT 0,
+  ativo BOOLEAN DEFAULT true,
+  criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+ALTER TABLE transacoes
+  ADD CONSTRAINT fk_transacoes_regra_categorizacao
+  FOREIGN KEY (regra_categorizacao_id)
+  REFERENCES regras_categorizacao(id)
+  ON DELETE SET NULL;
+
+CREATE INDEX idx_regras_categorizacao_usuario ON regras_categorizacao(usuario_id, ativo);
+CREATE INDEX idx_regras_categorizacao_termo ON regras_categorizacao(termo_normalizado);
+CREATE UNIQUE INDEX idx_regras_categorizacao_unique
+  ON regras_categorizacao(usuario_id, categoria_id, termo_normalizado, tipo_match);
 
 -- ============================================================================
 -- 5. TABELAS DE IMPORTAÇÃO

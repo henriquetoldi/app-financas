@@ -2,7 +2,7 @@
 // FRONTEND: React App
 // ============================================================================
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import axios from 'axios';
 
 const API_URL = import.meta.env.VITE_API_URL || '/api';
@@ -20,6 +20,45 @@ function formatarMoeda(valor) {
     style: 'currency',
     currency: 'BRL'
   }).format(Number(valor || 0));
+}
+
+function formatarPercentual(valor) {
+  return `${Number(valor || 0).toFixed(1).replace('.', ',')}%`;
+}
+
+function dataLocalISO(data) {
+  const ano = data.getFullYear();
+  const mes = String(data.getMonth() + 1).padStart(2, '0');
+  const dia = String(data.getDate()).padStart(2, '0');
+  return `${ano}-${mes}-${dia}`;
+}
+
+function calcularPeriodoRapido(tipo) {
+  const hoje = new Date();
+  const inicio = new Date(hoje);
+  const fim = new Date(hoje);
+
+  if (tipo === 'hoje') return { dataInicial: dataLocalISO(hoje), dataFinal: dataLocalISO(hoje) };
+  if (tipo === '7dias') {
+    inicio.setDate(hoje.getDate() - 6);
+    return { dataInicial: dataLocalISO(inicio), dataFinal: dataLocalISO(fim) };
+  }
+  if (tipo === '30dias') {
+    inicio.setDate(hoje.getDate() - 29);
+    return { dataInicial: dataLocalISO(inicio), dataFinal: dataLocalISO(fim) };
+  }
+  if (tipo === 'mesPassado') {
+    inicio.setMonth(hoje.getMonth() - 1, 1);
+    fim.setMonth(hoje.getMonth(), 0);
+    return { dataInicial: dataLocalISO(inicio), dataFinal: dataLocalISO(fim) };
+  }
+  if (tipo === 'ano') {
+    inicio.setMonth(0, 1);
+    return { dataInicial: dataLocalISO(inicio), dataFinal: dataLocalISO(fim) };
+  }
+
+  inicio.setDate(1);
+  return { dataInicial: dataLocalISO(inicio), dataFinal: dataLocalISO(fim) };
 }
 
 function decodificarPayloadJwt(token) {
@@ -60,6 +99,35 @@ function montarMensagemErroImportacao(error) {
   }
 
   return 'Erro inesperado ao importar. Tente novamente ou contate o suporte.';
+}
+
+
+function normalizarDescricaoCategorizacao(texto) {
+  return String(texto || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase()
+    .replace(/\b\d{2}\.?\d{3}\.?\d{3}\/\d{4}-?\d{2}\b/g, ' ')
+    .replace(/\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b/g, ' ')
+    .replace(/[^A-Z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function sugerirTermoRegra(descricao) {
+  const partes = String(descricao || '')
+    .split(/\s+-\s+|\s+–\s+|\s+—\s+/)
+    .map((parte) => normalizarDescricaoCategorizacao(parte))
+    .filter(Boolean)
+    .filter((parte) => !/^\d+$/.test(parte))
+    .filter((parte) => !/^(TRANSFERENCIA|ENVIADA|RECEBIDA|PIX|PAGAMENTO|COMPRA|DEBITO|CREDITO)\b/.test(parte));
+
+  return partes.find((parte) => /[A-Z]/.test(parte) && parte.length >= 3) || normalizarDescricaoCategorizacao(descricao);
+}
+
+function normalizarDataFiltro(data) {
+  if (!data) return '';
+  return String(data).slice(0, 10);
 }
 
 function criarUsuarioDoToken(token) {
@@ -539,6 +607,73 @@ function Login() {
   );
 }
 
+
+function KpiCard({ titulo, valor, detalhe, cor = '#2563eb', fundo = 'white' }) {
+  return (
+    <div style={{ background: fundo, borderRadius: '14px', padding: '18px', boxShadow: '0 2px 10px rgba(15,23,42,0.08)', border: '1px solid #eef2f7' }}>
+      <p style={{ margin: '0 0 8px', color: '#64748b', fontSize: '13px', fontWeight: 600 }}>{titulo}</p>
+      <p style={{ margin: 0, color: cor, fontSize: '24px', fontWeight: 800 }}>{valor}</p>
+      {detalhe && <p style={{ margin: '8px 0 0', color: '#94a3b8', fontSize: '12px' }}>{detalhe}</p>}
+    </div>
+  );
+}
+
+function BarrasMovimentacao({ dados }) {
+  const maximo = Math.max(1, ...dados.map((item) => Math.max(Number(item.receitas || 0), Number(item.despesas || 0))));
+  const visiveis = dados.slice(-12);
+
+  if (visiveis.length === 0) {
+    return <p style={{ color: '#94a3b8', margin: 0 }}>Sem movimentações no período selecionado.</p>;
+  }
+
+  return (
+    <div style={{ display: 'flex', gap: '10px', alignItems: 'end', minHeight: '220px', overflowX: 'auto', paddingTop: '10px' }}>
+      {visiveis.map((item) => (
+        <div key={item.periodo} style={{ minWidth: '56px', flex: 1, display: 'grid', gap: '6px', alignItems: 'end' }}>
+          <div style={{ display: 'flex', gap: '4px', alignItems: 'end', justifyContent: 'center', height: '150px' }}>
+            <div title={`Receitas: ${formatarMoeda(item.receitas)}`} style={{ width: '18px', height: `${Math.max(4, (Number(item.receitas || 0) / maximo) * 140)}px`, background: '#10b981', borderRadius: '5px 5px 0 0' }} />
+            <div title={`Despesas: ${formatarMoeda(item.despesas)}`} style={{ width: '18px', height: `${Math.max(4, (Number(item.despesas || 0) / maximo) * 140)}px`, background: '#ef4444', borderRadius: '5px 5px 0 0' }} />
+          </div>
+          <span style={{ color: '#64748b', fontSize: '11px', textAlign: 'center' }}>{item.periodo.slice(5)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function BarrasHorizontais({ dados, rotulo, valorChave = 'valor', nomeChave = 'categoriaNome', cor = '#667eea' }) {
+  const maximo = Math.max(1, ...dados.map((item) => Number(item[valorChave] || 0)));
+
+  if (dados.length === 0) {
+    return <p style={{ color: '#94a3b8', margin: 0 }}>Sem dados para exibir neste período.</p>;
+  }
+
+  return (
+    <div style={{ display: 'grid', gap: '12px' }}>
+      {dados.map((item) => (
+        <div key={item[nomeChave]}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', marginBottom: '5px', fontSize: '13px' }}>
+            <strong style={{ color: '#334155' }}>{item[nomeChave]}</strong>
+            <span style={{ color: '#64748b' }}>{rotulo ? rotulo(item) : formatarMoeda(item[valorChave])}</span>
+          </div>
+          <div style={{ height: '10px', background: '#e5e7eb', borderRadius: '999px', overflow: 'hidden' }}>
+            <div style={{ width: `${Math.max(3, (Number(item[valorChave] || 0) / maximo) * 100)}%`, height: '100%', background: cor, borderRadius: '999px' }} />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function CardAnalitico({ titulo, children }) {
+  return (
+    <div style={{ background: 'white', borderRadius: '14px', padding: '20px', boxShadow: '0 2px 10px rgba(15,23,42,0.08)', border: '1px solid #eef2f7' }}>
+      <h3 style={{ margin: '0 0 16px', color: '#111827' }}>{titulo}</h3>
+      {children}
+    </div>
+  );
+}
+
 // ============================================================================
 // DASHBOARD
 // ============================================================================
@@ -550,10 +685,19 @@ function Dashboard({ usuario, token, onLogout }) {
   const [arquivos, setArquivos] = useState([]);
   const [carregando, setCarregando] = useState(false);
   const [modo, setModo] = useState('home');
+  const [contaSelecionada, setContaSelecionada] = useState(null);
+  const [periodoRapido, setPeriodoRapido] = useState('mes');
+  const [periodoDashboard, setPeriodoDashboard] = useState(calcularPeriodoRapido('mes'));
+  const [resumoDashboard, setResumoDashboard] = useState(null);
+  const [carregandoDashboard, setCarregandoDashboard] = useState(false);
 
   useEffect(() => {
     carregarContas();
   }, []);
+
+  useEffect(() => {
+    if (modo === 'home') carregarResumoDashboard();
+  }, [periodoDashboard.dataInicial, periodoDashboard.dataFinal, modo]);
 
   const authHeaders = {
     Authorization: `Bearer ${token}`
@@ -569,6 +713,37 @@ function Dashboard({ usuario, token, onLogout }) {
     } catch (error) {
       console.error('Erro ao carregar contas:', error);
     }
+  };
+
+  const carregarResumoDashboard = async () => {
+    setCarregandoDashboard(true);
+
+    try {
+      const params = new URLSearchParams();
+      if (periodoDashboard.dataInicial) params.set('dataInicial', periodoDashboard.dataInicial);
+      if (periodoDashboard.dataFinal) params.set('dataFinal', periodoDashboard.dataFinal);
+
+      const response = await axios.get(`${API_URL}/dashboard/resumo?${params.toString()}`, {
+        headers: authHeaders
+      });
+
+      setResumoDashboard(response.data);
+    } catch (error) {
+      console.error('Erro ao carregar dashboard:', error);
+      setResumoDashboard(null);
+    } finally {
+      setCarregandoDashboard(false);
+    }
+  };
+
+  const aplicarPeriodoRapido = (tipo) => {
+    setPeriodoRapido(tipo);
+    setPeriodoDashboard(calcularPeriodoRapido(tipo));
+  };
+
+  const alterarPeriodoPersonalizado = (campo, valor) => {
+    setPeriodoRapido('personalizado');
+    setPeriodoDashboard((atual) => ({ ...atual, [campo]: valor }));
   };
 
   const carregarPastas = async () => {
@@ -639,15 +814,21 @@ function Dashboard({ usuario, token, onLogout }) {
     }
   };
 
-  if (modo === 'transacoes' && contas.length > 0) {
+  if (modo === 'transacoes' && (contaSelecionada || contas.length > 0)) {
     return (
       <TelaTransacoes
-        conta={contas[0]}
+        contaInicial={contaSelecionada}
+        contas={contas}
         token={token}
         onVoltar={() => setModo('home')}
       />
     );
   }
+
+  const kpisDashboard = resumoDashboard?.kpis || {};
+  const seriesDashboard = resumoDashboard?.series || {};
+  const insightsDashboard = resumoDashboard?.insights || {};
+  const saldoLiquido = Number(kpisDashboard.saldoLiquido || 0);
 
   return (
     <div style={{ minHeight: '100vh', background: '#f5f5f5' }}>
@@ -729,13 +910,144 @@ function Dashboard({ usuario, token, onLogout }) {
               </div>
             ) : (
               <div>
+                <div style={{ background: 'white', borderRadius: '16px', padding: '20px', boxShadow: '0 2px 10px rgba(15,23,42,0.08)', marginBottom: '20px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: '16px', alignItems: 'flex-start', flexWrap: 'wrap', marginBottom: '16px' }}>
+                    <div>
+                      <h2 style={{ margin: '0 0 6px' }}>Dashboard financeiro</h2>
+                      <p style={{ margin: 0, color: '#64748b' }}>Visão executiva entre {formatarData(periodoDashboard.dataInicial)} e {formatarData(periodoDashboard.dataFinal)}.</p>
+                    </div>
+                    <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                      <button
+                        onClick={() => {
+                          setContaSelecionada(null);
+                          setModo('transacoes');
+                        }}
+                        style={{ background: '#10b981', color: 'white', border: 'none', padding: '10px 16px', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold' }}
+                      >
+                        Ver transações consolidadas
+                      </button>
+                      <button
+                        onClick={() => setModo('importar')}
+                        style={{ background: '#667eea', color: 'white', border: 'none', padding: '10px 16px', borderRadius: '8px', cursor: 'pointer' }}
+                      >
+                        📊 Importar XLSX
+                      </button>
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '14px' }}>
+                    {[
+                      ['hoje', 'Hoje'],
+                      ['7dias', 'Últimos 7 dias'],
+                      ['30dias', 'Últimos 30 dias'],
+                      ['mes', 'Este mês'],
+                      ['mesPassado', 'Mês passado'],
+                      ['ano', 'Este ano'],
+                    ].map(([tipo, label]) => (
+                      <button
+                        key={tipo}
+                        onClick={() => aplicarPeriodoRapido(tipo)}
+                        style={{
+                          background: periodoRapido === tipo ? '#1f2937' : '#f1f5f9',
+                          color: periodoRapido === tipo ? 'white' : '#334155',
+                          border: 'none',
+                          padding: '8px 12px',
+                          borderRadius: '999px',
+                          cursor: 'pointer',
+                          fontSize: '13px',
+                        }}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '12px', alignItems: 'end' }}>
+                    <label style={{ display: 'grid', gap: '6px', color: '#475569', fontSize: '13px' }}>
+                      Data inicial
+                      <input type="date" value={periodoDashboard.dataInicial} onChange={(event) => alterarPeriodoPersonalizado('dataInicial', event.target.value)} style={{ padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }} />
+                    </label>
+                    <label style={{ display: 'grid', gap: '6px', color: '#475569', fontSize: '13px' }}>
+                      Data final
+                      <input type="date" value={periodoDashboard.dataFinal} onChange={(event) => alterarPeriodoPersonalizado('dataFinal', event.target.value)} style={{ padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }} />
+                    </label>
+                    <button onClick={() => aplicarPeriodoRapido('mes')} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', background: '#e5e7eb', cursor: 'pointer' }}>Resetar período</button>
+                  </div>
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '14px', marginBottom: '20px' }}>
+                  <KpiCard titulo="Receitas no período" valor={formatarMoeda(kpisDashboard.receitas)} detalhe="Entradas confirmadas" cor="#059669" />
+                  <KpiCard titulo="Despesas no período" valor={formatarMoeda(kpisDashboard.despesas)} detalhe="Saídas registradas" cor="#dc2626" />
+                  <KpiCard titulo="Saldo líquido" valor={formatarMoeda(saldoLiquido)} detalhe="Receitas - despesas" cor={saldoLiquido >= 0 ? '#059669' : '#dc2626'} />
+                  <KpiCard titulo="Transações" valor={Number(kpisDashboard.quantidadeTransacoes || 0)} detalhe="No período" cor="#2563eb" />
+                  <KpiCard titulo="Ticket médio despesa" valor={formatarMoeda(kpisDashboard.ticketMedioDespesa)} detalhe="Média dos débitos" cor="#7c3aed" />
+                  <KpiCard titulo="Categorizado" valor={formatarPercentual(kpisDashboard.percentualCategorizado)} detalhe="Transações com categoria" cor="#0f766e" />
+                  <KpiCard titulo="Transferências internas" valor={Number(kpisDashboard.transferenciasInternas || 0)} detalhe="Não entram nos KPIs financeiros" cor="#0f766e" />
+                </div>
+
+                {carregandoDashboard ? (
+                  <div style={{ background: 'white', borderRadius: '14px', padding: '24px', marginBottom: '20px', color: '#64748b' }}>Carregando indicadores...</div>
+                ) : (
+                  <>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '20px', marginBottom: '20px' }}>
+                      <CardAnalitico titulo="Evolução de receitas e despesas">
+                        <div style={{ display: 'flex', gap: '14px', marginBottom: '8px', color: '#64748b', fontSize: '12px' }}>
+                          <span>🟩 Receitas</span>
+                          <span>🟥 Despesas</span>
+                        </div>
+                        <BarrasMovimentacao dados={seriesDashboard.movimentacaoPorPeriodo || []} />
+                      </CardAnalitico>
+                      <CardAnalitico titulo="Despesas por categoria">
+                        <BarrasHorizontais dados={seriesDashboard.despesasPorCategoria || []} rotulo={(item) => `${formatarMoeda(item.valor)} • ${formatarPercentual(item.percentual)}`} cor="#ef4444" />
+                      </CardAnalitico>
+                    </div>
+
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '20px', marginBottom: '20px' }}>
+                      <CardAnalitico titulo="Receitas vs despesas">
+                        <BarrasHorizontais
+                          dados={[
+                            { nome: 'Receitas', valor: Number(kpisDashboard.receitas || 0) },
+                            { nome: 'Despesas', valor: Number(kpisDashboard.despesas || 0) },
+                          ]}
+                          nomeChave="nome"
+                          cor="#2563eb"
+                        />
+                      </CardAnalitico>
+                      <CardAnalitico titulo="Contas com maior impacto">
+                        <BarrasHorizontais dados={(seriesDashboard.movimentacaoPorConta || []).slice(0, 6)} nomeChave="contaNome" valorChave="volume" rotulo={(item) => `${formatarMoeda(item.volume)} • ${item.quantidadeTransacoes} tx`} cor="#7c3aed" />
+                      </CardAnalitico>
+                    </div>
+
+                    <CardAnalitico titulo="Insights estratégicos">
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '14px' }}>
+                        <div style={{ background: '#f8fafc', borderRadius: '10px', padding: '14px' }}>
+                          <strong>Maior categoria de despesa</strong>
+                          <p style={{ margin: '8px 0 0', color: '#64748b' }}>{insightsDashboard.maiorCategoriaDespesa ? `${insightsDashboard.maiorCategoriaDespesa.categoriaNome} totalizou ${formatarMoeda(insightsDashboard.maiorCategoriaDespesa.valor)}.` : 'Sem despesas categorizadas no período.'}</p>
+                        </div>
+                        <div style={{ background: '#f8fafc', borderRadius: '10px', padding: '14px' }}>
+                          <strong>Conta com maior volume</strong>
+                          <p style={{ margin: '8px 0 0', color: '#64748b' }}>{insightsDashboard.contaMaiorMovimento ? `${insightsDashboard.contaMaiorMovimento.contaNome} movimentou ${formatarMoeda(insightsDashboard.contaMaiorMovimento.volume)}.` : 'Sem movimentação no período.'}</p>
+                        </div>
+                        <div style={{ background: '#f8fafc', borderRadius: '10px', padding: '14px' }}>
+                          <strong>Dia com maior gasto</strong>
+                          <p style={{ margin: '8px 0 0', color: '#64748b' }}>{insightsDashboard.diaMaiorGasto ? `${formatarData(insightsDashboard.diaMaiorGasto.data)} concentrou ${formatarMoeda(insightsDashboard.diaMaiorGasto.valor)} em despesas.` : 'Sem gastos no período.'}</p>
+                        </div>
+                        <div style={{ background: '#f8fafc', borderRadius: '10px', padding: '14px' }}>
+                          <strong>Pendências de categorização</strong>
+                          <p style={{ margin: '8px 0 0', color: '#64748b' }}>Você ainda possui {Number(insightsDashboard.transacoesSemCategoria || 0)} transação(ões) sem categoria.</p>
+                        </div>
+                      </div>
+                    </CardAnalitico>
+                  </>
+                )}
+
                 <div style={{
                   display: 'flex',
                   justifyContent: 'space-between',
                   alignItems: 'center',
-                  marginBottom: '20px'
+                  margin: '26px 0 20px'
                 }}>
-                  <h2>Suas Contas</h2>
+                  <h2 style={{ margin: 0 }}>Suas Contas</h2>
 
                   <button
                     onClick={() => setModo('importar')}
@@ -757,34 +1069,47 @@ function Dashboard({ usuario, token, onLogout }) {
                   gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))',
                   gap: '20px'
                 }}>
-                  {contas.map(conta => (
-                    <div
-                      key={conta.id}
-                      onClick={() => setModo('transacoes')}
-                      style={{
-                        background: 'white',
-                        borderRadius: '12px',
-                        padding: '20px',
-                        boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
-                        cursor: 'pointer'
-                      }}
-                    >
-                      <h3 style={{ margin: '0 0 10px' }}>{conta.nome}</h3>
+                  {contas.map(conta => {
+                    const resumoConta = (seriesDashboard.movimentacaoPorConta || []).find((item) => item.contaId === conta.id);
 
-                      <p style={{
-                        fontSize: '24px',
-                        fontWeight: 'bold',
-                        margin: 0,
-                        color: Number(conta.saldo || 0) >= 0 ? '#10b981' : '#ef4444'
-                      }}>
-                        {formatarMoeda(conta.saldo)}
-                      </p>
+                    return (
+                      <div
+                        key={conta.id}
+                        onClick={() => {
+                          setContaSelecionada(conta);
+                          setModo('transacoes');
+                        }}
+                        style={{
+                          background: 'white',
+                          borderRadius: '12px',
+                          padding: '20px',
+                          boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
+                          cursor: 'pointer'
+                        }}
+                      >
+                        <h3 style={{ margin: '0 0 10px' }}>{conta.nome}</h3>
 
-                      <p style={{ color: '#999', fontSize: '12px' }}>
-                        Clique para ver transações
-                      </p>
-                    </div>
-                  ))}
+                        <p style={{
+                          fontSize: '24px',
+                          fontWeight: 'bold',
+                          margin: 0,
+                          color: Number(conta.saldo || 0) >= 0 ? '#10b981' : '#ef4444'
+                        }}>
+                          {formatarMoeda(conta.saldo)}
+                        </p>
+
+                        <div style={{ display: 'grid', gap: '4px', marginTop: '14px', color: '#64748b', fontSize: '12px' }}>
+                          <span>Período: {resumoConta ? `${resumoConta.quantidadeTransacoes} transação(ões)` : 'sem movimentação'}</span>
+                          <span>Receitas: {formatarMoeda(resumoConta?.receitas || 0)}</span>
+                          <span>Despesas: {formatarMoeda(resumoConta?.despesas || 0)}</span>
+                        </div>
+
+                        <p style={{ color: '#999', fontSize: '12px' }}>
+                          Clique para ver transações
+                        </p>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             )}
@@ -853,12 +1178,27 @@ function Dashboard({ usuario, token, onLogout }) {
 // TELA DE TRANSAÇÕES
 // ============================================================================
 
-function TelaTransacoes({ conta, token, onVoltar }) {
+function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
   const [transacoes, setTransacoes] = useState([]);
   const [categorias, setCategorias] = useState([]);
   const [carregando, setCarregando] = useState(true);
   const [categoriaModalAberta, setCategoriaModalAberta] = useState(false);
   const [transacaoSelecionada, setTransacaoSelecionada] = useState(null);
+  const [selecionadas, setSelecionadas] = useState([]);
+  const [filtros, setFiltros] = useState({ busca: '', conta: contaInicial?.id || 'todas', categoria: 'todas', status: 'todas', tipo: 'todos' });
+  const [dataInicial, setDataInicial] = useState('');
+  const [dataFinal, setDataFinal] = useState('');
+  const [categoriaEscolhida, setCategoriaEscolhida] = useState('');
+  const [criarRegra, setCriarRegra] = useState(false);
+  const [termoRegra, setTermoRegra] = useState('');
+  const [salvandoCategoria, setSalvandoCategoria] = useState(false);
+  const [transacaoParaExcluir, setTransacaoParaExcluir] = useState(null);
+  const [modalExclusaoAberto, setModalExclusaoAberto] = useState(false);
+  const [excluindoTransacao, setExcluindoTransacao] = useState(false);
+  const [modalTransferenciasAberto, setModalTransferenciasAberto] = useState(false);
+  const [sugestoesTransferencia, setSugestoesTransferencia] = useState([]);
+  const [carregandoSugestoes, setCarregandoSugestoes] = useState(false);
+  const [marcandoTransferencia, setMarcandoTransferencia] = useState(null);
 
   useEffect(() => {
     carregarDados();
@@ -873,7 +1213,7 @@ function TelaTransacoes({ conta, token, onVoltar }) {
 
     try {
       const [transacoesResponse, categoriasResponse] = await Promise.all([
-        axios.get(`${API_URL}/transacoes/${conta.id}`, { headers: authHeaders }),
+        axios.get(`${API_URL}/transacoes`, { headers: authHeaders }),
         axios.get(`${API_URL}/categorias`, { headers: authHeaders })
       ]);
 
@@ -892,204 +1232,470 @@ function TelaTransacoes({ conta, token, onVoltar }) {
     }
   };
 
-  const handleCategorizar = async (categoriaId) => {
-    if (!transacaoSelecionada) return;
+  const transacoesFiltradas = useMemo(() => {
+    const buscaNormalizada = normalizarDescricaoCategorizacao(filtros.busca);
+
+    return transacoes.filter((tx) => {
+      const descricao = normalizarDescricaoCategorizacao(tx.descricao);
+      const dataTx = normalizarDataFiltro(tx.data);
+      const correspondeBusca = !buscaNormalizada || descricao.includes(buscaNormalizada);
+      const correspondeConta = filtros.conta === 'todas' || tx.conta_id === filtros.conta;
+      const correspondeCategoria = filtros.categoria === 'todas' || (tx.categoria_id || 'sem') === filtros.categoria;
+      const correspondeStatus = filtros.status === 'todas'
+        || (filtros.status === 'sem' && !tx.categoria_id)
+        || (filtros.status === 'categorizadas' && Boolean(tx.categoria_id));
+      const correspondeTipo = filtros.tipo === 'todos' || tx.tipo === filtros.tipo;
+      const correspondeDataInicial = !dataInicial || dataTx >= dataInicial;
+      const correspondeDataFinal = !dataFinal || dataTx <= dataFinal;
+
+      return correspondeBusca && correspondeConta && correspondeCategoria && correspondeStatus && correspondeTipo && correspondeDataInicial && correspondeDataFinal;
+    });
+  }, [transacoes, filtros, dataInicial, dataFinal]);
+
+  const idsFiltrados = transacoesFiltradas.map((tx) => tx.id);
+  const todasFiltradasSelecionadas = idsFiltrados.length > 0 && idsFiltrados.every((id) => selecionadas.includes(id));
+
+  const abrirModalIndividual = (tx) => {
+    setTransacaoSelecionada(tx);
+    setCategoriaEscolhida(tx.categoria_id || '');
+    setCriarRegra(false);
+    setTermoRegra(sugerirTermoRegra(tx.descricao));
+    setCategoriaModalAberta(true);
+  };
+
+  const abrirModalLote = () => {
+    if (selecionadas.length === 0) {
+      alert('Selecione ao menos uma transação.');
+      return;
+    }
+
+    const primeira = transacoes.find((tx) => selecionadas.includes(tx.id));
+    setTransacaoSelecionada(null);
+    setCategoriaEscolhida('');
+    setCriarRegra(false);
+    setTermoRegra(sugerirTermoRegra(filtros.busca || primeira?.descricao || ''));
+    setCategoriaModalAberta(true);
+  };
+
+  const fecharModal = () => {
+    setCategoriaModalAberta(false);
+    setTransacaoSelecionada(null);
+    setCategoriaEscolhida('');
+    setCriarRegra(false);
+    setTermoRegra('');
+  };
+
+  const handleCategorizar = async () => {
+    if (!categoriaEscolhida) {
+      alert('Escolha uma categoria.');
+      return;
+    }
+
+    if (criarRegra && !termoRegra.trim()) {
+      alert('Informe o termo da regra automática.');
+      return;
+    }
+
+    setSalvandoCategoria(true);
 
     try {
-      await axios.patch(
-        `${API_URL}/transacoes/${transacaoSelecionada.id}/categorizar`,
-        { categoriaId },
-        { headers: authHeaders }
-      );
+      const payload = {
+        categoriaId: categoriaEscolhida,
+        criarRegra,
+        termoRegra: criarRegra ? termoRegra : undefined,
+      };
 
-      setCategoriaModalAberta(false);
-      setTransacaoSelecionada(null);
+      const response = transacaoSelecionada
+        ? await axios.patch(`${API_URL}/transacoes/${transacaoSelecionada.id}/categorizar`, payload, { headers: authHeaders })
+        : await axios.patch(`${API_URL}/transacoes/categorizar-lote`, { ...payload, transacaoIds: selecionadas }, { headers: authHeaders });
+
+      const atualizadas = response.data.atualizadas || 0;
+      const atualizadasPorRegra = response.data.atualizadasPorRegra || 0;
+      const mensagemRegra = criarRegra ? ` Regra aplicada em ${atualizadasPorRegra} transações sem categoria semelhantes.` : '';
+      alert(`${atualizadas} transação(ões) categorizada(s).${mensagemRegra}`);
+
+      fecharModal();
+      setSelecionadas([]);
       await carregarDados();
     } catch (error) {
       alert('Erro ao categorizar: ' + (error.response?.data?.erro || error.message));
+    } finally {
+      setSalvandoCategoria(false);
+    }
+  };
+
+  const alternarSelecionada = (id) => {
+    setSelecionadas((atuais) => atuais.includes(id)
+      ? atuais.filter((item) => item !== id)
+      : [...atuais, id]);
+  };
+
+  const alternarTodasFiltradas = () => {
+    setSelecionadas((atuais) => {
+      if (todasFiltradasSelecionadas) return atuais.filter((id) => !idsFiltrados.includes(id));
+      return Array.from(new Set([...atuais, ...idsFiltrados]));
+    });
+  };
+
+  const limparFiltros = () => {
+    setFiltros({ busca: '', conta: 'todas', categoria: 'todas', status: 'todas', tipo: 'todos' });
+    setDataInicial('');
+    setDataFinal('');
+  };
+
+  const abrirModalExclusao = (tx) => {
+    setTransacaoParaExcluir(tx);
+    setModalExclusaoAberto(true);
+  };
+
+  const fecharModalExclusao = () => {
+    if (excluindoTransacao) return;
+    setModalExclusaoAberto(false);
+    setTransacaoParaExcluir(null);
+  };
+
+  const handleExcluirTransacao = async () => {
+    if (!transacaoParaExcluir) return;
+
+    try {
+      setExcluindoTransacao(true);
+
+      await axios.delete(`${API_URL}/transacoes/${transacaoParaExcluir.id}`, {
+        headers: authHeaders,
+      });
+
+      setTransacoes((atuais) => atuais.filter((tx) => tx.id !== transacaoParaExcluir.id));
+      setSelecionadas((atuais) => atuais.filter((id) => id !== transacaoParaExcluir.id));
+      setModalExclusaoAberto(false);
+      setTransacaoParaExcluir(null);
+    } catch (error) {
+      alert('Erro ao excluir transação: ' + (error.response?.data?.erro || error.message));
+    } finally {
+      setExcluindoTransacao(false);
+    }
+  };
+
+  const verificarTransferenciasInternas = async () => {
+    setCarregandoSugestoes(true);
+    setModalTransferenciasAberto(true);
+
+    try {
+      const params = new URLSearchParams();
+      if (dataInicial) params.set('dataInicial', dataInicial);
+      if (dataFinal) params.set('dataFinal', dataFinal);
+
+      const response = await axios.get(`${API_URL}/transferencias-internas/sugestoes?${params.toString()}`, { headers: authHeaders });
+      setSugestoesTransferencia(response.data.sugestoes || []);
+    } catch (error) {
+      alert('Erro ao verificar transferências internas: ' + (error.response?.data?.erro || error.message));
+      setModalTransferenciasAberto(false);
+    } finally {
+      setCarregandoSugestoes(false);
+    }
+  };
+
+  const marcarTransferenciaInterna = async (sugestao) => {
+    setMarcandoTransferencia(sugestao.id);
+
+    try {
+      await axios.post(
+        `${API_URL}/transferencias-internas/marcar`,
+        { debitoId: sugestao.debito.id, creditoId: sugestao.credito.id },
+        { headers: authHeaders }
+      );
+
+      setSugestoesTransferencia((atuais) => atuais.filter((item) => item.id !== sugestao.id));
+      await carregarDados();
+    } catch (error) {
+      alert('Erro ao marcar transferência interna: ' + (error.response?.data?.erro || error.message));
+    } finally {
+      setMarcandoTransferencia(null);
+    }
+  };
+
+  const ignorarSugestaoTransferencia = (sugestaoId) => {
+    setSugestoesTransferencia((atuais) => atuais.filter((item) => item.id !== sugestaoId));
+  };
+
+  const desmarcarTransferenciaInterna = async (tx) => {
+    if (!window.confirm('Desmarcar esta transferência interna? O vínculo do grupo será removido.')) return;
+
+    try {
+      await axios.post(
+        `${API_URL}/transferencias-internas/desmarcar`,
+        { transferenciaGrupoId: tx.transferencia_grupo_id, transacaoId: tx.id },
+        { headers: authHeaders }
+      );
+      await carregarDados();
+    } catch (error) {
+      alert('Erro ao desmarcar transferência interna: ' + (error.response?.data?.erro || error.message));
     }
   };
 
   return (
     <div style={{ minHeight: '100vh', background: '#f5f5f5' }}>
-      <div style={{
-        background: '#1f2937',
-        color: 'white',
-        padding: '20px'
-      }}>
-        <button
-          onClick={onVoltar}
-          style={{
-            background: 'rgba(255,255,255,0.2)',
-            color: 'white',
-            border: '1px solid rgba(255,255,255,0.3)',
-            padding: '8px 16px',
-            borderRadius: '6px',
-            cursor: 'pointer',
-            marginBottom: '15px'
-          }}
-        >
+      <div style={{ background: '#1f2937', color: 'white', padding: '20px' }}>
+        <button onClick={onVoltar} style={{ background: 'rgba(255,255,255,0.2)', color: 'white', border: '1px solid rgba(255,255,255,0.3)', padding: '8px 16px', borderRadius: '6px', cursor: 'pointer', marginBottom: '15px' }}>
           ← Voltar
         </button>
-
-        <h1 style={{ margin: 0 }}>{conta.nome}</h1>
-        <p style={{ margin: '5px 0 0', opacity: 0.8 }}>
-          Saldo: {formatarMoeda(conta.saldo)}
-        </p>
+        <h1 style={{ margin: 0 }}>Transações consolidadas</h1>
+        <p style={{ margin: '5px 0 0', opacity: 0.8 }}>Todas as contas em uma única visão</p>
       </div>
 
       <div style={{ padding: '20px', maxWidth: '1200px', margin: '0 auto' }}>
+        <div style={{ background: 'white', borderRadius: '12px', padding: '16px', marginBottom: '16px', boxShadow: '0 2px 8px rgba(0,0,0,0.08)' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(220px, 2fr) repeat(4, 1fr)', gap: '12px', alignItems: 'end' }}>
+            <label style={{ display: 'grid', gap: '6px', fontSize: '13px', color: '#374151' }}>
+              Pesquisar descrição
+              <input value={filtros.busca} onChange={(event) => setFiltros({ ...filtros, busca: event.target.value })} placeholder="Ex.: AUTO POSTO" style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} />
+            </label>
+            <label style={{ display: 'grid', gap: '6px', fontSize: '13px', color: '#374151' }}>
+              Conta
+              <select value={filtros.conta} onChange={(event) => setFiltros({ ...filtros, conta: event.target.value })} style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}>
+                <option value="todas">Todas as contas</option>
+                {contas.map((item) => <option key={item.id} value={item.id}>{item.nome}</option>)}
+              </select>
+            </label>
+            <label style={{ display: 'grid', gap: '6px', fontSize: '13px', color: '#374151' }}>
+              Categoria
+              <select value={filtros.categoria} onChange={(event) => setFiltros({ ...filtros, categoria: event.target.value })} style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}>
+                <option value="todas">Todas</option>
+                <option value="sem">Sem categoria</option>
+                {categorias.map((cat) => <option key={cat.id} value={cat.id}>{cat.emoji} {cat.nome}</option>)}
+              </select>
+            </label>
+            <label style={{ display: 'grid', gap: '6px', fontSize: '13px', color: '#374151' }}>
+              Status
+              <select value={filtros.status} onChange={(event) => setFiltros({ ...filtros, status: event.target.value })} style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}>
+                <option value="todas">Todas</option>
+                <option value="sem">Sem categoria</option>
+                <option value="categorizadas">Categorizadas</option>
+              </select>
+            </label>
+            <label style={{ display: 'grid', gap: '6px', fontSize: '13px', color: '#374151' }}>
+              Tipo
+              <select value={filtros.tipo} onChange={(event) => setFiltros({ ...filtros, tipo: event.target.value })} style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}>
+                <option value="todos">Todos</option>
+                <option value="CREDITO">Crédito</option>
+                <option value="DEBITO">Débito</option>
+              </select>
+            </label>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '12px', alignItems: 'end', marginTop: '14px' }}>
+            <label style={{ display: 'grid', gap: '6px', fontSize: '13px', color: '#374151' }}>
+              Data inicial
+              <input type="date" value={dataInicial} onChange={(event) => setDataInicial(event.target.value)} style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} />
+            </label>
+            <label style={{ display: 'grid', gap: '6px', fontSize: '13px', color: '#374151' }}>
+              Data final
+              <input type="date" value={dataFinal} onChange={(event) => setDataFinal(event.target.value)} style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} />
+            </label>
+            <button onClick={limparFiltros} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', cursor: 'pointer', background: '#e5e7eb' }}>Limpar filtros</button>
+            <button onClick={alternarTodasFiltradas} disabled={transacoesFiltradas.length === 0} style={{ padding: '10px 14px', borderRadius: '8px', border: '1px solid #d1d5db', background: 'white', cursor: transacoesFiltradas.length === 0 ? 'not-allowed' : 'pointer' }}>
+              {todasFiltradasSelecionadas ? 'Limpar seleção filtrada' : 'Selecionar todos filtrados'}
+            </button>
+            <button onClick={abrirModalLote} disabled={selecionadas.length === 0} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', background: selecionadas.length ? '#667eea' : '#c7d2fe', color: 'white', cursor: selecionadas.length ? 'pointer' : 'not-allowed' }}>
+              Categorizar selecionadas
+            </button>
+            <button onClick={verificarTransferenciasInternas} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', background: '#0f766e', color: 'white', cursor: 'pointer' }}>
+              Verificar transferências entre contas
+            </button>
+          </div>
+
+          <div style={{ marginTop: '14px' }}>
+            <span style={{ color: '#4b5563', fontSize: '14px' }}>{transacoesFiltradas.length} transação(ões) filtrada(s) • {selecionadas.length} selecionada(s)</span>
+          </div>
+        </div>
+
         {carregando ? (
           <p>Carregando transações...</p>
         ) : transacoes.length === 0 ? (
-          <div style={{
-            background: 'white',
-            borderRadius: '12px',
-            padding: '40px',
-            textAlign: 'center'
-          }}>
+          <div style={{ background: 'white', borderRadius: '12px', padding: '40px', textAlign: 'center' }}>
             <h2>Nenhuma transação encontrada</h2>
           </div>
         ) : (
-          <div style={{
-            background: 'white',
-            borderRadius: '12px',
-            overflow: 'hidden',
-            boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
-          }}>
-            <table style={{
-              width: '100%',
-              borderCollapse: 'collapse'
-            }}>
+          <div style={{ background: 'white', borderRadius: '12px', overflow: 'hidden', boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead>
                 <tr style={{ background: '#f9fafb' }}>
+                  <th style={{ padding: '12px', textAlign: 'center' }}>
+                    <input type="checkbox" checked={todasFiltradasSelecionadas} onChange={alternarTodasFiltradas} />
+                  </th>
                   <th style={{ padding: '12px', textAlign: 'left' }}>Data</th>
+                  <th style={{ padding: '12px', textAlign: 'left' }}>Conta</th>
                   <th style={{ padding: '12px', textAlign: 'left' }}>Descrição</th>
                   <th style={{ padding: '12px', textAlign: 'right' }}>Valor</th>
+                  <th style={{ padding: '12px', textAlign: 'left' }}>Tipo</th>
                   <th style={{ padding: '12px', textAlign: 'left' }}>Categoria</th>
                   <th style={{ padding: '12px', textAlign: 'center' }}>Ações</th>
                 </tr>
               </thead>
-
               <tbody>
-                {transacoes.map(tx => (
+                {transacoesFiltradas.map((tx) => (
                   <tr key={tx.id} style={{ borderTop: '1px solid #e5e7eb' }}>
-                    <td style={{ padding: '12px' }}>{formatarData(tx.data)}</td>
-
-                    <td style={{ padding: '12px' }}>{tx.descricao}</td>
-
-                    <td style={{
-                      padding: '12px',
-                      textAlign: 'right',
-                      color: tx.tipo === 'CREDITO' ? '#10b981' : '#ef4444',
-                      fontWeight: 'bold'
-                    }}>
-                      {tx.tipo === 'CREDITO' ? '+' : '-'}
-                      {formatarMoeda(tx.valor)}
+                    <td style={{ padding: '12px', textAlign: 'center' }}>
+                      <input type="checkbox" checked={selecionadas.includes(tx.id)} onChange={() => alternarSelecionada(tx.id)} />
                     </td>
-
+                    <td style={{ padding: '12px' }}>{formatarData(tx.data)}</td>
+                    <td style={{ padding: '12px', color: '#475569', fontSize: '13px' }}>{tx.conta_nome || 'Conta'}</td>
                     <td style={{ padding: '12px' }}>
-                      <span style={{
-                        background: '#e5e7eb',
-                        padding: '4px 8px',
-                        borderRadius: '4px',
-                        fontSize: '12px'
-                      }}>
-                        {tx.categoria_nome || 'Sem categoria'}
+                      {tx.descricao}
+                      {tx.eh_transferencia_interna && (
+                        <span style={{ marginLeft: '8px', background: '#ccfbf1', color: '#0f766e', padding: '3px 7px', borderRadius: '999px', fontSize: '11px', fontWeight: 'bold' }}>
+                          Transferência interna
+                        </span>
+                      )}
+                    </td>
+                    <td style={{ padding: '12px', textAlign: 'right', color: tx.tipo === 'CREDITO' ? '#10b981' : '#ef4444', fontWeight: 'bold' }}>
+                      {tx.tipo === 'CREDITO' ? '+' : '-'}{formatarMoeda(tx.valor)}
+                    </td>
+                    <td style={{ padding: '12px' }}>{tx.tipo === 'CREDITO' ? 'Crédito' : 'Débito'}</td>
+                    <td style={{ padding: '12px' }}>
+                      <span style={{ background: tx.categoria_origem === 'AUTO' ? '#dbeafe' : '#e5e7eb', padding: '4px 8px', borderRadius: '4px', fontSize: '12px' }}>
+                        {tx.categoria_nome || 'Sem categoria'}{tx.categoria_origem === 'AUTO' ? ' • auto' : ''}
                       </span>
                     </td>
-
                     <td style={{ padding: '12px', textAlign: 'center' }}>
-                      <button
-                        onClick={() => {
-                          setTransacaoSelecionada(tx);
-                          setCategoriaModalAberta(true);
-                        }}
-                        style={{
-                          background: '#667eea',
-                          color: 'white',
-                          border: 'none',
-                          padding: '4px 12px',
-                          borderRadius: '4px',
-                          cursor: 'pointer',
-                          fontSize: '12px'
-                        }}
-                      >
-                        Categorizar
-                      </button>
+                      <div style={{ display: 'flex', justifyContent: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                        <button onClick={() => abrirModalIndividual(tx)} style={{ background: '#667eea', color: 'white', border: 'none', padding: '4px 12px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>
+                          Categorizar
+                        </button>
+                        {tx.eh_transferencia_interna && (
+                          <button onClick={() => desmarcarTransferenciaInterna(tx)} style={{ background: 'white', color: '#0f766e', border: '1px solid #0f766e', padding: '4px 12px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>
+                            Desmarcar transferência
+                          </button>
+                        )}
+                        <button onClick={() => abrirModalExclusao(tx)} style={{ background: 'white', color: '#dc2626', border: '1px solid #dc2626', padding: '4px 12px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>
+                          Excluir
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
+                {transacoesFiltradas.length === 0 && (
+                  <tr><td colSpan="8" style={{ padding: '24px', textAlign: 'center', color: '#6b7280' }}>Nenhuma transação corresponde aos filtros.</td></tr>
+                )}
               </tbody>
             </table>
           </div>
         )}
       </div>
 
-      {categoriaModalAberta && transacaoSelecionada && (
-        <div style={{
-          position: 'fixed',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          background: 'rgba(0,0,0,0.5)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          zIndex: 1000
-        }}>
-          <div style={{
-            background: 'white',
-            borderRadius: '12px',
-            padding: '30px',
-            maxWidth: '400px',
-            width: '90%'
-          }}>
-            <h3>
-              Categorizar: {transacaoSelecionada.descricao.substring(0, 30)}
-            </h3>
+      {categoriaModalAberta && (
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <div style={{ background: 'white', borderRadius: '12px', padding: '30px', maxWidth: '520px', width: '90%' }}>
+            <h3 style={{ marginTop: 0 }}>{transacaoSelecionada ? `Categorizar: ${transacaoSelecionada.descricao.substring(0, 45)}` : `Categorizar ${selecionadas.length} transação(ões)`}</h3>
+            {transacaoSelecionada && <p style={{ color: '#666', marginBottom: '20px' }}>{formatarMoeda(transacaoSelecionada.valor)}</p>}
 
-            <p style={{ color: '#666', marginBottom: '20px' }}>
-              {formatarMoeda(transacaoSelecionada.valor)}
+            <label style={{ display: 'grid', gap: '6px', marginBottom: '14px', fontSize: '14px' }}>
+              Categoria
+              <select value={categoriaEscolhida} onChange={(event) => setCategoriaEscolhida(event.target.value)} style={{ padding: '12px', borderRadius: '8px', border: '1px solid #d1d5db' }}>
+                <option value="">Selecione uma categoria</option>
+                {categorias.map((cat) => <option key={cat.id} value={cat.id}>{cat.emoji} {cat.nome}</option>)}
+              </select>
+            </label>
+
+            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px', fontSize: '14px' }}>
+              <input type="checkbox" checked={criarRegra} onChange={(event) => setCriarRegra(event.target.checked)} />
+              {transacaoSelecionada ? 'Aplicar automaticamente para transações semelhantes desse fornecedor' : 'Criar regra para transações futuras'}
+            </label>
+
+            {criarRegra && (
+              <label style={{ display: 'grid', gap: '6px', marginBottom: '18px', fontSize: '14px' }}>
+                Termo da regra sugerida
+                <input value={termoRegra} onChange={(event) => setTermoRegra(event.target.value)} placeholder="AUTO POSTO PRESIDENTE LTDA" style={{ padding: '12px', borderRadius: '8px', border: '1px solid #d1d5db' }} />
+                <small style={{ color: '#6b7280' }}>O backend normaliza acentos, pontuação e descrições Pix antes de comparar.</small>
+              </label>
+            )}
+
+            <div style={{ display: 'flex', gap: '10px' }}>
+              <button onClick={handleCategorizar} disabled={salvandoCategoria} style={{ background: '#667eea', color: 'white', border: 'none', padding: '12px', borderRadius: '8px', cursor: 'pointer', flex: 1 }}>
+                {salvandoCategoria ? 'Salvando...' : 'Salvar categorização'}
+              </button>
+              <button onClick={fecharModal} disabled={salvandoCategoria} style={{ background: '#e5e7eb', border: 'none', padding: '12px', borderRadius: '8px', cursor: 'pointer', flex: 1 }}>
+                Cancelar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {modalExclusaoAberto && transacaoParaExcluir && (
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <div style={{ background: 'white', borderRadius: '12px', padding: '30px', maxWidth: '520px', width: '90%' }}>
+            <h3 style={{ marginTop: 0, color: '#991b1b' }}>Excluir transação</h3>
+            <p style={{ color: '#374151', lineHeight: 1.5 }}>
+              Tem certeza que deseja excluir esta transação? Essa ação não poderá ser desfeita.
             </p>
 
-            <div style={{ display: 'grid', gap: '10px', marginBottom: '20px' }}>
-              {categorias.map(cat => (
-                <button
-                  key={cat.id}
-                  onClick={() => handleCategorizar(cat.id)}
-                  style={{
-                    background: '#f3f4f6',
-                    border: '1px solid #e5e7eb',
-                    padding: '12px',
-                    borderRadius: '8px',
-                    cursor: 'pointer',
-                    textAlign: 'left',
-                    fontSize: '14px'
-                  }}
-                >
-                  {cat.emoji} {cat.nome}
-                </button>
-              ))}
+            <div style={{ background: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: '8px', padding: '14px', margin: '18px 0' }}>
+              <p style={{ margin: '0 0 8px' }}><strong>Data:</strong> {formatarData(transacaoParaExcluir.data)}</p>
+              <p style={{ margin: '0 0 8px' }}><strong>Descrição:</strong> {transacaoParaExcluir.descricao}</p>
+              <p style={{ margin: 0 }}><strong>Valor:</strong> {transacaoParaExcluir.tipo === 'CREDITO' ? '+' : '-'}{formatarMoeda(transacaoParaExcluir.valor)}</p>
             </div>
 
-            <button
-              onClick={() => {
-                setCategoriaModalAberta(false);
-                setTransacaoSelecionada(null);
-              }}
-              style={{
-                background: '#e5e7eb',
-                border: 'none',
-                padding: '12px',
-                borderRadius: '8px',
-                cursor: 'pointer',
-                width: '100%'
-              }}
-            >
-              Cancelar
-            </button>
+            <div style={{ display: 'flex', gap: '10px' }}>
+              <button onClick={fecharModalExclusao} disabled={excluindoTransacao} style={{ background: '#e5e7eb', border: 'none', padding: '12px', borderRadius: '8px', cursor: excluindoTransacao ? 'not-allowed' : 'pointer', flex: 1 }}>
+                Cancelar
+              </button>
+              <button onClick={handleExcluirTransacao} disabled={excluindoTransacao} style={{ background: '#dc2626', color: 'white', border: 'none', padding: '12px', borderRadius: '8px', cursor: excluindoTransacao ? 'not-allowed' : 'pointer', flex: 1 }}>
+                {excluindoTransacao ? 'Excluindo...' : 'Excluir transação'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {modalTransferenciasAberto && (
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <div style={{ background: 'white', borderRadius: '12px', padding: '24px', maxWidth: '900px', width: '94%', maxHeight: '86vh', overflow: 'auto' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '16px', alignItems: 'center', marginBottom: '16px' }}>
+              <div>
+                <h3 style={{ margin: 0 }}>Possíveis transferências internas</h3>
+                <p style={{ margin: '6px 0 0', color: '#64748b', fontSize: '14px' }}>Revise os pares sugeridos antes de marcar. Nada é aplicado automaticamente.</p>
+              </div>
+              <button onClick={() => setModalTransferenciasAberto(false)} style={{ border: 'none', background: '#e5e7eb', borderRadius: '8px', padding: '8px 12px', cursor: 'pointer' }}>Fechar</button>
+            </div>
+
+            {carregandoSugestoes ? (
+              <p style={{ color: '#64748b' }}>Verificando transações do período...</p>
+            ) : sugestoesTransferencia.length === 0 ? (
+              <div style={{ background: '#f8fafc', borderRadius: '10px', padding: '18px', color: '#64748b' }}>Nenhuma sugestão encontrada para o período selecionado.</div>
+            ) : (
+              <div style={{ display: 'grid', gap: '14px' }}>
+                {sugestoesTransferencia.map((sugestao, index) => (
+                  <div key={sugestao.id} style={{ border: '1px solid #e5e7eb', borderRadius: '12px', padding: '16px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', marginBottom: '12px', flexWrap: 'wrap' }}>
+                      <strong>Caso {index + 1}</strong>
+                      <span style={{ background: sugestao.confianca === 'alta' ? '#dcfce7' : sugestao.confianca === 'média' ? '#fef9c3' : '#f1f5f9', color: '#334155', padding: '4px 8px', borderRadius: '999px', fontSize: '12px' }}>Confiança {sugestao.confianca}</span>
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '12px', marginBottom: '12px' }}>
+                      <div style={{ background: '#fef2f2', borderRadius: '10px', padding: '12px' }}>
+                        <strong>Saída</strong>
+                        <p style={{ margin: '8px 0 4px' }}>{sugestao.debito.conta_nome} | {formatarData(sugestao.debito.data)}</p>
+                        <p style={{ margin: '0 0 4px', color: '#dc2626', fontWeight: 'bold' }}>-{formatarMoeda(sugestao.debito.valor)}</p>
+                        <p style={{ margin: 0, color: '#64748b' }}>{sugestao.debito.descricao}</p>
+                      </div>
+                      <div style={{ background: '#f0fdf4', borderRadius: '10px', padding: '12px' }}>
+                        <strong>Entrada</strong>
+                        <p style={{ margin: '8px 0 4px' }}>{sugestao.credito.conta_nome} | {formatarData(sugestao.credito.data)}</p>
+                        <p style={{ margin: '0 0 4px', color: '#059669', fontWeight: 'bold' }}>+{formatarMoeda(sugestao.credito.valor)}</p>
+                        <p style={{ margin: 0, color: '#64748b' }}>{sugestao.credito.descricao}</p>
+                      </div>
+                    </div>
+                    <p style={{ color: '#64748b', fontSize: '12px' }}>Motivos: {sugestao.motivos.join(', ')}</p>
+                    <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                      <button onClick={() => marcarTransferenciaInterna(sugestao)} disabled={marcandoTransferencia === sugestao.id} style={{ background: '#0f766e', color: 'white', border: 'none', padding: '8px 12px', borderRadius: '8px', cursor: marcandoTransferencia === sugestao.id ? 'not-allowed' : 'pointer' }}>
+                        {marcandoTransferencia === sugestao.id ? 'Marcando...' : 'Marcar como transferência interna'}
+                      </button>
+                      <button onClick={() => ignorarSugestaoTransferencia(sugestao.id)} style={{ background: '#e5e7eb', border: 'none', padding: '8px 12px', borderRadius: '8px', cursor: 'pointer' }}>Ignorar</button>
+                      <button onClick={() => ignorarSugestaoTransferencia(sugestao.id)} style={{ background: 'white', color: '#dc2626', border: '1px solid #dc2626', padding: '8px 12px', borderRadius: '8px', cursor: 'pointer' }}>Não é transferência</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}
