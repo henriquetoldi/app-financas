@@ -259,14 +259,20 @@ async function lerXlsxPadrao(file) {
   if (linhas.length < 2) throw new Error('A planilha precisa ter cabeçalho e ao menos uma linha de dados.');
 
   const cabecalho = linhas[0].map(normalizarTextoColuna);
+  const indiceOpcional = (...nomes) => nomes.map((nome) => cabecalho.indexOf(nome)).find((indice) => indice !== -1) ?? -1;
   const indices = {
-    data: cabecalho.indexOf('data'),
-    descricao: cabecalho.indexOf('descricao'),
-    categoria: cabecalho.indexOf('categoria'),
-    valor: cabecalho.indexOf('valor'),
-    tipo: cabecalho.indexOf('tipo'),
+    id: indiceOpcional('id', 'transacao id', 'transacao_id'),
+    data: indiceOpcional('data'),
+    descricao: indiceOpcional('descricao', 'descrição'),
+    categoria: indiceOpcional('categoria'),
+    categoriaMacro: indiceOpcional('categoria macro', 'categoria_macro', 'macro'),
+    categoriaDetalhada: indiceOpcional('categoria detalhada', 'categoria_detalhada', 'subcategoria', 'categoria detalhe'),
+    conta: indiceOpcional('conta', 'conta destino'),
+    valor: indiceOpcional('valor'),
+    tipo: indiceOpcional('tipo'),
   };
-  const faltantes = Object.entries(indices)
+  const obrigatorias = { data: indices.data, descricao: indices.descricao, valor: indices.valor, tipo: indices.tipo };
+  const faltantes = Object.entries(obrigatorias)
     .filter(([, indice]) => indice === -1)
     .map(([coluna]) => coluna === 'descricao' ? 'Descrição' : coluna.charAt(0).toUpperCase() + coluna.slice(1));
 
@@ -277,7 +283,11 @@ async function lerXlsxPadrao(file) {
   return linhas.slice(1).filter((linha) => linha.some((valor) => String(valor || '').trim())).map((linha) => ({
     data: linha[indices.data],
     descricao: linha[indices.descricao],
-    categoria: linha[indices.categoria],
+    categoria: indices.categoria >= 0 ? linha[indices.categoria] : '',
+    categoria_macro: indices.categoriaMacro >= 0 ? linha[indices.categoriaMacro] : (indices.categoria >= 0 ? linha[indices.categoria] : ''),
+    categoria_detalhada: indices.categoriaDetalhada >= 0 ? linha[indices.categoriaDetalhada] : '',
+    conta: indices.conta >= 0 ? linha[indices.conta] : '',
+    transacao_id: indices.id >= 0 ? linha[indices.id] : '',
     valor: linha[indices.valor],
     tipo: linha[indices.tipo],
   }));
@@ -310,13 +320,16 @@ function validarExcelImportacao(dados) {
     const numeroLinha = index + 2;
     const data = normalizarDataLinha(linha.data);
     const descricao = String(linha.descricao || '').trim();
-    const categoria = String(linha.categoria || '').trim() || 'Outros';
+    const categoria = String(linha.categoria || '').trim();
+    const categoriaMacro = String(linha.categoria_macro || categoria || '').trim() || 'Outros';
+    const categoriaDetalhada = String(linha.categoria_detalhada || '').trim();
     const valor = normalizarValorLinha(linha.valor);
     const tipoTexto = normalizarTextoColuna(linha.tipo);
 
     if (!data) erros.push(`Linha ${numeroLinha}: Data inválida.`);
     if (!descricao) erros.push(`Linha ${numeroLinha}: Descrição obrigatória.`);
     if (!Number.isFinite(valor) || valor <= 0) erros.push(`Linha ${numeroLinha}: Valor inválido.`);
+    if (Number.isFinite(valor) && Math.abs(valor) >= 10000000000) erros.push(`Linha ${numeroLinha}: Valor excede o limite suportado de 9.999.999.999,99.`);
     if (!['debito', 'credito'].includes(tipoTexto)) erros.push(`Linha ${numeroLinha}: Tipo deve ser Débito ou Crédito.`);
 
     if (data && descricao && Number.isFinite(valor) && valor > 0 && ['debito', 'credito'].includes(tipoTexto)) {
@@ -324,6 +337,10 @@ function validarExcelImportacao(dados) {
         data,
         descricao,
         categoria,
+        categoria_macro: categoriaMacro,
+        categoria_detalhada: categoriaDetalhada,
+        conta: String(linha.conta || '').trim() || null,
+        transacao_id: String(linha.transacao_id || '').trim() || null,
         valor: Math.abs(valor),
         tipo: tipoTexto === 'credito' ? 'CREDITO' : 'DEBITO',
       });
@@ -396,11 +413,17 @@ function ImportarExcel({ contas, token, onConcluida }) {
   const [contaId, setContaId] = useState(contas[0]?.id || '');
   const [novaConta, setNovaConta] = useState('Importação XLSX');
   const [validacao, setValidacao] = useState(null);
+  const [preview, setPreview] = useState(null);
+  const [mapeamentoCategorias, setMapeamentoCategorias] = useState([]);
   const [carregando, setCarregando] = useState(false);
+
+  const authHeaders = { Authorization: `Bearer ${token}` };
 
   const processarArquivo = async (file) => {
     setArquivo(file);
     setValidacao(null);
+    setPreview(null);
+    setMapeamentoCategorias([]);
     setCarregando(true);
     try {
       const dados = await lerXlsxPadrao(file);
@@ -412,19 +435,43 @@ function ImportarExcel({ contas, token, onConcluida }) {
     }
   };
 
-  const importar = async () => {
+  const gerarPreview = async () => {
     if (!validacao?.valido) return;
     setCarregando(true);
     try {
-      const response = await axios.post(`${API_URL}/importar`, {
+      const response = await axios.post(`${API_URL}/importacoes/xlsx/preview`, {
         conta_id: contaId || undefined,
         conta_nome: contaId ? undefined : novaConta,
         transacoes: validacao.transacoes,
         nome_arquivo: arquivo.name,
         arquivo_base64: await arquivoParaBase64(arquivo),
-      }, { headers: { Authorization: `Bearer ${token}` } });
+      }, { headers: authHeaders });
+      setPreview(response.data);
+      setMapeamentoCategorias((response.data.categoriasPendentes || []).map((pendencia) => ({
+        tipo: pendencia.tipo,
+        nomePlanilha: pendencia.nomePlanilha,
+        categoriaMacroPlanilha: pendencia.categoriaMacroPlanilha || null,
+        acao: '',
+        categoriaExistenteId: pendencia.possiveisCorrespondencias?.[0]?.id || '',
+        nomeCorrigido: pendencia.nomePlanilha,
+      })));
+    } catch (error) {
+      alert(montarMensagemErroImportacao(error));
+    } finally {
+      setCarregando(false);
+    }
+  };
 
-      alert(`${response.data.mensagem}\n${response.data.duplicadas || 0} duplicadas ignoradas.`);
+  const confirmarImportacao = async (acao) => {
+    if (!preview?.tokenPreview) return;
+    setCarregando(true);
+    try {
+      const response = await axios.post(`${API_URL}/importacoes/xlsx/confirmar`, {
+        tokenPreview: preview.tokenPreview,
+        acao,
+        mapeamentoCategorias,
+      }, { headers: authHeaders });
+      alert(response.data.mensagem || 'Importação concluída.');
       onConcluida();
     } catch (error) {
       alert(montarMensagemErroImportacao(error));
@@ -433,22 +480,49 @@ function ImportarExcel({ contas, token, onConcluida }) {
     }
   };
 
+  const limpar = () => {
+    setArquivo(null);
+    setValidacao(null);
+    setPreview(null);
+    setMapeamentoCategorias([]);
+  };
+
+  const atualizarMapeamentoCategoria = (chave, atualizacao) => {
+    setMapeamentoCategorias((atuais) => atuais.map((item) => {
+      const chaveItem = `${item.tipo}|${item.categoriaMacroPlanilha || ''}|${item.nomePlanilha}`;
+      return chaveItem === chave ? { ...item, ...atualizacao } : item;
+    }));
+  };
+
+  const categoriasPendentes = preview?.categoriasPendentes || [];
+  const mapeamentosResolvidos = categoriasPendentes.every((pendencia) => {
+    const chavePendencia = `${pendencia.tipo}|${pendencia.categoriaMacroPlanilha || ''}|${pendencia.nomePlanilha}`;
+    const decisao = mapeamentoCategorias.find((item) => `${item.tipo}|${item.categoriaMacroPlanilha || ''}|${item.nomePlanilha}` === chavePendencia);
+    if (!decisao?.acao) return false;
+    if (decisao.acao === 'USAR_EXISTENTE') return Boolean(decisao.categoriaExistenteId);
+    if (decisao.acao === 'CORRIGIR_NOME') return Boolean(decisao.nomeCorrigido?.trim());
+    return true;
+  });
+  const confirmacaoBloqueada = carregando || (categoriasPendentes.length > 0 && !mapeamentosResolvidos);
+  const resumo = preview?.resumo || {};
+
   return (
     <div>
       <h2>📊 Importar transações por planilha XLSX</h2>
       <div style={{ background: '#f8fafc', border: '1px solid #e5e7eb', borderRadius: '14px', padding: '16px', marginTop: '12px' }}>
         <p style={{ color: '#374151', marginTop: 0 }}>
           Use esta tela para trazer para o app as transações que você organizou em uma planilha Excel.
-          Antes de enviar, o sistema confere se os dados estão no formato esperado.
+          Se a planilha contiver transações já cadastradas, o sistema irá comparar os dados e mostrar um resumo antes de atualizar qualquer informação.
         </p>
+        <p style={{ color: '#92400e', fontWeight: 'bold', marginTop: 0 }}>Nenhuma alteração será aplicada sem sua confirmação.</p>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '12px' }}>
           <div style={{ background: 'white', border: '1px solid #e5e7eb', borderRadius: '10px', padding: '12px' }}>
             <strong>Colunas obrigatórias</strong>
-            <p style={{ color: '#6b7280', marginBottom: 0 }}>Data, Descrição, Categoria, Valor e Tipo.</p>
+            <p style={{ color: '#6b7280', marginBottom: 0 }}>Data, Descrição, Valor e Tipo.</p>
           </div>
           <div style={{ background: 'white', border: '1px solid #e5e7eb', borderRadius: '10px', padding: '12px' }}>
-            <strong>Exemplo de linha válida</strong>
-            <p style={{ color: '#6b7280', marginBottom: 0 }}>2026-01-15 | Supermercado | Alimentação | 150,50 | Débito</p>
+            <strong>Colunas opcionais</strong>
+            <p style={{ color: '#6b7280', marginBottom: 0 }}>ID/Transacao_ID, Conta, Categoria Macro, Categoria Detalhada ou Categoria.</p>
           </div>
         </div>
       </div>
@@ -456,17 +530,16 @@ function ImportarExcel({ contas, token, onConcluida }) {
       <div style={{ margin: '18px 0', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '14px', padding: '16px' }}>
         <label style={{ display: 'block', fontWeight: 'bold', marginBottom: '8px' }}>Conta de destino</label>
         <p style={{ color: '#92400e', marginTop: 0 }}>
-          Conta de destino é a conta, cartão ou carteira onde essas movimentações serão registradas.
-          Todas as transações importadas deste arquivo serão vinculadas à conta escolhida abaixo.
+          A conta de destino participa da chave de identificação da transação quando a planilha não traz ID interno.
         </p>
         {contas.length > 0 && (
-          <select value={contaId} onChange={(event) => setContaId(event.target.value)} style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db', marginRight: '10px' }}>
+          <select value={contaId} onChange={(event) => { setContaId(event.target.value); setPreview(null); }} style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db', marginRight: '10px' }}>
             {contas.map((conta) => <option key={conta.id} value={conta.id}>{conta.nome}</option>)}
             <option value="">+ Criar nova conta</option>
           </select>
         )}
         {(!contaId || contas.length === 0) && (
-          <input value={novaConta} onChange={(event) => setNovaConta(event.target.value)} placeholder="Nome da nova conta" style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} />
+          <input value={novaConta} onChange={(event) => { setNovaConta(event.target.value); setPreview(null); }} placeholder="Nome da nova conta" style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} />
         )}
       </div>
 
@@ -480,7 +553,7 @@ function ImportarExcel({ contas, token, onConcluida }) {
       >
         <input type="file" accept=".xlsx" onChange={(event) => event.target.files?.[0] && processarArquivo(event.target.files[0])} style={{ display: 'none' }} />
         <strong>{arquivo ? `📄 ${arquivo.name}` : 'Clique aqui ou arraste sua planilha .xlsx'}</strong>
-        <p style={{ color: '#2563eb', marginBottom: 0 }}>Selecione o arquivo Excel no formato explicado acima.</p>
+        <p style={{ color: '#2563eb', marginBottom: 0 }}>Selecione o arquivo Excel para validar e pré-visualizar antes de gravar.</p>
       </label>
 
       {carregando && <p>Processando...</p>}
@@ -493,15 +566,127 @@ function ImportarExcel({ contas, token, onConcluida }) {
         </div>
       )}
 
-      {validacao?.valido && (
+      {validacao?.valido && !preview && (
         <div style={{ background: '#ecfdf5', color: '#065f46', borderRadius: '10px', padding: '14px', marginTop: '16px' }}>
-          ✅ {validacao.transacoes.length} linhas validadas e prontas para importar na conta selecionada.
+          ✅ {validacao.transacoes.length} linhas validadas. Gere o preview para ver novas, iguais, alteradas e erros antes de importar.
         </div>
       )}
 
-      <div style={{ marginTop: '18px', display: 'flex', gap: '10px' }}>
-        <button onClick={importar} disabled={!validacao?.valido || carregando} style={{ background: '#10b981', color: 'white', border: 'none', padding: '12px 18px', borderRadius: '8px', cursor: validacao?.valido ? 'pointer' : 'not-allowed', opacity: validacao?.valido ? 1 : 0.6 }}>Importar transações</button>
-        <button onClick={() => { setArquivo(null); setValidacao(null); }} style={{ background: '#e5e7eb', border: 'none', padding: '12px 18px', borderRadius: '8px', cursor: 'pointer' }}>LIMPAR</button>
+      {preview && (
+        <div style={{ background: 'white', border: '1px solid #d1d5db', borderRadius: '14px', padding: '16px', marginTop: '18px' }}>
+          <h3 style={{ marginTop: 0 }}>Preview da importação</h3>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '10px', marginBottom: '14px' }}>
+            <KpiCard titulo="Novas" valor={resumo.novas || 0} detalhe="Serão inseridas" cor="#059669" fundo="#ecfdf5" />
+            <KpiCard titulo="Sem alteração" valor={resumo.semAlteracao || 0} detalhe="Serão ignoradas" cor="#475569" fundo="#f8fafc" />
+            <KpiCard titulo="Com alteração" valor={resumo.comAlteracao || 0} detalhe="Dependem de confirmação" cor="#d97706" fundo="#fffbeb" />
+            <KpiCard titulo="Com erro" valor={resumo.comErro || 0} detalhe="Não serão aplicadas" cor="#dc2626" fundo="#fef2f2" />
+          </div>
+
+          {(preview.categoriasNovas || []).length > 0 && (
+            <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '10px', padding: '12px', marginBottom: '14px' }}>
+              <strong>Categorias novas sem similaridade serão criadas após confirmação</strong>
+              <p style={{ margin: '6px 0 0', color: '#166534' }}>
+                {(preview.categoriasNovas || []).map((cat) => `${cat.tipo === 'MACRO' ? 'Macro' : 'Detalhada'}: ${cat.nomePlanilha}`).join(' • ')}
+              </p>
+            </div>
+          )}
+
+          {categoriasPendentes.length > 0 && (
+            <div style={{ background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: '10px', padding: '14px', marginBottom: '14px' }}>
+              <h3 style={{ marginTop: 0 }}>Revisar categorias da planilha</h3>
+              <p style={{ color: '#9a3412' }}>
+                Encontramos categorias na planilha que não existem no sistema, mas parecem semelhantes a categorias já cadastradas. Escolha como deseja tratar cada caso antes de importar.
+              </p>
+              <div style={{ display: 'grid', gap: '12px' }}>
+                {categoriasPendentes.map((pendencia) => {
+                  const chave = `${pendencia.tipo}|${pendencia.categoriaMacroPlanilha || ''}|${pendencia.nomePlanilha}`;
+                  const decisao = mapeamentoCategorias.find((item) => `${item.tipo}|${item.categoriaMacroPlanilha || ''}|${item.nomePlanilha}` === chave) || {};
+
+                  return (
+                    <div key={pendencia.chave || chave} style={{ background: 'white', border: '1px solid #fed7aa', borderRadius: '10px', padding: '12px' }}>
+                      <div style={{ display: 'grid', gap: '4px', marginBottom: '10px' }}>
+                        <strong>{pendencia.tipo === 'MACRO' ? 'Categoria macro' : 'Categoria detalhada'}: {pendencia.nomePlanilha}</strong>
+                        {pendencia.categoriaMacroPlanilha && <span style={{ color: '#9a3412', fontSize: '13px' }}>Macro relacionada: {pendencia.categoriaMacroPlanilha}</span>}
+                        <span style={{ color: '#6b7280', fontSize: '13px' }}>
+                          Possíveis correspondências: {pendencia.possiveisCorrespondencias.map((item) => `${item.nome} (${Math.round((item.similaridade || 0) * 100)}%)`).join(', ')}
+                        </span>
+                      </div>
+
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '10px' }}>
+                        <label style={{ display: 'grid', gap: '6px', fontSize: '13px' }}>
+                          Decisão
+                          <select value={decisao.acao || ''} onChange={(event) => atualizarMapeamentoCategoria(chave, { acao: event.target.value })} style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}>
+                            <option value="">Escolha uma ação</option>
+                            <option value="USAR_EXISTENTE">Usar categoria existente</option>
+                            <option value="CRIAR_NOVA">Criar nova categoria</option>
+                            <option value="CORRIGIR_NOME">Corrigir nome manualmente</option>
+                          </select>
+                        </label>
+
+                        {decisao.acao === 'USAR_EXISTENTE' && (
+                          <label style={{ display: 'grid', gap: '6px', fontSize: '13px' }}>
+                            Categoria existente
+                            <select value={decisao.categoriaExistenteId || ''} onChange={(event) => atualizarMapeamentoCategoria(chave, { categoriaExistenteId: event.target.value })} style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}>
+                              <option value="">Selecione</option>
+                              {pendencia.possiveisCorrespondencias.map((item) => <option key={item.id} value={item.id}>{item.nome}{item.categoriaMacro ? ` (${item.categoriaMacro})` : ''}</option>)}
+                            </select>
+                          </label>
+                        )}
+
+                        {decisao.acao === 'CORRIGIR_NOME' && (
+                          <label style={{ display: 'grid', gap: '6px', fontSize: '13px' }}>
+                            Nome corrigido
+                            <input value={decisao.nomeCorrigido || ''} onChange={(event) => atualizarMapeamentoCategoria(chave, { nomeCorrigido: event.target.value })} placeholder="Digite o nome correto" style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} />
+                          </label>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              {!mapeamentosResolvidos && <p style={{ color: '#b45309', fontWeight: 'bold', marginBottom: 0 }}>Resolva as categorias pendentes antes de concluir a importação.</p>}
+            </div>
+          )}
+
+          {(preview.comAlteracao || []).length > 0 && (
+            <div style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '10px', padding: '12px', marginBottom: '14px' }}>
+              <strong>Encontramos transações que já existem no sistema, mas possuem alterações na planilha. Deseja atualizar os registros existentes com os novos dados?</strong>
+              <div style={{ overflowX: 'auto', marginTop: '12px' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+                  <thead><tr><th style={{ textAlign: 'left', padding: '8px' }}>Linha</th><th style={{ textAlign: 'left', padding: '8px' }}>Descrição</th><th style={{ textAlign: 'left', padding: '8px' }}>Alterações</th></tr></thead>
+                  <tbody>{preview.comAlteracao.slice(0, 8).map((item) => (
+                    <tr key={`${item.transacaoId}-${item.linha}`} style={{ borderTop: '1px solid #fde68a' }}>
+                      <td style={{ padding: '8px' }}>{item.linha}</td>
+                      <td style={{ padding: '8px' }}>{item.descricao}</td>
+                      <td style={{ padding: '8px' }}>{item.alteracoes.map((alt) => `${alt.campo}: ${alt.valorAtual || 'vazio'} → ${alt.novoValor || 'vazio'}`).join('; ')}</td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {(preview.erros || []).length > 0 && (
+            <div style={{ background: '#fef2f2', color: '#991b1b', borderRadius: '10px', padding: '12px', marginBottom: '14px' }}>
+              <strong>Linhas com erro</strong>
+              <ul>{preview.erros.slice(0, 8).map((erro) => <li key={`${erro.linha}-${erro.erro}`}>Linha {erro.linha}: {erro.erro}</li>)}</ul>
+            </div>
+          )}
+        </div>
+      )}
+
+      <div style={{ marginTop: '18px', display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+        {!preview ? (
+          <button onClick={gerarPreview} disabled={!validacao?.valido || carregando} style={{ background: '#2563eb', color: 'white', border: 'none', padding: '12px 18px', borderRadius: '8px', cursor: validacao?.valido ? 'pointer' : 'not-allowed', opacity: validacao?.valido ? 1 : 0.6 }}>Gerar preview</button>
+        ) : (
+          <>
+            <button onClick={() => confirmarImportacao('CANCELAR')} disabled={carregando} style={{ background: '#e5e7eb', border: 'none', padding: '12px 18px', borderRadius: '8px', cursor: 'pointer' }}>Cancelar</button>
+            <button onClick={() => confirmarImportacao('IMPORTAR_APENAS_NOVAS')} disabled={confirmacaoBloqueada || !resumo.novas} style={{ background: '#10b981', color: 'white', border: 'none', padding: '12px 18px', borderRadius: '8px', cursor: (!confirmacaoBloqueada && resumo.novas) ? 'pointer' : 'not-allowed', opacity: (!confirmacaoBloqueada && resumo.novas) ? 1 : 0.6 }}>Importar somente novas</button>
+            <button onClick={() => confirmarImportacao('ATUALIZAR_EXISTENTES')} disabled={confirmacaoBloqueada || !resumo.comAlteracao} style={{ background: '#f59e0b', color: 'white', border: 'none', padding: '12px 18px', borderRadius: '8px', cursor: (!confirmacaoBloqueada && resumo.comAlteracao) ? 'pointer' : 'not-allowed', opacity: (!confirmacaoBloqueada && resumo.comAlteracao) ? 1 : 0.6 }}>Atualizar existentes</button>
+            <button onClick={() => confirmarImportacao('IMPORTAR_NOVAS_E_ATUALIZAR_EXISTENTES')} disabled={confirmacaoBloqueada || (!resumo.novas && !resumo.comAlteracao)} style={{ background: '#7c3aed', color: 'white', border: 'none', padding: '12px 18px', borderRadius: '8px', cursor: (!confirmacaoBloqueada && (resumo.novas || resumo.comAlteracao)) ? 'pointer' : 'not-allowed', opacity: (!confirmacaoBloqueada && (resumo.novas || resumo.comAlteracao)) ? 1 : 0.6 }}>Importar novas e atualizar existentes</button>
+          </>
+        )}
+        <button onClick={limpar} style={{ background: '#e5e7eb', border: 'none', padding: '12px 18px', borderRadius: '8px', cursor: 'pointer' }}>LIMPAR</button>
       </div>
     </div>
   );
@@ -1185,10 +1370,11 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
   const [categoriaModalAberta, setCategoriaModalAberta] = useState(false);
   const [transacaoSelecionada, setTransacaoSelecionada] = useState(null);
   const [selecionadas, setSelecionadas] = useState([]);
-  const [filtros, setFiltros] = useState({ busca: '', conta: contaInicial?.id || 'todas', categoria: 'todas', status: 'todas', tipo: 'todos' });
+  const [filtros, setFiltros] = useState({ busca: '', conta: contaInicial?.id || 'todas', categoriaMacro: 'todas', categoriaDetalhada: 'todas', status: 'todas', tipo: 'todos' });
   const [dataInicial, setDataInicial] = useState('');
   const [dataFinal, setDataFinal] = useState('');
-  const [categoriaEscolhida, setCategoriaEscolhida] = useState('');
+  const [categoriaMacroEscolhida, setCategoriaMacroEscolhida] = useState('');
+  const [categoriaDetalhadaEscolhida, setCategoriaDetalhadaEscolhida] = useState('');
   const [criarRegra, setCriarRegra] = useState(false);
   const [termoRegra, setTermoRegra] = useState('');
   const [salvandoCategoria, setSalvandoCategoria] = useState(false);
@@ -1220,7 +1406,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
       setTransacoes(transacoesResponse.data.transacoes || []);
       const categoriasUnicas = Array.from(
         new Map((categoriasResponse.data.categorias || []).map((categoria) => [
-          `${categoria.nome}-${categoria.tipo}-${categoria.usuario_id || 'padrao'}`,
+          `${categoria.nome}-${categoria.tipo}-${categoria.nivel || (categoria.categoria_pai_id ? 'DETALHADA' : 'MACRO')}-${categoria.categoria_pai_id || 'raiz'}-${categoria.usuario_id || 'padrao'}`,
           categoria,
         ])).values()
       );
@@ -1240,24 +1426,34 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
       const dataTx = normalizarDataFiltro(tx.data);
       const correspondeBusca = !buscaNormalizada || descricao.includes(buscaNormalizada);
       const correspondeConta = filtros.conta === 'todas' || tx.conta_id === filtros.conta;
-      const correspondeCategoria = filtros.categoria === 'todas' || (tx.categoria_id || 'sem') === filtros.categoria;
+      const correspondeMacro = filtros.categoriaMacro === 'todas'
+        || (filtros.categoriaMacro === 'sem' && !tx.categoria_macro_id && !tx.categoria_id)
+        || tx.categoria_macro_id === filtros.categoriaMacro
+        || (!tx.categoria_macro_id && tx.categoria_id === filtros.categoriaMacro);
+      const correspondeDetalhada = filtros.categoriaDetalhada === 'todas'
+        || (filtros.categoriaDetalhada === 'sem' && !tx.categoria_detalhada_id)
+        || tx.categoria_detalhada_id === filtros.categoriaDetalhada;
       const correspondeStatus = filtros.status === 'todas'
-        || (filtros.status === 'sem' && !tx.categoria_id)
-        || (filtros.status === 'categorizadas' && Boolean(tx.categoria_id));
+        || (filtros.status === 'sem' && !tx.categoria_macro_id && !tx.categoria_id)
+        || (filtros.status === 'categorizadas' && Boolean(tx.categoria_macro_id || tx.categoria_id));
       const correspondeTipo = filtros.tipo === 'todos' || tx.tipo === filtros.tipo;
       const correspondeDataInicial = !dataInicial || dataTx >= dataInicial;
       const correspondeDataFinal = !dataFinal || dataTx <= dataFinal;
 
-      return correspondeBusca && correspondeConta && correspondeCategoria && correspondeStatus && correspondeTipo && correspondeDataInicial && correspondeDataFinal;
+      return correspondeBusca && correspondeConta && correspondeMacro && correspondeDetalhada && correspondeStatus && correspondeTipo && correspondeDataInicial && correspondeDataFinal;
     });
   }, [transacoes, filtros, dataInicial, dataFinal]);
 
   const idsFiltrados = transacoesFiltradas.map((tx) => tx.id);
   const todasFiltradasSelecionadas = idsFiltrados.length > 0 && idsFiltrados.every((id) => selecionadas.includes(id));
+  const categoriasMacro = categorias.filter((cat) => (cat.nivel || (cat.categoria_pai_id ? 'DETALHADA' : 'MACRO')) === 'MACRO');
+  const categoriasDetalhadasModal = categorias.filter((cat) => (cat.nivel || (cat.categoria_pai_id ? 'DETALHADA' : 'MACRO')) === 'DETALHADA' && cat.categoria_pai_id === categoriaMacroEscolhida);
+  const categoriasDetalhadasFiltro = categorias.filter((cat) => (cat.nivel || (cat.categoria_pai_id ? 'DETALHADA' : 'MACRO')) === 'DETALHADA' && (filtros.categoriaMacro === 'todas' || cat.categoria_pai_id === filtros.categoriaMacro));
 
   const abrirModalIndividual = (tx) => {
     setTransacaoSelecionada(tx);
-    setCategoriaEscolhida(tx.categoria_id || '');
+    setCategoriaMacroEscolhida(tx.categoria_macro_id || (tx.categoria_detalhada_id ? '' : tx.categoria_id) || '');
+    setCategoriaDetalhadaEscolhida(tx.categoria_detalhada_id || '');
     setCriarRegra(false);
     setTermoRegra(sugerirTermoRegra(tx.descricao));
     setCategoriaModalAberta(true);
@@ -1271,7 +1467,8 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
 
     const primeira = transacoes.find((tx) => selecionadas.includes(tx.id));
     setTransacaoSelecionada(null);
-    setCategoriaEscolhida('');
+    setCategoriaMacroEscolhida('');
+    setCategoriaDetalhadaEscolhida('');
     setCriarRegra(false);
     setTermoRegra(sugerirTermoRegra(filtros.busca || primeira?.descricao || ''));
     setCategoriaModalAberta(true);
@@ -1280,14 +1477,15 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
   const fecharModal = () => {
     setCategoriaModalAberta(false);
     setTransacaoSelecionada(null);
-    setCategoriaEscolhida('');
+    setCategoriaMacroEscolhida('');
+    setCategoriaDetalhadaEscolhida('');
     setCriarRegra(false);
     setTermoRegra('');
   };
 
   const handleCategorizar = async () => {
-    if (!categoriaEscolhida) {
-      alert('Escolha uma categoria.');
+    if (!categoriaMacroEscolhida) {
+      alert('Escolha uma categoria macro.');
       return;
     }
 
@@ -1300,7 +1498,8 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
 
     try {
       const payload = {
-        categoriaId: categoriaEscolhida,
+        categoriaMacroId: categoriaMacroEscolhida,
+        categoriaDetalhadaId: categoriaDetalhadaEscolhida || null,
         criarRegra,
         termoRegra: criarRegra ? termoRegra : undefined,
       };
@@ -1338,7 +1537,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
   };
 
   const limparFiltros = () => {
-    setFiltros({ busca: '', conta: 'todas', categoria: 'todas', status: 'todas', tipo: 'todos' });
+    setFiltros({ busca: '', conta: 'todas', categoriaMacro: 'todas', categoriaDetalhada: 'todas', status: 'todas', tipo: 'todos' });
     setDataInicial('');
     setDataFinal('');
   };
@@ -1444,7 +1643,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
 
       <div style={{ padding: '20px', maxWidth: '1200px', margin: '0 auto' }}>
         <div style={{ background: 'white', borderRadius: '12px', padding: '16px', marginBottom: '16px', boxShadow: '0 2px 8px rgba(0,0,0,0.08)' }}>
-          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(220px, 2fr) repeat(4, 1fr)', gap: '12px', alignItems: 'end' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(220px, 2fr) repeat(5, 1fr)', gap: '12px', alignItems: 'end' }}>
             <label style={{ display: 'grid', gap: '6px', fontSize: '13px', color: '#374151' }}>
               Pesquisar descrição
               <input value={filtros.busca} onChange={(event) => setFiltros({ ...filtros, busca: event.target.value })} placeholder="Ex.: AUTO POSTO" style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} />
@@ -1457,11 +1656,19 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
               </select>
             </label>
             <label style={{ display: 'grid', gap: '6px', fontSize: '13px', color: '#374151' }}>
-              Categoria
-              <select value={filtros.categoria} onChange={(event) => setFiltros({ ...filtros, categoria: event.target.value })} style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}>
+              Categoria macro
+              <select value={filtros.categoriaMacro} onChange={(event) => setFiltros({ ...filtros, categoriaMacro: event.target.value, categoriaDetalhada: 'todas' })} style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}>
                 <option value="todas">Todas</option>
                 <option value="sem">Sem categoria</option>
-                {categorias.map((cat) => <option key={cat.id} value={cat.id}>{cat.emoji} {cat.nome}</option>)}
+                {categoriasMacro.map((cat) => <option key={cat.id} value={cat.id}>{cat.emoji} {cat.nome}</option>)}
+              </select>
+            </label>
+            <label style={{ display: 'grid', gap: '6px', fontSize: '13px', color: '#374151' }}>
+              Categoria detalhada
+              <select value={filtros.categoriaDetalhada} onChange={(event) => setFiltros({ ...filtros, categoriaDetalhada: event.target.value })} style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}>
+                <option value="todas">Todas</option>
+                <option value="sem">Sem detalhamento</option>
+                {categoriasDetalhadasFiltro.map((cat) => <option key={cat.id} value={cat.id}>{cat.emoji} {cat.nome}</option>)}
               </select>
             </label>
             <label style={{ display: 'grid', gap: '6px', fontSize: '13px', color: '#374151' }}>
@@ -1553,7 +1760,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
                     <td style={{ padding: '12px' }}>{tx.tipo === 'CREDITO' ? 'Crédito' : 'Débito'}</td>
                     <td style={{ padding: '12px' }}>
                       <span style={{ background: tx.categoria_origem === 'AUTO' ? '#dbeafe' : '#e5e7eb', padding: '4px 8px', borderRadius: '4px', fontSize: '12px' }}>
-                        {tx.categoria_nome || 'Sem categoria'}{tx.categoria_origem === 'AUTO' ? ' • auto' : ''}
+                        {tx.categoria_macro_nome || tx.categoria_nome || 'Sem categoria'}{tx.categoria_detalhada_nome ? ` › ${tx.categoria_detalhada_nome}` : ''}{tx.categoria_origem === 'AUTO' ? ' • auto' : ''}
                       </span>
                     </td>
                     <td style={{ padding: '12px', textAlign: 'center' }}>
@@ -1589,11 +1796,20 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
             {transacaoSelecionada && <p style={{ color: '#666', marginBottom: '20px' }}>{formatarMoeda(transacaoSelecionada.valor)}</p>}
 
             <label style={{ display: 'grid', gap: '6px', marginBottom: '14px', fontSize: '14px' }}>
-              Categoria
-              <select value={categoriaEscolhida} onChange={(event) => setCategoriaEscolhida(event.target.value)} style={{ padding: '12px', borderRadius: '8px', border: '1px solid #d1d5db' }}>
-                <option value="">Selecione uma categoria</option>
-                {categorias.map((cat) => <option key={cat.id} value={cat.id}>{cat.emoji} {cat.nome}</option>)}
+              Categoria macro
+              <select value={categoriaMacroEscolhida} onChange={(event) => { setCategoriaMacroEscolhida(event.target.value); setCategoriaDetalhadaEscolhida(''); }} style={{ padding: '12px', borderRadius: '8px', border: '1px solid #d1d5db' }}>
+                <option value="">Selecione uma categoria macro</option>
+                {categoriasMacro.map((cat) => <option key={cat.id} value={cat.id}>{cat.emoji} {cat.nome}</option>)}
               </select>
+            </label>
+
+            <label style={{ display: 'grid', gap: '6px', marginBottom: '14px', fontSize: '14px' }}>
+              Categoria detalhada
+              <select value={categoriaDetalhadaEscolhida} onChange={(event) => setCategoriaDetalhadaEscolhida(event.target.value)} disabled={!categoriaMacroEscolhida} style={{ padding: '12px', borderRadius: '8px', border: '1px solid #d1d5db', background: categoriaMacroEscolhida ? 'white' : '#f3f4f6' }}>
+                <option value="">Sem detalhamento</option>
+                {categoriasDetalhadasModal.map((cat) => <option key={cat.id} value={cat.id}>{cat.emoji} {cat.nome}</option>)}
+              </select>
+              <small style={{ color: '#6b7280' }}>Você pode salvar apenas a macro e detalhar depois.</small>
             </label>
 
             <label style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px', fontSize: '14px' }}>

@@ -81,6 +81,8 @@ CREATE TABLE transacoes (
   
   -- Categorização
   categoria_id UUID REFERENCES categorias(id) ON DELETE SET NULL,
+  categoria_macro_id UUID REFERENCES categorias(id) ON DELETE SET NULL,
+  categoria_detalhada_id UUID REFERENCES categorias(id) ON DELETE SET NULL,
   categoria_origem VARCHAR(20),
   regra_categorizacao_id UUID,
   eh_transferencia_interna BOOLEAN DEFAULT false,
@@ -104,6 +106,8 @@ CREATE TABLE transacoes (
 
 CREATE INDEX idx_transacoes_conta ON transacoes(conta_id);
 CREATE INDEX idx_transacoes_categoria ON transacoes(categoria_id);
+CREATE INDEX idx_transacoes_categoria_macro ON transacoes(categoria_macro_id);
+CREATE INDEX idx_transacoes_categoria_detalhada ON transacoes(categoria_detalhada_id);
 CREATE INDEX idx_transacoes_categoria_origem ON transacoes(categoria_origem);
 CREATE INDEX idx_transacoes_transferencia_interna ON transacoes(eh_transferencia_interna, transferencia_grupo_id);
 CREATE INDEX idx_transacoes_data ON transacoes(data);
@@ -128,6 +132,7 @@ CREATE TABLE categorias (
   
   -- Hierarchy
   categoria_pai_id UUID REFERENCES categorias(id) ON DELETE SET NULL,
+  nivel VARCHAR(20) DEFAULT 'MACRO',
   
   -- Tipo
   tipo ENUM('DESPESA', 'RECEITA', 'TRANSFERENCIA', 'INVESTIMENTO') DEFAULT 'DESPESA',

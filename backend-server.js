@@ -17,6 +17,8 @@ const { Readable } = require('stream');
 dotenv.config();
 
 const app = express();
+const previewsImportacao = new Map();
+const PREVIEW_IMPORTACAO_TTL_MS = 30 * 60 * 1000;
 
 // ============================================================================
 // MIDDLEWARE
@@ -124,6 +126,7 @@ async function inicializarBanco() {
       icon VARCHAR(50),
       emoji VARCHAR(5),
       categoria_pai_id UUID REFERENCES categorias(id) ON DELETE SET NULL,
+      nivel VARCHAR(20) DEFAULT 'MACRO',
       tipo VARCHAR(50) DEFAULT 'DESPESA',
       customizada BOOLEAN DEFAULT true,
       ativa BOOLEAN DEFAULT true,
@@ -134,6 +137,18 @@ async function inicializarBanco() {
 
   await pool.query('CREATE INDEX IF NOT EXISTS idx_categorias_usuario ON categorias(usuario_id)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_categorias_ativa ON categorias(ativa)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_categorias_pai ON categorias(categoria_pai_id)');
+
+  await pool.query(`
+    ALTER TABLE categorias
+      ADD COLUMN IF NOT EXISTS nivel VARCHAR(20) DEFAULT 'MACRO'
+  `);
+
+  await pool.query(`
+    UPDATE categorias
+    SET nivel = CASE WHEN categoria_pai_id IS NULL THEN 'MACRO' ELSE 'DETALHADA' END
+    WHERE nivel IS NULL
+  `);
 
   await pool.query(`
     DO $$
@@ -275,10 +290,27 @@ async function inicializarBanco() {
 
   await pool.query(`
     ALTER TABLE transacoes
+      ADD COLUMN IF NOT EXISTS categoria_macro_id UUID REFERENCES categorias(id) ON DELETE SET NULL,
+      ADD COLUMN IF NOT EXISTS categoria_detalhada_id UUID REFERENCES categorias(id) ON DELETE SET NULL,
       ADD COLUMN IF NOT EXISTS categoria_origem VARCHAR(20),
       ADD COLUMN IF NOT EXISTS regra_categorizacao_id UUID,
       ADD COLUMN IF NOT EXISTS eh_transferencia_interna BOOLEAN DEFAULT false,
       ADD COLUMN IF NOT EXISTS transferencia_grupo_id UUID
+  `);
+
+  await pool.query(`
+    UPDATE transacoes t
+    SET categoria_macro_id = CASE
+          WHEN c.categoria_pai_id IS NULL THEN t.categoria_id
+          ELSE c.categoria_pai_id
+        END,
+        categoria_detalhada_id = CASE
+          WHEN c.categoria_pai_id IS NULL THEN NULL
+          ELSE t.categoria_id
+        END
+    FROM categorias c
+    WHERE t.categoria_id = c.id
+      AND (t.categoria_macro_id IS NULL AND t.categoria_detalhada_id IS NULL)
   `);
 
   await pool.query(`
@@ -298,6 +330,8 @@ async function inicializarBanco() {
 
   await pool.query('CREATE INDEX IF NOT EXISTS idx_transacoes_conta ON transacoes(conta_id)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_transacoes_categoria ON transacoes(categoria_id)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_transacoes_categoria_macro ON transacoes(categoria_macro_id)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_transacoes_categoria_detalhada ON transacoes(categoria_detalhada_id)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_transacoes_data ON transacoes(data)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_transacoes_hash ON transacoes(hash_transacao)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_transacoes_categoria_origem ON transacoes(categoria_origem)');
@@ -377,16 +411,16 @@ async function inicializarBanco() {
   `);
 
   await pool.query(`
-    INSERT INTO categorias (nome, tipo, emoji, customizada)
+    INSERT INTO categorias (nome, tipo, emoji, customizada, nivel)
     VALUES
-      ('Alimentação', 'DESPESA', '🍔', false),
-      ('Transporte', 'DESPESA', '🚗', false),
-      ('Saúde', 'DESPESA', '❤️', false),
-      ('Educação', 'DESPESA', '📚', false),
-      ('Moradia', 'DESPESA', '🏠', false),
-      ('Diversão', 'DESPESA', '🎭', false),
-      ('Salário', 'RECEITA', '💼', false),
-      ('Outros', 'DESPESA', '•••', false)
+      ('Alimentação', 'DESPESA', '🍔', false, 'MACRO'),
+      ('Transporte', 'DESPESA', '🚗', false, 'MACRO'),
+      ('Saúde', 'DESPESA', '❤️', false, 'MACRO'),
+      ('Educação', 'DESPESA', '📚', false, 'MACRO'),
+      ('Moradia', 'DESPESA', '🏠', false, 'MACRO'),
+      ('Diversão', 'DESPESA', '🎭', false, 'MACRO'),
+      ('Salário', 'RECEITA', '💼', false, 'MACRO'),
+      ('Outros', 'DESPESA', '•••', false, 'MACRO')
     ON CONFLICT DO NOTHING
   `);
 }
@@ -405,13 +439,21 @@ const oauth2Client = new google.auth.OAuth2(
 // HELPERS
 // ============================================================================
 
-function gerarHashTransacao(tx) {
+function gerarHashTransacao(tx, contaId = tx.conta_id || tx.contaId || tx.conta) {
+  const data = tx.data instanceof Date ? tx.data.toISOString().slice(0, 10) : String(tx.data || '').slice(0, 10);
+  const descricao = normalizarDescricaoCategorizacao(tx.descricao).toLowerCase();
+  const valor = Number(tx.valor || 0).toFixed(2);
+  const tipo = String(tx.tipo || '').trim().toUpperCase();
+  const str = `${contaId || ''}|${data}|${descricao}|${valor}|${tipo}`;
+  return crypto.createHash('sha256').update(str).digest('hex');
+}
+
+function gerarHashTransacaoLegado(tx) {
   const data = tx.data instanceof Date ? tx.data.toISOString().slice(0, 10) : String(tx.data || '').slice(0, 10);
   const descricao = String(tx.descricao || '').trim().toLowerCase();
   const valor = Number(tx.valor || 0).toFixed(2);
   const tipo = String(tx.tipo || '').trim().toUpperCase();
-  const str = `${data}|${descricao}|${valor}|${tipo}`;
-  return crypto.createHash('sha256').update(str).digest('hex');
+  return crypto.createHash('sha256').update(`${data}|${descricao}|${valor}|${tipo}`).digest('hex');
 }
 
 function gerarHashArquivo(nomeArquivo, transacoes = []) {
@@ -431,6 +473,71 @@ function normalizarDataImportacao(data) {
   return d.toISOString().slice(0, 10);
 }
 
+function normalizarNomeCategoria(nome) {
+  return String(nome || '').trim().replace(/\s+/g, ' ');
+}
+
+function normalizarCategoriaComparacao(nome) {
+  return normalizarNomeCategoria(nome)
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/ç/g, 'c')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .split(' ')
+    .map((palavra) => {
+      if (palavra.length > 5 && palavra.endsWith('oes')) return palavra.slice(0, -3) + 'ao';
+      if (palavra.length > 4 && palavra.endsWith('es')) return palavra.slice(0, -2);
+      if (palavra.length > 3 && palavra.endsWith('s')) return palavra.slice(0, -1);
+      return palavra;
+    })
+    .join(' ');
+}
+
+function distanciaLevenshtein(a, b) {
+  const s = normalizarCategoriaComparacao(a);
+  const t = normalizarCategoriaComparacao(b);
+  if (s === t) return 0;
+  if (!s) return t.length;
+  if (!t) return s.length;
+
+  const matriz = Array.from({ length: s.length + 1 }, (_, i) => [i]);
+  for (let j = 1; j <= t.length; j++) matriz[0][j] = j;
+
+  for (let i = 1; i <= s.length; i++) {
+    for (let j = 1; j <= t.length; j++) {
+      const custo = s[i - 1] === t[j - 1] ? 0 : 1;
+      matriz[i][j] = Math.min(
+        matriz[i - 1][j] + 1,
+        matriz[i][j - 1] + 1,
+        matriz[i - 1][j - 1] + custo
+      );
+    }
+  }
+
+  return matriz[s.length][t.length];
+}
+
+function calcularSimilaridadeCategoria(a, b) {
+  const normalizadaA = normalizarCategoriaComparacao(a);
+  const normalizadaB = normalizarCategoriaComparacao(b);
+  if (!normalizadaA || !normalizadaB) return 0;
+  if (normalizadaA === normalizadaB) return 1;
+
+  const maior = Math.max(normalizadaA.length, normalizadaB.length);
+  const similaridadeLevenshtein = maior ? 1 - (distanciaLevenshtein(normalizadaA, normalizadaB) / maior) : 0;
+  const includes = normalizadaA.includes(normalizadaB) || normalizadaB.includes(normalizadaA) ? 0.88 : 0;
+  const palavrasA = new Set(normalizadaA.split(' ').filter(Boolean));
+  const palavrasB = new Set(normalizadaB.split(' ').filter(Boolean));
+  const intersecao = [...palavrasA].filter((palavra) => palavrasB.has(palavra)).length;
+  const uniao = new Set([...palavrasA, ...palavrasB]).size || 1;
+  const similaridadePalavras = intersecao / uniao;
+
+  return Number(Math.max(similaridadeLevenshtein, includes, similaridadePalavras).toFixed(2));
+}
+
 function validarTransacoesImportacao(transacoes) {
   if (!Array.isArray(transacoes) || transacoes.length === 0) {
     throw new Error('Envie ao menos uma transação para importar.');
@@ -440,15 +547,31 @@ function validarTransacoesImportacao(transacoes) {
     const linha = index + 2;
     const data = normalizarDataImportacao(tx.data);
     const descricao = String(tx.descricao || '').trim();
-    const categoria = String(tx.categoria || '').trim() || 'Outros';
+    const categoriaLegada = String(tx.categoria || '').trim();
+    const categoriaMacro = String(tx.categoria_macro || tx.categoriaMacro || tx.categoriaMacroNome || categoriaLegada || '').trim() || 'Outros';
+    const categoriaDetalhada = String(tx.categoria_detalhada || tx.categoriaDetalhada || tx.categoriaDetalhadaNome || '').trim();
     const valor = Math.abs(Number(tx.valor));
     const tipo = normalizarTipoTransacao(tx.tipo);
 
     if (!data) throw new Error(`Linha ${linha}: data inválida.`);
     if (!descricao) throw new Error(`Linha ${linha}: descrição obrigatória.`);
     if (!Number.isFinite(valor) || valor <= 0) throw new Error(`Linha ${linha}: valor inválido.`);
+    if (valor >= 10000000000) {
+      throw new Error(`Linha ${linha}: valor ${valor.toLocaleString('pt-BR')} excede o limite suportado de 9.999.999.999,99.`);
+    }
 
-    return { data, descricao, categoria, valor, tipo };
+    return {
+      id: tx.id || tx.transacao_id || tx.transacaoId || null,
+      transacao_id: tx.transacao_id || tx.transacaoId || tx.id || null,
+      conta: tx.conta || tx.conta_nome || tx.contaNome || null,
+      data,
+      descricao,
+      categoria: categoriaLegada || categoriaMacro,
+      categoria_macro: categoriaMacro,
+      categoria_detalhada: categoriaDetalhada || null,
+      valor,
+      tipo,
+    };
   });
 }
 
@@ -540,6 +663,8 @@ async function aplicarRegraEmTransacoesSemCategoria(usuarioId, regra) {
   const result = await pool.query(
     `UPDATE transacoes
      SET categoria_id = $1,
+         categoria_macro_id = COALESCE((SELECT categoria_pai_id FROM categorias WHERE id = $1), $1),
+         categoria_detalhada_id = CASE WHEN (SELECT categoria_pai_id FROM categorias WHERE id = $1) IS NULL THEN NULL ELSE $1 END,
          categoria_origem = 'AUTO',
          regra_categorizacao_id = $2,
          atualizado_em = NOW()
@@ -568,8 +693,9 @@ async function aplicarRegrasAtivasEmTransacoesSemCategoria(usuarioId) {
 }
 
 async function validarCategoriaDoUsuario(usuarioId, categoriaId) {
+  if (!categoriaId) return null;
   const categoria = await pool.query(
-    `SELECT id FROM categorias
+    `SELECT * FROM categorias
      WHERE id = $1 AND ativa = true AND (usuario_id = $2 OR usuario_id IS NULL)`,
     [categoriaId, usuarioId]
   );
@@ -577,24 +703,300 @@ async function validarCategoriaDoUsuario(usuarioId, categoriaId) {
   if (categoria.rows.length === 0) {
     throw new Error('Categoria não encontrada para este usuário.');
   }
+
+  return categoria.rows[0];
 }
 
-async function categorizarTransacoesUsuario(usuarioId, transacaoIds, categoriaId, { origem = 'MANUAL', regraId = null } = {}) {
+async function validarParCategoriasDoUsuario(usuarioId, categoriaMacroId, categoriaDetalhadaId) {
+  const macro = await validarCategoriaDoUsuario(usuarioId, categoriaMacroId);
+  const detalhada = await validarCategoriaDoUsuario(usuarioId, categoriaDetalhadaId);
+
+  if (detalhada && macro && detalhada.categoria_pai_id && detalhada.categoria_pai_id !== macro.id) {
+    throw new Error('A categoria detalhada não pertence à categoria macro escolhida.');
+  }
+
+  if (detalhada && !macro && detalhada.categoria_pai_id) {
+    return { macroId: detalhada.categoria_pai_id, detalhadaId: detalhada.id, categoriaId: detalhada.id };
+  }
+
+  return {
+    macroId: macro?.id || null,
+    detalhadaId: detalhada?.id || null,
+    categoriaId: detalhada?.id || macro?.id || null,
+  };
+}
+
+async function buscarCategoriaPorNome(usuarioId, nome, { nivel = 'MACRO', categoriaPaiId = null, tipo = 'DESPESA', criar = false } = {}) {
+  const nomeLimpo = normalizarNomeCategoria(nome);
+  if (!nomeLimpo) return null;
+
+  const result = await pool.query(
+    `SELECT *
+     FROM categorias
+     WHERE ativa = true
+       AND (usuario_id = $1 OR usuario_id IS NULL)
+       AND LOWER(nome) = LOWER($2)
+       AND COALESCE(nivel, CASE WHEN categoria_pai_id IS NULL THEN 'MACRO' ELSE 'DETALHADA' END) = $3
+       AND ($4::uuid IS NULL OR categoria_pai_id = $4)
+     ORDER BY usuario_id NULLS LAST, criado_em ASC
+     LIMIT 1`,
+    [usuarioId, nomeLimpo, nivel, categoriaPaiId]
+  );
+
+  if (result.rows[0]) return result.rows[0];
+
+  if (!criar) {
+    const prefixo = nivel === 'DETALHADA' ? 'Categoria detalhada' : 'Categoria macro';
+    throw new Error(`${prefixo} "${nomeLimpo}" não existe.`);
+  }
+
+  const insert = await pool.query(
+    `INSERT INTO categorias (usuario_id, nome, tipo, categoria_pai_id, nivel, customizada, ativa, criado_em, atualizado_em)
+     VALUES ($1, $2, $3, $4, $5, true, true, NOW(), NOW())
+     RETURNING *`,
+    [usuarioId, nomeLimpo, tipo, categoriaPaiId, nivel]
+  );
+
+  return insert.rows[0];
+}
+
+async function resolverCategoriasImportacao(usuarioId, tx, { criar = false } = {}) {
+  const macroNome = normalizarNomeCategoria(tx.categoria_macro || tx.categoria || 'Outros') || 'Outros';
+  const detalhadaNome = normalizarNomeCategoria(tx.categoria_detalhada);
+  const macro = await buscarCategoriaPorNome(usuarioId, macroNome, { nivel: 'MACRO', tipo: tx.tipo === 'CREDITO' ? 'RECEITA' : 'DESPESA', criar });
+  const detalhada = detalhadaNome
+    ? await buscarCategoriaPorNome(usuarioId, detalhadaNome, { nivel: 'DETALHADA', categoriaPaiId: macro.id, tipo: macro.tipo || (tx.tipo === 'CREDITO' ? 'RECEITA' : 'DESPESA'), criar })
+    : null;
+
+  return {
+    categoriaMacroId: macro.id,
+    categoriaDetalhadaId: detalhada?.id || null,
+    categoriaId: detalhada?.id || macro.id,
+    categoriaMacroNome: macro.nome,
+    categoriaDetalhadaNome: detalhada?.nome || null,
+  };
+}
+
+async function listarCategoriasComparacao(usuarioId, { nivel, categoriaPaiId = null } = {}) {
+  const params = [usuarioId, nivel];
+  const wherePai = categoriaPaiId
+    ? `AND categoria_pai_id = $3`
+    : '';
+  if (categoriaPaiId) params.push(categoriaPaiId);
+
+  const result = await pool.query(
+    `SELECT c.*, pai.nome AS categoria_macro_nome
+     FROM categorias c
+     LEFT JOIN categorias pai ON pai.id = c.categoria_pai_id
+     WHERE c.ativa = true
+       AND (c.usuario_id = $1 OR c.usuario_id IS NULL)
+       AND COALESCE(c.nivel, CASE WHEN c.categoria_pai_id IS NULL THEN 'MACRO' ELSE 'DETALHADA' END) = $2
+       ${wherePai}
+     ORDER BY c.usuario_id NULLS LAST, c.nome ASC`,
+    params
+  );
+
+  return result.rows;
+}
+
+function montarChaveCategoriaPendente({ tipo, nomePlanilha, categoriaMacroPlanilha }) {
+  return [tipo, normalizarCategoriaComparacao(categoriaMacroPlanilha || ''), normalizarCategoriaComparacao(nomePlanilha || '')].join('|');
+}
+
+function encontrarCategoriaExataPorNome(categorias, nome) {
+  const nomeLimpo = normalizarNomeCategoria(nome).toLowerCase();
+  return categorias.find((categoria) => normalizarNomeCategoria(categoria.nome).toLowerCase() === nomeLimpo) || null;
+}
+
+function encontrarCategoriasParecidas(categorias, nome) {
+  return categorias
+    .map((categoria) => ({
+      ...categoria,
+      similaridade: calcularSimilaridadeCategoria(nome, categoria.nome),
+    }))
+    .filter((categoria) => categoria.similaridade >= 0.78)
+    .sort((a, b) => b.similaridade - a.similaridade)
+    .slice(0, 5)
+    .map((categoria) => ({
+      id: categoria.id,
+      nome: categoria.nome,
+      categoriaMacro: categoria.categoria_macro_nome || null,
+      similaridade: categoria.similaridade,
+    }));
+}
+
+function registrarCategoriaPendente(preview, pendencia) {
+  const chave = montarChaveCategoriaPendente(pendencia);
+  if (preview.categoriasPendentes.some((item) => item.chave === chave)) return chave;
+
+  preview.categoriasPendentes.push({
+    chave,
+    acaoSugerida: pendencia.possiveisCorrespondencias?.length ? 'USAR_EXISTENTE' : 'CRIAR_NOVA',
+    ...pendencia,
+  });
+
+  return chave;
+}
+
+async function resolverCategoriaPreview(usuarioId, preview, { tipo, nome, categoriaPaiId = null, categoriaMacroPlanilha = null }) {
+  const nomeLimpo = normalizarNomeCategoria(nome);
+  if (!nomeLimpo) return null;
+
+  const categorias = await listarCategoriasComparacao(usuarioId, { nivel: tipo, categoriaPaiId });
+  const exata = encontrarCategoriaExataPorNome(categorias, nomeLimpo);
+  if (exata) return { categoria: exata, pendente: false };
+
+  const possiveisCorrespondencias = encontrarCategoriasParecidas(categorias, nomeLimpo);
+  if (possiveisCorrespondencias.length > 0) {
+    const chave = registrarCategoriaPendente(preview, {
+      tipo,
+      nomePlanilha: nomeLimpo,
+      categoriaMacroPlanilha,
+      possiveisCorrespondencias,
+    });
+    const sugerida = categorias.find((categoria) => categoria.id === possiveisCorrespondencias[0].id);
+    return { categoria: sugerida, pendente: true, pendenciaChave: chave };
+  }
+
+  const chave = montarChaveCategoriaPendente({ tipo, nomePlanilha: nomeLimpo, categoriaMacroPlanilha });
+  if (!preview.categoriasNovas.some((item) => item.chave === chave)) {
+    preview.categoriasNovas.push({
+      chave,
+      tipo,
+      nomePlanilha: nomeLimpo,
+      categoriaMacroPlanilha,
+      acaoSugerida: 'CRIAR_NOVA',
+    });
+  }
+
+  return {
+    categoria: {
+      id: null,
+      nome: nomeLimpo,
+      tipo: tipo === 'MACRO' ? 'DESPESA' : undefined,
+      categoria_pai_id: categoriaPaiId,
+    },
+    pendente: false,
+    criarNome: nomeLimpo,
+  };
+}
+
+async function resolverCategoriasPreview(usuarioId, tx, preview) {
+  const macroNome = normalizarNomeCategoria(tx.categoria_macro || tx.categoria || 'Outros') || 'Outros';
+  const macroResolvida = await resolverCategoriaPreview(usuarioId, preview, {
+    tipo: 'MACRO',
+    nome: macroNome,
+  });
+  const macro = macroResolvida?.categoria;
+
+  const detalhadaNome = normalizarNomeCategoria(tx.categoria_detalhada);
+  const detalhadaResolvida = detalhadaNome
+    ? await resolverCategoriaPreview(usuarioId, preview, {
+        tipo: 'DETALHADA',
+        nome: detalhadaNome,
+        categoriaPaiId: macro?.id || null,
+        categoriaMacroPlanilha: macroNome,
+      })
+    : null;
+  const detalhada = detalhadaResolvida?.categoria || null;
+
+  return {
+    categoriaMacroId: macro?.id || null,
+    categoriaDetalhadaId: detalhada?.id || null,
+    categoriaId: detalhada?.id || macro?.id || null,
+    categoriaMacroNome: macro?.nome || macroNome,
+    categoriaDetalhadaNome: detalhada?.nome || detalhadaNome || null,
+    categoriaMacroPlanilha: macroNome,
+    categoriaDetalhadaPlanilha: detalhadaNome || null,
+    categoriaMacroPendenteChave: macroResolvida?.pendenciaChave || null,
+    categoriaDetalhadaPendenteChave: detalhadaResolvida?.pendenciaChave || null,
+    criarCategoriaMacroNome: macroResolvida?.criarNome || null,
+    criarCategoriaDetalhadaNome: detalhadaResolvida?.criarNome || null,
+  };
+}
+
+function buscarDecisaoCategoria(mapeamentoCategorias, { tipo, nomePlanilha, categoriaMacroPlanilha }) {
+  const chave = montarChaveCategoriaPendente({ tipo, nomePlanilha, categoriaMacroPlanilha });
+  return (mapeamentoCategorias || []).find((item) => montarChaveCategoriaPendente(item) === chave) || null;
+}
+
+async function resolverCategoriaConfirmacao(usuarioId, { tipo, nomePlanilha, categoriaMacroPlanilha, categoriaPaiId, tipoFinanceiro, decisao }) {
+  const nomeBase = normalizarNomeCategoria(nomePlanilha);
+
+  if (decisao?.acao === 'USAR_EXISTENTE') {
+    if (!decisao.categoriaExistenteId) throw new Error(`Selecione a categoria existente para "${nomeBase}".`);
+    return validarCategoriaDoUsuario(usuarioId, decisao.categoriaExistenteId);
+  }
+
+  const nomeFinal = decisao?.acao === 'CORRIGIR_NOME'
+    ? normalizarNomeCategoria(decisao.nomeCorrigido)
+    : nomeBase;
+
+  if (!nomeFinal) throw new Error(`Informe um nome válido para a categoria "${nomeBase}".`);
+
+  return buscarCategoriaPorNome(usuarioId, nomeFinal, {
+    nivel: tipo,
+    categoriaPaiId,
+    tipo: tipoFinanceiro,
+    criar: true,
+  });
+}
+
+async function resolverCategoriasConfirmacao(usuarioId, tx, mapeamentoCategorias = []) {
+  const macroNome = normalizarNomeCategoria(tx.categoria_macro || tx.categoria || 'Outros') || 'Outros';
+  const decisaoMacro = buscarDecisaoCategoria(mapeamentoCategorias, { tipo: 'MACRO', nomePlanilha: macroNome });
+  const macro = await resolverCategoriaConfirmacao(usuarioId, {
+    tipo: 'MACRO',
+    nomePlanilha: macroNome,
+    tipoFinanceiro: tx.tipo === 'CREDITO' ? 'RECEITA' : 'DESPESA',
+    decisao: decisaoMacro,
+  });
+
+  const detalhadaNome = normalizarNomeCategoria(tx.categoria_detalhada);
+  const decisaoDetalhada = detalhadaNome
+    ? buscarDecisaoCategoria(mapeamentoCategorias, { tipo: 'DETALHADA', nomePlanilha: detalhadaNome, categoriaMacroPlanilha: macroNome })
+    : null;
+  const detalhada = detalhadaNome
+    ? await resolverCategoriaConfirmacao(usuarioId, {
+        tipo: 'DETALHADA',
+        nomePlanilha: detalhadaNome,
+        categoriaMacroPlanilha: macroNome,
+        categoriaPaiId: macro.id,
+        tipoFinanceiro: macro.tipo || (tx.tipo === 'CREDITO' ? 'RECEITA' : 'DESPESA'),
+        decisao: decisaoDetalhada,
+      })
+    : null;
+
+  return {
+    categoriaMacroId: macro.id,
+    categoriaDetalhadaId: detalhada?.id || null,
+    categoriaId: detalhada?.id || macro.id,
+    categoriaMacroNome: macro.nome,
+    categoriaDetalhadaNome: detalhada?.nome || null,
+  };
+}
+
+
+async function categorizarTransacoesUsuario(usuarioId, transacaoIds, categoriaId, { origem = 'MANUAL', regraId = null, categoriaMacroId = null, categoriaDetalhadaId = null } = {}) {
   if (!Array.isArray(transacaoIds) || transacaoIds.length === 0) return [];
+
+  const par = await validarParCategoriasDoUsuario(usuarioId, categoriaMacroId || categoriaId, categoriaDetalhadaId);
 
   const result = await pool.query(
     `UPDATE transacoes t
      SET categoria_id = $1,
-         categoria_origem = $2,
-         regra_categorizacao_id = $3,
+         categoria_macro_id = $2,
+         categoria_detalhada_id = $3,
+         categoria_origem = $4,
+         regra_categorizacao_id = $5,
          atualizado_em = NOW()
      FROM contas c
      WHERE c.id = t.conta_id
-       AND c.usuario_id = $4
-       AND t.id = ANY($5::uuid[])
+       AND c.usuario_id = $6
+       AND t.id = ANY($7::uuid[])
        AND t.deletado_em IS NULL
      RETURNING t.*`,
-    [categoriaId, origem, regraId, usuarioId, transacaoIds]
+    [par.categoriaId, par.macroId, par.detalhadaId, origem, regraId, usuarioId, transacaoIds]
   );
 
   return result.rows;
@@ -604,9 +1006,11 @@ async function montarRespostaTransacoes(rows) {
   if (rows.length === 0) return [];
   const ids = rows.map((row) => row.id);
   const result = await pool.query(
-    `SELECT t.*, cat.nome as categoria_nome
+      `SELECT t.*, cat.nome as categoria_nome, cm.nome AS categoria_macro_nome, cd.nome AS categoria_detalhada_nome
      FROM transacoes t
      LEFT JOIN categorias cat ON t.categoria_id = cat.id
+     LEFT JOIN categorias cm ON t.categoria_macro_id = cm.id
+     LEFT JOIN categorias cd ON t.categoria_detalhada_id = cd.id
      WHERE t.id = ANY($1::uuid[])
      ORDER BY t.data DESC`,
     [ids]
@@ -1171,6 +1575,343 @@ app.post('/api/importar/:arquivoId', verificarToken, async (req, res) => {
   }
 });
 
+
+async function resolverContaImportacao(usuarioId, { conta_id, conta_nome } = {}) {
+  if (conta_id) {
+    const conta = await pool.query(
+      'SELECT id, nome FROM contas WHERE id = $1 AND usuario_id = $2 AND ativo = true',
+      [conta_id, usuarioId]
+    );
+
+    if (conta.rows.length === 0) {
+      throw new Error('Conta não encontrada para este usuário.');
+    }
+
+    return conta.rows[0];
+  }
+
+  const nomeConta = String(conta_nome || 'Importação XLSX').trim();
+  if (nomeConta) {
+    const contaId = await buscarConta(usuarioId, nomeConta);
+    if (contaId) return { id: contaId, nome: nomeConta, hashKey: contaId };
+    return { id: null, nome: nomeConta, nova: true, hashKey: `nova:${nomeConta.toLowerCase()}` };
+  }
+
+  throw new Error('Informe uma conta de destino antes de gerar o preview.');
+}
+
+async function resolverContaConfirmacao(usuarioId, preview) {
+  if (preview.contaId) return preview.contaId;
+
+  const nomeConta = String(preview.contaNome || 'Importação XLSX').trim();
+  let contaId = await buscarConta(usuarioId, nomeConta);
+  if (!contaId) {
+    contaId = crypto.randomUUID();
+    await pool.query(
+      `INSERT INTO contas (id, usuario_id, nome, banco, tipo)
+       VALUES ($1, $2, $3, 'Importação Manual', 'CHECKING')`,
+      [contaId, usuarioId, nomeConta]
+    );
+  }
+
+  preview.contaId = contaId;
+  return contaId;
+}
+
+function limparPreviewsExpirados() {
+  const agora = Date.now();
+  for (const [tokenPreview, preview] of previewsImportacao.entries()) {
+    if (agora - preview.criadoEm > PREVIEW_IMPORTACAO_TTL_MS) previewsImportacao.delete(tokenPreview);
+  }
+}
+
+function valoresComparaveis(tx, categorias, contaId) {
+  return {
+    conta_id: contaId,
+    data: tx.data,
+    descricao: tx.descricao,
+    valor: Number(tx.valor || 0).toFixed(2),
+    tipo: tx.tipo,
+    categoria_macro_id: categorias.categoriaMacroId || categorias.macroId || null,
+    categoria_detalhada_id: categorias.categoriaDetalhadaId || categorias.detalhadaId || null,
+  };
+}
+
+function montarAlteracoesTransacao(atual, novo) {
+  const campos = [
+    ['conta_id', 'conta'],
+    ['data', 'data'],
+    ['descricao', 'descricao'],
+    ['valor', 'valor'],
+    ['tipo', 'tipo'],
+    ['categoria_macro_id', 'categoria_macro'],
+    ['categoria_detalhada_id', 'categoria_detalhada'],
+  ];
+
+  return campos.reduce((alteracoes, [campo, label]) => {
+    const valorAtual = campo === 'data'
+      ? (atual[campo] instanceof Date ? atual[campo].toISOString().slice(0, 10) : String(atual[campo] || '').slice(0, 10))
+      : campo === 'valor'
+        ? Number(atual[campo] || 0).toFixed(2)
+        : (atual[campo] || null);
+    const novoValor = novo[campo] || null;
+
+    if (String(valorAtual || '') !== String(novoValor || '')) {
+      alteracoes.push({ campo: label, valorAtual, novoValor });
+    }
+
+    return alteracoes;
+  }, []);
+}
+
+async function buscarTransacaoExistenteParaImportacao(usuarioId, tx, contaId, hash) {
+  if (tx.transacao_id || tx.id) {
+    const porId = await pool.query(
+      `SELECT t.*, cm.nome AS categoria_macro_nome, cd.nome AS categoria_detalhada_nome
+       FROM transacoes t
+       JOIN contas c ON c.id = t.conta_id
+       LEFT JOIN categorias cm ON cm.id = t.categoria_macro_id
+       LEFT JOIN categorias cd ON cd.id = t.categoria_detalhada_id
+       WHERE t.id = $1 AND c.usuario_id = $2 AND t.deletado_em IS NULL`,
+      [tx.transacao_id || tx.id, usuarioId]
+    );
+    if (porId.rows[0]) return porId.rows[0];
+  }
+
+  const hashLegado = gerarHashTransacaoLegado(tx);
+  const porHash = await pool.query(
+    `SELECT t.*, cm.nome AS categoria_macro_nome, cd.nome AS categoria_detalhada_nome
+     FROM transacoes t
+     JOIN contas c ON c.id = t.conta_id
+     LEFT JOIN categorias cm ON cm.id = t.categoria_macro_id
+     LEFT JOIN categorias cd ON cd.id = t.categoria_detalhada_id
+     WHERE t.hash_transacao = ANY($1::text[]) AND c.usuario_id = $2 AND t.deletado_em IS NULL
+     ORDER BY CASE WHEN t.hash_transacao = $3 THEN 0 ELSE 1 END
+     LIMIT 1`,
+    [[hash, hashLegado], usuarioId, hash]
+  );
+
+  return porHash.rows[0] || null;
+}
+
+async function montarPreviewImportacao(usuarioId, dados) {
+  const conta = await resolverContaImportacao(usuarioId, dados);
+  const transacoesValidadas = validarTransacoesImportacao(dados.transacoes);
+  const preview = {
+    usuarioId,
+    contaId: conta.id,
+    contaNome: conta.nome,
+    contaHashKey: conta.hashKey || conta.id,
+    nomeArquivo: dados.nome_arquivo || `importacao_${new Date().toISOString().slice(0, 10)}.xlsx`,
+    arquivoBase64: dados.arquivo_base64,
+    criadoEm: Date.now(),
+    novas: [],
+    semAlteracao: [],
+    comAlteracao: [],
+    erros: [],
+    categoriasPendentes: [],
+    categoriasNovas: [],
+  };
+
+  for (const [index, tx] of transacoesValidadas.entries()) {
+    const linha = index + 2;
+    try {
+      const categorias = await resolverCategoriasPreview(usuarioId, tx, preview);
+      const hash = gerarHashTransacao(tx, conta.hashKey || conta.id);
+      const existente = conta.id ? await buscarTransacaoExistenteParaImportacao(usuarioId, tx, conta.id, hash) : null;
+      const normalizada = {
+        ...tx,
+        linha,
+        conta_id: conta.id,
+        conta_nome: conta.nome,
+        hash_transacao: hash,
+        categoria_id: categorias.categoriaId,
+        categoria_macro_id: categorias.categoriaMacroId,
+        categoria_detalhada_id: categorias.categoriaDetalhadaId,
+        categoria_macro_nome: categorias.categoriaMacroNome,
+        categoria_detalhada_nome: categorias.categoriaDetalhadaNome,
+        categoria_macro_planilha: categorias.categoriaMacroPlanilha,
+        categoria_detalhada_planilha: categorias.categoriaDetalhadaPlanilha,
+        criar_categoria_macro_nome: categorias.criarCategoriaMacroNome,
+        criar_categoria_detalhada_nome: categorias.criarCategoriaDetalhadaNome,
+      };
+
+      if (!existente) {
+        preview.novas.push(normalizada);
+        continue;
+      }
+
+      const alteracoes = montarAlteracoesTransacao(existente, valoresComparaveis(tx, categorias, conta.id));
+      if (alteracoes.length === 0) {
+        preview.semAlteracao.push({ ...normalizada, transacaoId: existente.id });
+      } else {
+        preview.comAlteracao.push({
+          ...normalizada,
+          transacaoId: existente.id,
+          descricaoAtual: existente.descricao,
+          alteracoes,
+        });
+      }
+    } catch (error) {
+      preview.erros.push({ linha, erro: error.message });
+    }
+  }
+
+  const tokenPreview = crypto.randomUUID();
+  previewsImportacao.set(tokenPreview, preview);
+
+  return {
+    resumo: {
+      novas: preview.novas.length,
+      semAlteracao: preview.semAlteracao.length,
+      comAlteracao: preview.comAlteracao.length,
+      comErro: preview.erros.length,
+    },
+    novas: preview.novas.slice(0, 50),
+    semAlteracao: preview.semAlteracao.slice(0, 50),
+    comAlteracao: preview.comAlteracao.slice(0, 50),
+    erros: preview.erros,
+    categoriasPendentes: preview.categoriasPendentes,
+    categoriasNovas: preview.categoriasNovas,
+    tokenPreview,
+  };
+}
+
+async function prepararTransacaoConfirmacao(usuarioId, tx, mapeamentoCategorias) {
+  const categorias = await resolverCategoriasConfirmacao(usuarioId, tx, mapeamentoCategorias);
+  return {
+    ...tx,
+    categoria_id: categorias.categoriaId,
+    categoria_macro_id: categorias.categoriaMacroId,
+    categoria_detalhada_id: categorias.categoriaDetalhadaId,
+    categoria_macro_nome: categorias.categoriaMacroNome,
+    categoria_detalhada_nome: categorias.categoriaDetalhadaNome,
+  };
+}
+
+function validarMapeamentoCategoriasResolvido(preview, mapeamentoCategorias = []) {
+  const pendentes = preview.categoriasPendentes || [];
+  const faltantes = pendentes.filter((pendencia) => {
+    const decisao = buscarDecisaoCategoria(mapeamentoCategorias, pendencia);
+    if (!decisao?.acao) return true;
+    if (decisao.acao === 'USAR_EXISTENTE' && !decisao.categoriaExistenteId) return true;
+    if (decisao.acao === 'CORRIGIR_NOME' && !normalizarNomeCategoria(decisao.nomeCorrigido)) return true;
+    return false;
+  });
+
+  if (faltantes.length > 0) {
+    throw new Error('Resolva as categorias pendentes antes de concluir a importação.');
+  }
+}
+
+async function inserirTransacaoImportacao(contaId, tx) {
+  const insert = await pool.query(
+    `INSERT INTO transacoes (conta_id, data, descricao, valor, tipo, categoria_id, categoria_macro_id, categoria_detalhada_id, categoria_origem, hash_transacao, criado_em, atualizado_em)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'IMPORTACAO', $9, NOW(), NOW())
+     ON CONFLICT (hash_transacao) DO NOTHING
+     RETURNING id`,
+    [contaId, tx.data, tx.descricao, tx.valor, tx.tipo, tx.categoria_id, tx.categoria_macro_id, tx.categoria_detalhada_id, tx.hash_transacao]
+  );
+
+  return insert.rows.length > 0;
+}
+
+async function atualizarTransacaoImportacao(usuarioId, tx) {
+  const result = await pool.query(
+    `UPDATE transacoes t
+     SET conta_id = $1,
+         data = $2,
+         descricao = $3,
+         valor = $4,
+         tipo = $5,
+         categoria_id = $6,
+         categoria_macro_id = $7,
+         categoria_detalhada_id = $8,
+         categoria_origem = 'IMPORTACAO',
+         hash_transacao = $9,
+         atualizado_em = NOW()
+     FROM contas c
+     WHERE c.id = t.conta_id
+       AND c.usuario_id = $10
+       AND t.id = $11
+       AND t.deletado_em IS NULL
+     RETURNING t.id`,
+    [tx.conta_id, tx.data, tx.descricao, tx.valor, tx.tipo, tx.categoria_id, tx.categoria_macro_id, tx.categoria_detalhada_id, tx.hash_transacao, usuarioId, tx.transacaoId]
+  );
+
+  return result.rows.length > 0;
+}
+
+app.post('/api/importacoes/xlsx/preview', verificarToken, async (req, res) => {
+  try {
+    limparPreviewsExpirados();
+    const preview = await montarPreviewImportacao(req.usuario.usuario_id, req.body);
+    res.json(preview);
+  } catch (error) {
+    res.status(400).json({ erro: 'Não foi possível gerar o preview da importação.', detalhes: error.message });
+  }
+});
+
+app.post('/api/importacoes/xlsx/confirmar', verificarToken, async (req, res) => {
+  try {
+    limparPreviewsExpirados();
+    const { tokenPreview, acao, mapeamentoCategorias = [] } = req.body;
+    const preview = previewsImportacao.get(tokenPreview);
+
+    if (!preview || preview.usuarioId !== req.usuario.usuario_id) {
+      return res.status(404).json({ erro: 'Preview de importação não encontrado ou expirado.' });
+    }
+
+    if (acao === 'CANCELAR') {
+      previewsImportacao.delete(tokenPreview);
+      return res.json({ sucesso: true, inseridas: 0, atualizadas: 0, mensagem: 'Importação cancelada sem alterações no banco.' });
+    }
+
+    const importarNovas = ['IMPORTAR_APENAS_NOVAS', 'IMPORTAR_NOVAS_E_ATUALIZAR_EXISTENTES'].includes(acao);
+    const atualizarExistentes = ['ATUALIZAR_EXISTENTES', 'IMPORTAR_NOVAS_E_ATUALIZAR_EXISTENTES'].includes(acao);
+
+    if (!importarNovas && !atualizarExistentes) {
+      return res.status(400).json({ erro: 'Ação de confirmação inválida.' });
+    }
+
+    validarMapeamentoCategoriasResolvido(preview, mapeamentoCategorias);
+
+    let inseridas = 0;
+    let atualizadas = 0;
+    let ignoradas = preview.semAlteracao.length;
+    const contaIdConfirmada = await resolverContaConfirmacao(req.usuario.usuario_id, preview);
+
+    if (importarNovas) {
+      for (const tx of preview.novas) {
+        const txConfirmada = await prepararTransacaoConfirmacao(req.usuario.usuario_id, tx, mapeamentoCategorias);
+        const txComConta = { ...txConfirmada, conta_id: contaIdConfirmada, hash_transacao: gerarHashTransacao(txConfirmada, contaIdConfirmada) };
+        if (await inserirTransacaoImportacao(contaIdConfirmada, txComConta)) inseridas++;
+      }
+    }
+
+    if (atualizarExistentes) {
+      for (const tx of preview.comAlteracao) {
+        const txConfirmada = await prepararTransacaoConfirmacao(req.usuario.usuario_id, tx, mapeamentoCategorias);
+        const txComConta = { ...txConfirmada, conta_id: contaIdConfirmada, hash_transacao: gerarHashTransacao(txConfirmada, contaIdConfirmada) };
+        if (await atualizarTransacaoImportacao(req.usuario.usuario_id, txComConta)) atualizadas++;
+      }
+    }
+
+    previewsImportacao.delete(tokenPreview);
+    res.json({
+      sucesso: true,
+      inseridas,
+      atualizadas,
+      ignoradas,
+      erros: preview.erros.length,
+      mensagem: `Importação confirmada: ${inseridas} inserida(s), ${atualizadas} atualizada(s) e ${ignoradas} sem alteração.`,
+    });
+  } catch (error) {
+    const status = /Resolva as categorias pendentes|Selecione|Informe|Categoria/.test(error.message || '') ? 400 : 500;
+    res.status(status).json({ erro: 'Erro ao confirmar importação.', detalhes: error.message });
+  }
+});
+
 app.post('/api/importar', verificarToken, async (req, res) => {
   try {
     const {
@@ -1213,11 +1954,14 @@ app.post('/api/importar', verificarToken, async (req, res) => {
     let duplicadas = 0;
 
     for (const tx of transacoesValidadas) {
-      const hash = gerarHashTransacao(tx);
+      const hash = gerarHashTransacao(tx, contaId);
       const regra = await buscarRegraCompatível(req.usuario.usuario_id, tx.descricao);
+      const categoriasImportacao = regra
+        ? await validarParCategoriasDoUsuario(req.usuario.usuario_id, regra.categoria_id, null)
+        : await resolverCategoriasImportacao(req.usuario.usuario_id, tx, { criar: true });
       const insert = await pool.query(
-        `INSERT INTO transacoes (conta_id, data, descricao, valor, tipo, categoria_id, categoria_origem, regra_categorizacao_id, hash_transacao, criado_em)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+        `INSERT INTO transacoes (conta_id, data, descricao, valor, tipo, categoria_id, categoria_macro_id, categoria_detalhada_id, categoria_origem, regra_categorizacao_id, hash_transacao, criado_em)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
          ON CONFLICT (hash_transacao) DO NOTHING
          RETURNING id`,
         [
@@ -1226,8 +1970,10 @@ app.post('/api/importar', verificarToken, async (req, res) => {
           tx.descricao,
           tx.valor,
           tx.tipo,
-          regra?.categoria_id || null,
-          regra ? 'AUTO' : null,
+          categoriasImportacao.categoriaId || categoriasImportacao.categoria_id || null,
+          categoriasImportacao.categoriaMacroId || categoriasImportacao.macroId || null,
+          categoriasImportacao.categoriaDetalhadaId || categoriasImportacao.detalhadaId || null,
+          regra ? 'AUTO' : 'IMPORTACAO',
           regra?.id || null,
           hash,
         ]
@@ -1393,13 +2139,19 @@ app.get('/api/dashboard/resumo', verificarToken, async (req, res) => {
          t.valor,
          t.tipo,
          t.categoria_id,
+         t.categoria_macro_id,
+         t.categoria_detalhada_id,
          COALESCE(t.eh_transferencia_interna, false) AS eh_transferencia_interna,
-         COALESCE(cat.nome, 'Sem categoria') AS categoria_nome,
+         COALESCE(cm.nome, cat.nome, 'Sem categoria') AS categoria_nome,
+         COALESCE(cm.nome, cat.nome, 'Sem categoria') AS categoria_macro_nome,
+         cd.nome AS categoria_detalhada_nome,
          conta.id AS conta_id,
          conta.nome AS conta_nome
        FROM transacoes t
        JOIN contas conta ON conta.id = t.conta_id
        LEFT JOIN categorias cat ON cat.id = t.categoria_id
+       LEFT JOIN categorias cm ON cm.id = t.categoria_macro_id
+       LEFT JOIN categorias cd ON cd.id = t.categoria_detalhada_id
        WHERE conta.usuario_id = $1
          AND t.deletado_em IS NULL
          AND t.data BETWEEN $2::date AND $3::date`,
@@ -1420,7 +2172,7 @@ app.get('/api/dashboard/resumo', verificarToken, async (req, res) => {
     const despesasTransacoes = transacoesOperacionais.filter((tx) => tx.tipo === 'DEBITO');
     const despesas = despesasTransacoes.reduce((total, tx) => total + tx.valor, 0);
     const quantidadeTransacoes = transacoes.length;
-    const transacoesCategorizadas = transacoes.filter((tx) => tx.categoria_id).length;
+    const transacoesCategorizadas = transacoes.filter((tx) => tx.categoria_macro_id || tx.categoria_id).length;
 
     const movimentacaoPorPeriodoMap = new Map();
     const despesasPorCategoriaMap = new Map();
@@ -1456,7 +2208,7 @@ app.get('/api/dashboard/resumo', verificarToken, async (req, res) => {
       itemConta.saldo = itemConta.receitas - itemConta.despesas;
 
       if (tx.tipo === 'DEBITO') {
-        const categoria = tx.categoria_nome || 'Sem categoria';
+        const categoria = tx.categoria_macro_nome || tx.categoria_nome || 'Sem categoria';
         despesasPorCategoriaMap.set(categoria, (despesasPorCategoriaMap.get(categoria) || 0) + tx.valor);
         gastosPorDiaMap.set(tx.data, (gastosPorDiaMap.get(tx.data) || 0) + tx.valor);
       }
@@ -1544,10 +2296,18 @@ async function buscarTransacoesUsuario(usuarioId, filtros = {}) {
   }
   if (filtros.categoriaId) {
     valores.push(filtros.categoriaId);
-    where.push(`t.categoria_id = $${valores.length}`);
+    where.push(`(t.categoria_id = $${valores.length} OR t.categoria_macro_id = $${valores.length} OR t.categoria_detalhada_id = $${valores.length})`);
   }
-  if (filtros.status === 'sem') where.push('t.categoria_id IS NULL');
-  if (filtros.status === 'categorizadas') where.push('t.categoria_id IS NOT NULL');
+  if (filtros.categoriaMacroId) {
+    valores.push(filtros.categoriaMacroId);
+    where.push(`t.categoria_macro_id = $${valores.length}`);
+  }
+  if (filtros.categoriaDetalhadaId) {
+    valores.push(filtros.categoriaDetalhadaId);
+    where.push(`t.categoria_detalhada_id = $${valores.length}`);
+  }
+  if (filtros.status === 'sem') where.push('t.categoria_macro_id IS NULL AND t.categoria_id IS NULL');
+  if (filtros.status === 'categorizadas') where.push('(t.categoria_macro_id IS NOT NULL OR t.categoria_id IS NOT NULL)');
   if (['CREDITO', 'DEBITO'].includes(filtros.tipo)) {
     valores.push(filtros.tipo);
     where.push(`t.tipo = $${valores.length}`);
@@ -1566,10 +2326,15 @@ async function buscarTransacoesUsuario(usuarioId, filtros = {}) {
   }
 
   const result = await pool.query(
-    `SELECT t.*, conta.nome AS conta_nome, cat.nome AS categoria_nome
+    `SELECT t.*, conta.nome AS conta_nome,
+            cat.nome AS categoria_nome,
+            cm.nome AS categoria_macro_nome,
+            cd.nome AS categoria_detalhada_nome
      FROM transacoes t
      JOIN contas conta ON conta.id = t.conta_id
      LEFT JOIN categorias cat ON cat.id = t.categoria_id
+     LEFT JOIN categorias cm ON cm.id = t.categoria_macro_id
+     LEFT JOIN categorias cd ON cd.id = t.categoria_detalhada_id
      WHERE ${where.join(' AND ')}
      ORDER BY t.data DESC, t.criado_em DESC
      LIMIT 1000`,
@@ -1585,6 +2350,8 @@ app.get('/api/transacoes', verificarToken, async (req, res) => {
     const transacoes = await buscarTransacoesUsuario(req.usuario.usuario_id, {
       contaId: req.query.contaId,
       categoriaId: req.query.categoriaId,
+      categoriaMacroId: req.query.categoriaMacroId,
+      categoriaDetalhadaId: req.query.categoriaDetalhadaId,
       status: req.query.status,
       tipo: req.query.tipo,
       dataInicial: req.query.dataInicial,
@@ -1737,10 +2504,12 @@ app.get('/api/transacoes/:contaId', verificarToken, async (req, res) => {
     await aplicarRegrasAtivasEmTransacoesSemCategoria(req.usuario.usuario_id);
 
     const result = await pool.query(
-      `SELECT t.*, c.nome as categoria_nome
+      `SELECT t.*, c.nome as categoria_nome, cm.nome AS categoria_macro_nome, cd.nome AS categoria_detalhada_nome
        FROM transacoes t
        JOIN contas conta ON conta.id = t.conta_id
        LEFT JOIN categorias c ON t.categoria_id = c.id
+       LEFT JOIN categorias cm ON t.categoria_macro_id = cm.id
+       LEFT JOIN categorias cd ON t.categoria_detalhada_id = cd.id
        WHERE t.conta_id = $1 AND conta.usuario_id = $2 AND t.deletado_em IS NULL
        ORDER BY t.data DESC
        LIMIT 500`,
@@ -1780,13 +2549,13 @@ app.delete('/api/transacoes/:id', verificarToken, async (req, res) => {
 
 app.patch('/api/transacoes/categorizar-lote', verificarToken, async (req, res) => {
   try {
-    const { transacaoIds, categoriaId, criarRegra = false, termoRegra } = req.body;
+    const { transacaoIds, categoriaId, categoriaMacroId, categoriaDetalhadaId, criarRegra = false, termoRegra } = req.body;
 
     if (!Array.isArray(transacaoIds) || transacaoIds.length === 0) {
       return res.status(400).json({ erro: 'Selecione ao menos uma transação para categorizar.' });
     }
 
-    await validarCategoriaDoUsuario(req.usuario.usuario_id, categoriaId);
+    const categorias = await validarParCategoriasDoUsuario(req.usuario.usuario_id, categoriaMacroId || categoriaId, categoriaDetalhadaId);
 
     let regra = null;
     let atualizadasPorRegra = 0;
@@ -1806,13 +2575,15 @@ app.patch('/api/transacoes/categorizar-lote', verificarToken, async (req, res) =
         termoBase = primeiraTransacao.rows[0]?.descricao;
       }
 
-      regra = await criarOuAtualizarRegraCategorizacao(req.usuario.usuario_id, categoriaId, termoBase);
+      regra = await criarOuAtualizarRegraCategorizacao(req.usuario.usuario_id, categorias.categoriaId, termoBase);
       atualizadasPorRegra = await aplicarRegraEmTransacoesSemCategoria(req.usuario.usuario_id, regra);
     }
 
-    const atualizadas = await categorizarTransacoesUsuario(req.usuario.usuario_id, transacaoIds, categoriaId, {
+    const atualizadas = await categorizarTransacoesUsuario(req.usuario.usuario_id, transacaoIds, categorias.categoriaId, {
       origem: 'MANUAL',
       regraId: regra?.id || null,
+      categoriaMacroId: categorias.macroId,
+      categoriaDetalhadaId: categorias.detalhadaId,
     });
 
     res.json({
@@ -1829,9 +2600,9 @@ app.patch('/api/transacoes/categorizar-lote', verificarToken, async (req, res) =
 
 app.patch('/api/transacoes/:id/categorizar', verificarToken, async (req, res) => {
   try {
-    const { categoriaId, criarRegra = false, termoRegra } = req.body;
+    const { categoriaId, categoriaMacroId, categoriaDetalhadaId, criarRegra = false, termoRegra } = req.body;
 
-    await validarCategoriaDoUsuario(req.usuario.usuario_id, categoriaId);
+    const categorias = await validarParCategoriasDoUsuario(req.usuario.usuario_id, categoriaMacroId || categoriaId, categoriaDetalhadaId);
 
     const transacao = await pool.query(
       `SELECT t.*
@@ -1851,15 +2622,17 @@ app.patch('/api/transacoes/:id/categorizar', verificarToken, async (req, res) =>
     if (criarRegra) {
       regra = await criarOuAtualizarRegraCategorizacao(
         req.usuario.usuario_id,
-        categoriaId,
+        categorias.categoriaId,
         termoRegra || transacao.rows[0].descricao
       );
       atualizadasPorRegra = await aplicarRegraEmTransacoesSemCategoria(req.usuario.usuario_id, regra);
     }
 
-    const atualizadas = await categorizarTransacoesUsuario(req.usuario.usuario_id, [req.params.id], categoriaId, {
+    const atualizadas = await categorizarTransacoesUsuario(req.usuario.usuario_id, [req.params.id], categorias.categoriaId, {
       origem: 'MANUAL',
       regraId: regra?.id || null,
+      categoriaMacroId: categorias.macroId,
+      categoriaDetalhadaId: categorias.detalhadaId,
     });
 
     res.json({
@@ -1991,14 +2764,19 @@ app.get('/api/contas', verificarToken, async (req, res) => {
 app.get('/api/categorias', verificarToken, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT DISTINCT ON (COALESCE(usuario_id::text, 'padrao'), nome, tipo) *
+      `SELECT DISTINCT ON (COALESCE(usuario_id::text, 'padrao'), nome, tipo, COALESCE(nivel, CASE WHEN categoria_pai_id IS NULL THEN 'MACRO' ELSE 'DETALHADA' END), COALESCE(categoria_pai_id::text, 'raiz')) *
        FROM categorias
        WHERE (usuario_id = $1 OR usuario_id IS NULL) AND ativa = true
-       ORDER BY COALESCE(usuario_id::text, 'padrao'), nome, tipo, criado_em`,
+       ORDER BY COALESCE(usuario_id::text, 'padrao'), nome, tipo, COALESCE(nivel, CASE WHEN categoria_pai_id IS NULL THEN 'MACRO' ELSE 'DETALHADA' END), COALESCE(categoria_pai_id::text, 'raiz'), criado_em`,
       [req.usuario.usuario_id]
     );
 
-    const categorias = result.rows.sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+    const categorias = result.rows.sort((a, b) => {
+      const nivelA = a.nivel || (a.categoria_pai_id ? 'DETALHADA' : 'MACRO');
+      const nivelB = b.nivel || (b.categoria_pai_id ? 'DETALHADA' : 'MACRO');
+      if (nivelA !== nivelB) return nivelA === 'MACRO' ? -1 : 1;
+      return a.nome.localeCompare(b.nome, 'pt-BR');
+    });
     res.json({ categorias });
   } catch (error) {
     res.status(500).json({ erro: error.message });
