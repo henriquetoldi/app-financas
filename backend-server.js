@@ -134,6 +134,123 @@ async function inicializarBanco() {
 
   await pool.query('CREATE INDEX IF NOT EXISTS idx_categorias_usuario ON categorias(usuario_id)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_categorias_ativa ON categorias(ativa)');
+
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF to_regclass('public.transacoes') IS NOT NULL THEN
+        EXECUTE '
+          WITH duplicadas AS (
+            SELECT
+              id,
+              FIRST_VALUE(id) OVER (
+                PARTITION BY nome, tipo
+                ORDER BY criado_em ASC NULLS LAST, id ASC
+              ) AS categoria_principal_id
+            FROM categorias
+            WHERE usuario_id IS NULL
+          )
+          UPDATE transacoes t
+          SET categoria_id = duplicadas.categoria_principal_id
+          FROM duplicadas
+          WHERE t.categoria_id = duplicadas.id
+            AND duplicadas.id <> duplicadas.categoria_principal_id
+        ';
+      END IF;
+
+      IF to_regclass('public.regras_categorizacao') IS NOT NULL THEN
+        EXECUTE '
+          WITH duplicadas AS (
+            SELECT
+              id,
+              FIRST_VALUE(id) OVER (
+                PARTITION BY nome, tipo
+                ORDER BY criado_em ASC NULLS LAST, id ASC
+              ) AS categoria_principal_id
+            FROM categorias
+            WHERE usuario_id IS NULL
+          )
+          UPDATE regras_categorizacao r
+          SET categoria_id = duplicadas.categoria_principal_id
+          FROM duplicadas
+          WHERE r.categoria_id = duplicadas.id
+            AND duplicadas.id <> duplicadas.categoria_principal_id
+        ';
+      END IF;
+
+      IF to_regclass('public.descricao_categoria_mapping') IS NOT NULL THEN
+        EXECUTE '
+          WITH duplicadas AS (
+            SELECT
+              id,
+              FIRST_VALUE(id) OVER (
+                PARTITION BY nome, tipo
+                ORDER BY criado_em ASC NULLS LAST, id ASC
+              ) AS categoria_principal_id
+            FROM categorias
+            WHERE usuario_id IS NULL
+          )
+          UPDATE descricao_categoria_mapping m
+          SET categoria_id = duplicadas.categoria_principal_id
+          FROM duplicadas
+          WHERE m.categoria_id = duplicadas.id
+            AND duplicadas.id <> duplicadas.categoria_principal_id
+        ';
+      END IF;
+
+      IF to_regclass('public.orcamentos') IS NOT NULL THEN
+        EXECUTE '
+          WITH duplicadas AS (
+            SELECT
+              id,
+              FIRST_VALUE(id) OVER (
+                PARTITION BY nome, tipo
+                ORDER BY criado_em ASC NULLS LAST, id ASC
+              ) AS categoria_principal_id
+            FROM categorias
+            WHERE usuario_id IS NULL
+          )
+          UPDATE orcamentos o
+          SET categoria_id = duplicadas.categoria_principal_id
+          FROM duplicadas
+          WHERE o.categoria_id = duplicadas.id
+            AND duplicadas.id <> duplicadas.categoria_principal_id
+        ';
+      END IF;
+
+      WITH duplicadas AS (
+        SELECT
+          id,
+          FIRST_VALUE(id) OVER (
+            PARTITION BY nome, tipo
+            ORDER BY criado_em ASC NULLS LAST, id ASC
+          ) AS categoria_principal_id
+        FROM categorias
+        WHERE usuario_id IS NULL
+      )
+      UPDATE categorias c
+      SET categoria_pai_id = duplicadas.categoria_principal_id
+      FROM duplicadas
+      WHERE c.categoria_pai_id = duplicadas.id
+        AND duplicadas.id <> duplicadas.categoria_principal_id;
+
+      WITH categorias_duplicadas AS (
+        SELECT
+          id,
+          ROW_NUMBER() OVER (
+            PARTITION BY nome, tipo
+            ORDER BY criado_em ASC NULLS LAST, id ASC
+          ) AS ordem
+        FROM categorias
+        WHERE usuario_id IS NULL
+      )
+      DELETE FROM categorias c
+      USING categorias_duplicadas
+      WHERE c.id = categorias_duplicadas.id
+        AND categorias_duplicadas.ordem > 1;
+    END $$;
+  `);
+
   await pool.query("CREATE UNIQUE INDEX IF NOT EXISTS idx_categorias_padrao_nome_tipo_unique ON categorias(nome, tipo) WHERE usuario_id IS NULL");
 
   await pool.query(`
@@ -156,10 +273,54 @@ async function inicializarBanco() {
     )
   `);
 
+  await pool.query(`
+    ALTER TABLE transacoes
+      ADD COLUMN IF NOT EXISTS categoria_origem VARCHAR(20),
+      ADD COLUMN IF NOT EXISTS regra_categorizacao_id UUID
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS regras_categorizacao (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      usuario_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+      categoria_id UUID NOT NULL REFERENCES categorias(id) ON DELETE CASCADE,
+      termo TEXT NOT NULL,
+      termo_normalizado TEXT NOT NULL,
+      tipo_match VARCHAR(20) DEFAULT 'CONTAINS',
+      prioridade INT DEFAULT 0,
+      ativo BOOLEAN DEFAULT true,
+      criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
   await pool.query('CREATE INDEX IF NOT EXISTS idx_transacoes_conta ON transacoes(conta_id)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_transacoes_categoria ON transacoes(categoria_id)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_transacoes_data ON transacoes(data)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_transacoes_hash ON transacoes(hash_transacao)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_transacoes_categoria_origem ON transacoes(categoria_origem)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_regras_categorizacao_usuario ON regras_categorizacao(usuario_id, ativo)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_regras_categorizacao_termo ON regras_categorizacao(termo_normalizado)');
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_regras_categorizacao_unique
+    ON regras_categorizacao(usuario_id, categoria_id, termo_normalizado, tipo_match)
+  `);
+
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'fk_transacoes_regra_categorizacao'
+      ) THEN
+        ALTER TABLE transacoes
+          ADD CONSTRAINT fk_transacoes_regra_categorizacao
+          FOREIGN KEY (regra_categorizacao_id)
+          REFERENCES regras_categorizacao(id)
+          ON DELETE SET NULL;
+      END IF;
+    END $$;
+  `);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS backups_drive (
@@ -286,6 +447,168 @@ function validarTransacoesImportacao(transacoes) {
 
     return { data, descricao, categoria, valor, tipo };
   });
+}
+
+
+function normalizarDescricaoCategorizacao(texto) {
+  return String(texto || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase()
+    .replace(/\b\d{2}\.?\d{3}\.?\d{3}\/\d{4}-?\d{2}\b/g, ' ')
+    .replace(/\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b/g, ' ')
+    .replace(/[^A-Z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function sugerirTermoRegra(descricao) {
+  const partes = String(descricao || '')
+    .split(/\s+-\s+|\s+–\s+|\s+—\s+/)
+    .map((parte) => normalizarDescricaoCategorizacao(parte))
+    .filter(Boolean)
+    .filter((parte) => !/^\d+$/.test(parte))
+    .filter((parte) => !/^(TRANSFERENCIA|ENVIADA|RECEBIDA|PIX|PAGAMENTO|COMPRA|DEBITO|CREDITO)\b/.test(parte));
+
+  const fornecedor = partes.find((parte) => /[A-Z]/.test(parte) && parte.length >= 3);
+  return fornecedor || normalizarDescricaoCategorizacao(descricao);
+}
+
+async function buscarRegraCompatível(usuarioId, descricao) {
+  const descricaoNormalizada = normalizarDescricaoCategorizacao(descricao);
+  if (!descricaoNormalizada) return null;
+
+  const regras = await pool.query(
+    `SELECT r.*, c.nome AS categoria_nome
+     FROM regras_categorizacao r
+     JOIN categorias c ON c.id = r.categoria_id
+     WHERE r.usuario_id = $1 AND r.ativo = true
+     ORDER BY r.prioridade DESC, r.criado_em ASC`,
+    [usuarioId]
+  );
+
+  return regras.rows.find((regra) => {
+    if (regra.tipo_match !== 'CONTAINS') return false;
+    return descricaoNormalizada.includes(regra.termo_normalizado);
+  }) || null;
+}
+
+async function criarOuAtualizarRegraCategorizacao(usuarioId, categoriaId, termo, prioridade = 0) {
+  const termoLimpo = sugerirTermoRegra(termo);
+  const termoNormalizado = normalizarDescricaoCategorizacao(termoLimpo);
+
+  if (!termoNormalizado) {
+    throw new Error('Informe um termo válido para criar a regra de categorização.');
+  }
+
+  const result = await pool.query(
+    `INSERT INTO regras_categorizacao (usuario_id, categoria_id, termo, termo_normalizado, tipo_match, prioridade, ativo, atualizado_em)
+     VALUES ($1, $2, $3, $4, 'CONTAINS', $5, true, NOW())
+     ON CONFLICT (usuario_id, categoria_id, termo_normalizado, tipo_match)
+     DO UPDATE SET
+       termo = EXCLUDED.termo,
+       prioridade = GREATEST(regras_categorizacao.prioridade, EXCLUDED.prioridade),
+       ativo = true,
+       atualizado_em = NOW()
+     RETURNING *`,
+    [usuarioId, categoriaId, termoLimpo, termoNormalizado, prioridade]
+  );
+
+  return result.rows[0];
+}
+
+async function aplicarRegraEmTransacoesSemCategoria(usuarioId, regra) {
+  const transacoes = await pool.query(
+    `SELECT t.id, t.descricao
+     FROM transacoes t
+     JOIN contas c ON c.id = t.conta_id
+     WHERE c.usuario_id = $1
+       AND t.deletado_em IS NULL
+       AND t.categoria_id IS NULL`,
+    [usuarioId]
+  );
+
+  const ids = transacoes.rows
+    .filter((tx) => normalizarDescricaoCategorizacao(tx.descricao).includes(regra.termo_normalizado))
+    .map((tx) => tx.id);
+
+  if (ids.length === 0) return 0;
+
+  const result = await pool.query(
+    `UPDATE transacoes
+     SET categoria_id = $1,
+         categoria_origem = 'AUTO',
+         regra_categorizacao_id = $2,
+         atualizado_em = NOW()
+     WHERE id = ANY($3::uuid[])
+     RETURNING id`,
+    [regra.categoria_id, regra.id, ids]
+  );
+
+  return result.rowCount;
+}
+
+async function aplicarRegrasAtivasEmTransacoesSemCategoria(usuarioId) {
+  const regras = await pool.query(
+    `SELECT * FROM regras_categorizacao
+     WHERE usuario_id = $1 AND ativo = true
+     ORDER BY prioridade DESC, criado_em ASC`,
+    [usuarioId]
+  );
+
+  let total = 0;
+  for (const regra of regras.rows) {
+    total += await aplicarRegraEmTransacoesSemCategoria(usuarioId, regra);
+  }
+
+  return total;
+}
+
+async function validarCategoriaDoUsuario(usuarioId, categoriaId) {
+  const categoria = await pool.query(
+    `SELECT id FROM categorias
+     WHERE id = $1 AND ativa = true AND (usuario_id = $2 OR usuario_id IS NULL)`,
+    [categoriaId, usuarioId]
+  );
+
+  if (categoria.rows.length === 0) {
+    throw new Error('Categoria não encontrada para este usuário.');
+  }
+}
+
+async function categorizarTransacoesUsuario(usuarioId, transacaoIds, categoriaId, { origem = 'MANUAL', regraId = null } = {}) {
+  if (!Array.isArray(transacaoIds) || transacaoIds.length === 0) return [];
+
+  const result = await pool.query(
+    `UPDATE transacoes t
+     SET categoria_id = $1,
+         categoria_origem = $2,
+         regra_categorizacao_id = $3,
+         atualizado_em = NOW()
+     FROM contas c
+     WHERE c.id = t.conta_id
+       AND c.usuario_id = $4
+       AND t.id = ANY($5::uuid[])
+       AND t.deletado_em IS NULL
+     RETURNING t.*`,
+    [categoriaId, origem, regraId, usuarioId, transacaoIds]
+  );
+
+  return result.rows;
+}
+
+async function montarRespostaTransacoes(rows) {
+  if (rows.length === 0) return [];
+  const ids = rows.map((row) => row.id);
+  const result = await pool.query(
+    `SELECT t.*, cat.nome as categoria_nome
+     FROM transacoes t
+     LEFT JOIN categorias cat ON t.categoria_id = cat.id
+     WHERE t.id = ANY($1::uuid[])
+     ORDER BY t.data DESC`,
+    [ids]
+  );
+  return result.rows;
 }
 
 async function criarNotificacao(usuarioId, tipo, { titulo, mensagem, prioridade = 'normal', metadata = {} }) {
@@ -798,11 +1121,24 @@ app.post('/api/importar/:arquivoId', verificarToken, async (req, res) => {
             continue;
           }
 
+          const regra = await buscarRegraCompatível(req.usuario.usuario_id, tx.descricao);
+
           await pool.query(
             `INSERT INTO transacoes
-             (id, conta_id, data, descricao, valor, tipo, hash_transacao, criado_em)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
-            [crypto.randomUUID(), contaId, tx.data, tx.descricao, tx.valor, tx.tipo, tx.hash]
+             (id, conta_id, data, descricao, valor, tipo, categoria_id, categoria_origem, regra_categorizacao_id, hash_transacao, criado_em)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())`,
+            [
+              crypto.randomUUID(),
+              contaId,
+              tx.data,
+              tx.descricao,
+              tx.valor,
+              tx.tipo,
+              regra?.categoria_id || null,
+              regra ? 'AUTO' : null,
+              regra?.id || null,
+              tx.hash,
+            ]
           );
 
           inseridas++;
@@ -875,12 +1211,23 @@ app.post('/api/importar', verificarToken, async (req, res) => {
 
     for (const tx of transacoesValidadas) {
       const hash = gerarHashTransacao(tx);
+      const regra = await buscarRegraCompatível(req.usuario.usuario_id, tx.descricao);
       const insert = await pool.query(
-        `INSERT INTO transacoes (conta_id, data, descricao, valor, tipo, hash_transacao, criado_em)
-         VALUES ($1, $2, $3, $4, $5, $6, NOW())
+        `INSERT INTO transacoes (conta_id, data, descricao, valor, tipo, categoria_id, categoria_origem, regra_categorizacao_id, hash_transacao, criado_em)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
          ON CONFLICT (hash_transacao) DO NOTHING
          RETURNING id`,
-        [contaId, tx.data, tx.descricao, tx.valor, tx.tipo, hash]
+        [
+          contaId,
+          tx.data,
+          tx.descricao,
+          tx.valor,
+          tx.tipo,
+          regra?.categoria_id || null,
+          regra ? 'AUTO' : null,
+          regra?.id || null,
+          hash,
+        ]
       );
 
       if (insert.rows.length === 0) {
@@ -1023,14 +1370,17 @@ app.get('/api/admin/backups', verificarToken, async (req, res) => {
 
 app.get('/api/transacoes/:contaId', verificarToken, async (req, res) => {
   try {
+    await aplicarRegrasAtivasEmTransacoesSemCategoria(req.usuario.usuario_id);
+
     const result = await pool.query(
       `SELECT t.*, c.nome as categoria_nome
        FROM transacoes t
+       JOIN contas conta ON conta.id = t.conta_id
        LEFT JOIN categorias c ON t.categoria_id = c.id
-       WHERE t.conta_id = $1
+       WHERE t.conta_id = $1 AND conta.usuario_id = $2 AND t.deletado_em IS NULL
        ORDER BY t.data DESC
-       LIMIT 100`,
-      [req.params.contaId]
+       LIMIT 500`,
+      [req.params.contaId, req.usuario.usuario_id]
     );
 
     res.json({ transacoes: result.rows });
@@ -1039,16 +1389,152 @@ app.get('/api/transacoes/:contaId', verificarToken, async (req, res) => {
   }
 });
 
+app.patch('/api/transacoes/categorizar-lote', verificarToken, async (req, res) => {
+  try {
+    const { transacaoIds, categoriaId, criarRegra = false, termoRegra } = req.body;
+
+    if (!Array.isArray(transacaoIds) || transacaoIds.length === 0) {
+      return res.status(400).json({ erro: 'Selecione ao menos uma transação para categorizar.' });
+    }
+
+    await validarCategoriaDoUsuario(req.usuario.usuario_id, categoriaId);
+
+    let regra = null;
+    let atualizadasPorRegra = 0;
+
+    if (criarRegra) {
+      let termoBase = termoRegra;
+
+      if (!termoBase) {
+        const primeiraTransacao = await pool.query(
+          `SELECT t.descricao
+           FROM transacoes t
+           JOIN contas c ON c.id = t.conta_id
+           WHERE c.usuario_id = $1 AND t.id = ANY($2::uuid[])
+           LIMIT 1`,
+          [req.usuario.usuario_id, transacaoIds]
+        );
+        termoBase = primeiraTransacao.rows[0]?.descricao;
+      }
+
+      regra = await criarOuAtualizarRegraCategorizacao(req.usuario.usuario_id, categoriaId, termoBase);
+      atualizadasPorRegra = await aplicarRegraEmTransacoesSemCategoria(req.usuario.usuario_id, regra);
+    }
+
+    const atualizadas = await categorizarTransacoesUsuario(req.usuario.usuario_id, transacaoIds, categoriaId, {
+      origem: 'MANUAL',
+      regraId: regra?.id || null,
+    });
+
+    res.json({
+      sucesso: true,
+      atualizadas: atualizadas.length,
+      atualizadasPorRegra,
+      regra,
+      transacoes: await montarRespostaTransacoes(atualizadas),
+    });
+  } catch (error) {
+    res.status(500).json({ erro: error.message });
+  }
+});
+
 app.patch('/api/transacoes/:id/categorizar', verificarToken, async (req, res) => {
   try {
-    const { categoriaId } = req.body;
+    const { categoriaId, criarRegra = false, termoRegra } = req.body;
 
-    await pool.query(
-      'UPDATE transacoes SET categoria_id = $1 WHERE id = $2',
-      [categoriaId, req.params.id]
+    await validarCategoriaDoUsuario(req.usuario.usuario_id, categoriaId);
+
+    const transacao = await pool.query(
+      `SELECT t.*
+       FROM transacoes t
+       JOIN contas c ON c.id = t.conta_id
+       WHERE t.id = $1 AND c.usuario_id = $2 AND t.deletado_em IS NULL`,
+      [req.params.id, req.usuario.usuario_id]
     );
 
-    res.json({ sucesso: true });
+    if (transacao.rows.length === 0) {
+      return res.status(404).json({ erro: 'Transação não encontrada para este usuário.' });
+    }
+
+    let regra = null;
+    let atualizadasPorRegra = 0;
+
+    if (criarRegra) {
+      regra = await criarOuAtualizarRegraCategorizacao(
+        req.usuario.usuario_id,
+        categoriaId,
+        termoRegra || transacao.rows[0].descricao
+      );
+      atualizadasPorRegra = await aplicarRegraEmTransacoesSemCategoria(req.usuario.usuario_id, regra);
+    }
+
+    const atualizadas = await categorizarTransacoesUsuario(req.usuario.usuario_id, [req.params.id], categoriaId, {
+      origem: 'MANUAL',
+      regraId: regra?.id || null,
+    });
+
+    res.json({
+      sucesso: true,
+      atualizadas: atualizadas.length,
+      atualizadasPorRegra,
+      regra,
+      transacao: (await montarRespostaTransacoes(atualizadas))[0],
+    });
+  } catch (error) {
+    res.status(500).json({ erro: error.message });
+  }
+});
+
+// ============================================================================
+// ROTAS: REGRAS DE CATEGORIZAÇÃO
+// ============================================================================
+
+app.get('/api/regras-categorizacao', verificarToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT r.*, c.nome AS categoria_nome, c.emoji AS categoria_emoji
+       FROM regras_categorizacao r
+       JOIN categorias c ON c.id = r.categoria_id
+       WHERE r.usuario_id = $1
+       ORDER BY r.ativo DESC, r.prioridade DESC, r.termo ASC`,
+      [req.usuario.usuario_id]
+    );
+
+    res.json({ regras: result.rows });
+  } catch (error) {
+    res.status(500).json({ erro: error.message });
+  }
+});
+
+app.post('/api/regras-categorizacao', verificarToken, async (req, res) => {
+  try {
+    const { categoriaId, termo, prioridade = 0 } = req.body;
+
+    await validarCategoriaDoUsuario(req.usuario.usuario_id, categoriaId);
+    const regra = await criarOuAtualizarRegraCategorizacao(req.usuario.usuario_id, categoriaId, termo, prioridade);
+    const atualizadasPorRegra = await aplicarRegraEmTransacoesSemCategoria(req.usuario.usuario_id, regra);
+
+    res.status(201).json({ sucesso: true, regra, atualizadasPorRegra });
+  } catch (error) {
+    res.status(500).json({ erro: error.message });
+  }
+});
+
+app.patch('/api/regras-categorizacao/:id/desativar', verificarToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `UPDATE regras_categorizacao
+       SET ativo = false, atualizado_em = NOW()
+       WHERE id = $1 AND usuario_id = $2
+       RETURNING *`,
+      [req.params.id, req.usuario.usuario_id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ erro: 'Regra não encontrada para este usuário.' });
+    }
+
+    res.json({ sucesso: true, regra: result.rows[0] });
   } catch (error) {
     res.status(500).json({ erro: error.message });
   }
