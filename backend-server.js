@@ -134,6 +134,123 @@ async function inicializarBanco() {
 
   await pool.query('CREATE INDEX IF NOT EXISTS idx_categorias_usuario ON categorias(usuario_id)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_categorias_ativa ON categorias(ativa)');
+
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF to_regclass('public.transacoes') IS NOT NULL THEN
+        EXECUTE '
+          WITH duplicadas AS (
+            SELECT
+              id,
+              FIRST_VALUE(id) OVER (
+                PARTITION BY nome, tipo
+                ORDER BY criado_em ASC NULLS LAST, id ASC
+              ) AS categoria_principal_id
+            FROM categorias
+            WHERE usuario_id IS NULL
+          )
+          UPDATE transacoes t
+          SET categoria_id = duplicadas.categoria_principal_id
+          FROM duplicadas
+          WHERE t.categoria_id = duplicadas.id
+            AND duplicadas.id <> duplicadas.categoria_principal_id
+        ';
+      END IF;
+
+      IF to_regclass('public.regras_categorizacao') IS NOT NULL THEN
+        EXECUTE '
+          WITH duplicadas AS (
+            SELECT
+              id,
+              FIRST_VALUE(id) OVER (
+                PARTITION BY nome, tipo
+                ORDER BY criado_em ASC NULLS LAST, id ASC
+              ) AS categoria_principal_id
+            FROM categorias
+            WHERE usuario_id IS NULL
+          )
+          UPDATE regras_categorizacao r
+          SET categoria_id = duplicadas.categoria_principal_id
+          FROM duplicadas
+          WHERE r.categoria_id = duplicadas.id
+            AND duplicadas.id <> duplicadas.categoria_principal_id
+        ';
+      END IF;
+
+      IF to_regclass('public.descricao_categoria_mapping') IS NOT NULL THEN
+        EXECUTE '
+          WITH duplicadas AS (
+            SELECT
+              id,
+              FIRST_VALUE(id) OVER (
+                PARTITION BY nome, tipo
+                ORDER BY criado_em ASC NULLS LAST, id ASC
+              ) AS categoria_principal_id
+            FROM categorias
+            WHERE usuario_id IS NULL
+          )
+          UPDATE descricao_categoria_mapping m
+          SET categoria_id = duplicadas.categoria_principal_id
+          FROM duplicadas
+          WHERE m.categoria_id = duplicadas.id
+            AND duplicadas.id <> duplicadas.categoria_principal_id
+        ';
+      END IF;
+
+      IF to_regclass('public.orcamentos') IS NOT NULL THEN
+        EXECUTE '
+          WITH duplicadas AS (
+            SELECT
+              id,
+              FIRST_VALUE(id) OVER (
+                PARTITION BY nome, tipo
+                ORDER BY criado_em ASC NULLS LAST, id ASC
+              ) AS categoria_principal_id
+            FROM categorias
+            WHERE usuario_id IS NULL
+          )
+          UPDATE orcamentos o
+          SET categoria_id = duplicadas.categoria_principal_id
+          FROM duplicadas
+          WHERE o.categoria_id = duplicadas.id
+            AND duplicadas.id <> duplicadas.categoria_principal_id
+        ';
+      END IF;
+
+      WITH duplicadas AS (
+        SELECT
+          id,
+          FIRST_VALUE(id) OVER (
+            PARTITION BY nome, tipo
+            ORDER BY criado_em ASC NULLS LAST, id ASC
+          ) AS categoria_principal_id
+        FROM categorias
+        WHERE usuario_id IS NULL
+      )
+      UPDATE categorias c
+      SET categoria_pai_id = duplicadas.categoria_principal_id
+      FROM duplicadas
+      WHERE c.categoria_pai_id = duplicadas.id
+        AND duplicadas.id <> duplicadas.categoria_principal_id;
+
+      WITH categorias_duplicadas AS (
+        SELECT
+          id,
+          ROW_NUMBER() OVER (
+            PARTITION BY nome, tipo
+            ORDER BY criado_em ASC NULLS LAST, id ASC
+          ) AS ordem
+        FROM categorias
+        WHERE usuario_id IS NULL
+      )
+      DELETE FROM categorias c
+      USING categorias_duplicadas
+      WHERE c.id = categorias_duplicadas.id
+        AND categorias_duplicadas.ordem > 1;
+    END $$;
+  `);
+
   await pool.query("CREATE UNIQUE INDEX IF NOT EXISTS idx_categorias_padrao_nome_tipo_unique ON categorias(nome, tipo) WHERE usuario_id IS NULL");
 
   await pool.query(`
