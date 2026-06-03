@@ -2,7 +2,7 @@
 // FRONTEND: React App
 // ============================================================================
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import axios from 'axios';
 
 const API_URL = import.meta.env.VITE_API_URL || '/api';
@@ -60,6 +60,35 @@ function montarMensagemErroImportacao(error) {
   }
 
   return 'Erro inesperado ao importar. Tente novamente ou contate o suporte.';
+}
+
+
+function normalizarDescricaoCategorizacao(texto) {
+  return String(texto || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase()
+    .replace(/\b\d{2}\.?\d{3}\.?\d{3}\/\d{4}-?\d{2}\b/g, ' ')
+    .replace(/\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b/g, ' ')
+    .replace(/[^A-Z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function sugerirTermoRegra(descricao) {
+  const partes = String(descricao || '')
+    .split(/\s+-\s+|\s+–\s+|\s+—\s+/)
+    .map((parte) => normalizarDescricaoCategorizacao(parte))
+    .filter(Boolean)
+    .filter((parte) => !/^\d+$/.test(parte))
+    .filter((parte) => !/^(TRANSFERENCIA|ENVIADA|RECEBIDA|PIX|PAGAMENTO|COMPRA|DEBITO|CREDITO)\b/.test(parte));
+
+  return partes.find((parte) => /[A-Z]/.test(parte) && parte.length >= 3) || normalizarDescricaoCategorizacao(descricao);
+}
+
+function normalizarDataFiltro(data) {
+  if (!data) return '';
+  return String(data).slice(0, 10);
 }
 
 function criarUsuarioDoToken(token) {
@@ -859,6 +888,17 @@ function TelaTransacoes({ conta, token, onVoltar }) {
   const [carregando, setCarregando] = useState(true);
   const [categoriaModalAberta, setCategoriaModalAberta] = useState(false);
   const [transacaoSelecionada, setTransacaoSelecionada] = useState(null);
+  const [selecionadas, setSelecionadas] = useState([]);
+  const [filtros, setFiltros] = useState({ busca: '', categoria: 'todas', status: 'todas', tipo: 'todos' });
+  const [dataInicial, setDataInicial] = useState('');
+  const [dataFinal, setDataFinal] = useState('');
+  const [categoriaEscolhida, setCategoriaEscolhida] = useState('');
+  const [criarRegra, setCriarRegra] = useState(false);
+  const [termoRegra, setTermoRegra] = useState('');
+  const [salvandoCategoria, setSalvandoCategoria] = useState(false);
+  const [transacaoParaExcluir, setTransacaoParaExcluir] = useState(null);
+  const [modalExclusaoAberto, setModalExclusaoAberto] = useState(false);
+  const [excluindoTransacao, setExcluindoTransacao] = useState(false);
 
   useEffect(() => {
     carregarDados();
@@ -892,77 +932,228 @@ function TelaTransacoes({ conta, token, onVoltar }) {
     }
   };
 
-  const handleCategorizar = async (categoriaId) => {
-    if (!transacaoSelecionada) return;
+  const transacoesFiltradas = useMemo(() => {
+    const buscaNormalizada = normalizarDescricaoCategorizacao(filtros.busca);
+
+    return transacoes.filter((tx) => {
+      const descricao = normalizarDescricaoCategorizacao(tx.descricao);
+      const dataTx = normalizarDataFiltro(tx.data);
+      const correspondeBusca = !buscaNormalizada || descricao.includes(buscaNormalizada);
+      const correspondeCategoria = filtros.categoria === 'todas' || (tx.categoria_id || 'sem') === filtros.categoria;
+      const correspondeStatus = filtros.status === 'todas'
+        || (filtros.status === 'sem' && !tx.categoria_id)
+        || (filtros.status === 'categorizadas' && Boolean(tx.categoria_id));
+      const correspondeTipo = filtros.tipo === 'todos' || tx.tipo === filtros.tipo;
+      const correspondeDataInicial = !dataInicial || dataTx >= dataInicial;
+      const correspondeDataFinal = !dataFinal || dataTx <= dataFinal;
+
+      return correspondeBusca && correspondeCategoria && correspondeStatus && correspondeTipo && correspondeDataInicial && correspondeDataFinal;
+    });
+  }, [transacoes, filtros, dataInicial, dataFinal]);
+
+  const idsFiltrados = transacoesFiltradas.map((tx) => tx.id);
+  const todasFiltradasSelecionadas = idsFiltrados.length > 0 && idsFiltrados.every((id) => selecionadas.includes(id));
+
+  const abrirModalIndividual = (tx) => {
+    setTransacaoSelecionada(tx);
+    setCategoriaEscolhida(tx.categoria_id || '');
+    setCriarRegra(false);
+    setTermoRegra(sugerirTermoRegra(tx.descricao));
+    setCategoriaModalAberta(true);
+  };
+
+  const abrirModalLote = () => {
+    if (selecionadas.length === 0) {
+      alert('Selecione ao menos uma transação.');
+      return;
+    }
+
+    const primeira = transacoes.find((tx) => selecionadas.includes(tx.id));
+    setTransacaoSelecionada(null);
+    setCategoriaEscolhida('');
+    setCriarRegra(false);
+    setTermoRegra(sugerirTermoRegra(filtros.busca || primeira?.descricao || ''));
+    setCategoriaModalAberta(true);
+  };
+
+  const fecharModal = () => {
+    setCategoriaModalAberta(false);
+    setTransacaoSelecionada(null);
+    setCategoriaEscolhida('');
+    setCriarRegra(false);
+    setTermoRegra('');
+  };
+
+  const handleCategorizar = async () => {
+    if (!categoriaEscolhida) {
+      alert('Escolha uma categoria.');
+      return;
+    }
+
+    if (criarRegra && !termoRegra.trim()) {
+      alert('Informe o termo da regra automática.');
+      return;
+    }
+
+    setSalvandoCategoria(true);
 
     try {
-      await axios.patch(
-        `${API_URL}/transacoes/${transacaoSelecionada.id}/categorizar`,
-        { categoriaId },
-        { headers: authHeaders }
-      );
+      const payload = {
+        categoriaId: categoriaEscolhida,
+        criarRegra,
+        termoRegra: criarRegra ? termoRegra : undefined,
+      };
 
-      setCategoriaModalAberta(false);
-      setTransacaoSelecionada(null);
+      const response = transacaoSelecionada
+        ? await axios.patch(`${API_URL}/transacoes/${transacaoSelecionada.id}/categorizar`, payload, { headers: authHeaders })
+        : await axios.patch(`${API_URL}/transacoes/categorizar-lote`, { ...payload, transacaoIds: selecionadas }, { headers: authHeaders });
+
+      const atualizadas = response.data.atualizadas || 0;
+      const atualizadasPorRegra = response.data.atualizadasPorRegra || 0;
+      const mensagemRegra = criarRegra ? ` Regra aplicada em ${atualizadasPorRegra} transações sem categoria semelhantes.` : '';
+      alert(`${atualizadas} transação(ões) categorizada(s).${mensagemRegra}`);
+
+      fecharModal();
+      setSelecionadas([]);
       await carregarDados();
     } catch (error) {
       alert('Erro ao categorizar: ' + (error.response?.data?.erro || error.message));
+    } finally {
+      setSalvandoCategoria(false);
+    }
+  };
+
+  const alternarSelecionada = (id) => {
+    setSelecionadas((atuais) => atuais.includes(id)
+      ? atuais.filter((item) => item !== id)
+      : [...atuais, id]);
+  };
+
+  const alternarTodasFiltradas = () => {
+    setSelecionadas((atuais) => {
+      if (todasFiltradasSelecionadas) return atuais.filter((id) => !idsFiltrados.includes(id));
+      return Array.from(new Set([...atuais, ...idsFiltrados]));
+    });
+  };
+
+  const limparFiltros = () => {
+    setFiltros({ busca: '', categoria: 'todas', status: 'todas', tipo: 'todos' });
+    setDataInicial('');
+    setDataFinal('');
+  };
+
+  const abrirModalExclusao = (tx) => {
+    setTransacaoParaExcluir(tx);
+    setModalExclusaoAberto(true);
+  };
+
+  const fecharModalExclusao = () => {
+    if (excluindoTransacao) return;
+    setModalExclusaoAberto(false);
+    setTransacaoParaExcluir(null);
+  };
+
+  const handleExcluirTransacao = async () => {
+    if (!transacaoParaExcluir) return;
+
+    try {
+      setExcluindoTransacao(true);
+
+      await axios.delete(`${API_URL}/transacoes/${transacaoParaExcluir.id}`, {
+        headers: authHeaders,
+      });
+
+      setTransacoes((atuais) => atuais.filter((tx) => tx.id !== transacaoParaExcluir.id));
+      setSelecionadas((atuais) => atuais.filter((id) => id !== transacaoParaExcluir.id));
+      setModalExclusaoAberto(false);
+      setTransacaoParaExcluir(null);
+    } catch (error) {
+      alert('Erro ao excluir transação: ' + (error.response?.data?.erro || error.message));
+    } finally {
+      setExcluindoTransacao(false);
     }
   };
 
   return (
     <div style={{ minHeight: '100vh', background: '#f5f5f5' }}>
-      <div style={{
-        background: '#1f2937',
-        color: 'white',
-        padding: '20px'
-      }}>
-        <button
-          onClick={onVoltar}
-          style={{
-            background: 'rgba(255,255,255,0.2)',
-            color: 'white',
-            border: '1px solid rgba(255,255,255,0.3)',
-            padding: '8px 16px',
-            borderRadius: '6px',
-            cursor: 'pointer',
-            marginBottom: '15px'
-          }}
-        >
+      <div style={{ background: '#1f2937', color: 'white', padding: '20px' }}>
+        <button onClick={onVoltar} style={{ background: 'rgba(255,255,255,0.2)', color: 'white', border: '1px solid rgba(255,255,255,0.3)', padding: '8px 16px', borderRadius: '6px', cursor: 'pointer', marginBottom: '15px' }}>
           ← Voltar
         </button>
-
         <h1 style={{ margin: 0 }}>{conta.nome}</h1>
-        <p style={{ margin: '5px 0 0', opacity: 0.8 }}>
-          Saldo: {formatarMoeda(conta.saldo)}
-        </p>
+        <p style={{ margin: '5px 0 0', opacity: 0.8 }}>Saldo: {formatarMoeda(conta.saldo)}</p>
       </div>
 
       <div style={{ padding: '20px', maxWidth: '1200px', margin: '0 auto' }}>
+        <div style={{ background: 'white', borderRadius: '12px', padding: '16px', marginBottom: '16px', boxShadow: '0 2px 8px rgba(0,0,0,0.08)' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(220px, 2fr) 1fr 1fr 1fr', gap: '12px', alignItems: 'end' }}>
+            <label style={{ display: 'grid', gap: '6px', fontSize: '13px', color: '#374151' }}>
+              Pesquisar descrição
+              <input value={filtros.busca} onChange={(event) => setFiltros({ ...filtros, busca: event.target.value })} placeholder="Ex.: AUTO POSTO" style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} />
+            </label>
+            <label style={{ display: 'grid', gap: '6px', fontSize: '13px', color: '#374151' }}>
+              Categoria
+              <select value={filtros.categoria} onChange={(event) => setFiltros({ ...filtros, categoria: event.target.value })} style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}>
+                <option value="todas">Todas</option>
+                <option value="sem">Sem categoria</option>
+                {categorias.map((cat) => <option key={cat.id} value={cat.id}>{cat.emoji} {cat.nome}</option>)}
+              </select>
+            </label>
+            <label style={{ display: 'grid', gap: '6px', fontSize: '13px', color: '#374151' }}>
+              Status
+              <select value={filtros.status} onChange={(event) => setFiltros({ ...filtros, status: event.target.value })} style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}>
+                <option value="todas">Todas</option>
+                <option value="sem">Sem categoria</option>
+                <option value="categorizadas">Categorizadas</option>
+              </select>
+            </label>
+            <label style={{ display: 'grid', gap: '6px', fontSize: '13px', color: '#374151' }}>
+              Tipo
+              <select value={filtros.tipo} onChange={(event) => setFiltros({ ...filtros, tipo: event.target.value })} style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}>
+                <option value="todos">Todos</option>
+                <option value="CREDITO">Crédito</option>
+                <option value="DEBITO">Débito</option>
+              </select>
+            </label>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '12px', alignItems: 'end', marginTop: '14px' }}>
+            <label style={{ display: 'grid', gap: '6px', fontSize: '13px', color: '#374151' }}>
+              Data inicial
+              <input type="date" value={dataInicial} onChange={(event) => setDataInicial(event.target.value)} style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} />
+            </label>
+            <label style={{ display: 'grid', gap: '6px', fontSize: '13px', color: '#374151' }}>
+              Data final
+              <input type="date" value={dataFinal} onChange={(event) => setDataFinal(event.target.value)} style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} />
+            </label>
+            <button onClick={limparFiltros} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', cursor: 'pointer', background: '#e5e7eb' }}>Limpar filtros</button>
+            <button onClick={alternarTodasFiltradas} disabled={transacoesFiltradas.length === 0} style={{ padding: '10px 14px', borderRadius: '8px', border: '1px solid #d1d5db', background: 'white', cursor: transacoesFiltradas.length === 0 ? 'not-allowed' : 'pointer' }}>
+              {todasFiltradasSelecionadas ? 'Limpar seleção filtrada' : 'Selecionar todos filtrados'}
+            </button>
+            <button onClick={abrirModalLote} disabled={selecionadas.length === 0} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', background: selecionadas.length ? '#667eea' : '#c7d2fe', color: 'white', cursor: selecionadas.length ? 'pointer' : 'not-allowed' }}>
+              Categorizar selecionadas
+            </button>
+          </div>
+
+          <div style={{ marginTop: '14px' }}>
+            <span style={{ color: '#4b5563', fontSize: '14px' }}>{transacoesFiltradas.length} transação(ões) filtrada(s) • {selecionadas.length} selecionada(s)</span>
+          </div>
+        </div>
+
         {carregando ? (
           <p>Carregando transações...</p>
         ) : transacoes.length === 0 ? (
-          <div style={{
-            background: 'white',
-            borderRadius: '12px',
-            padding: '40px',
-            textAlign: 'center'
-          }}>
+          <div style={{ background: 'white', borderRadius: '12px', padding: '40px', textAlign: 'center' }}>
             <h2>Nenhuma transação encontrada</h2>
           </div>
         ) : (
-          <div style={{
-            background: 'white',
-            borderRadius: '12px',
-            overflow: 'hidden',
-            boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
-          }}>
-            <table style={{
-              width: '100%',
-              borderCollapse: 'collapse'
-            }}>
+          <div style={{ background: 'white', borderRadius: '12px', overflow: 'hidden', boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead>
                 <tr style={{ background: '#f9fafb' }}>
+                  <th style={{ padding: '12px', textAlign: 'center' }}>
+                    <input type="checkbox" checked={todasFiltradasSelecionadas} onChange={alternarTodasFiltradas} />
+                  </th>
                   <th style={{ padding: '12px', textAlign: 'left' }}>Data</th>
                   <th style={{ padding: '12px', textAlign: 'left' }}>Descrição</th>
                   <th style={{ padding: '12px', textAlign: 'right' }}>Valor</th>
@@ -970,126 +1161,104 @@ function TelaTransacoes({ conta, token, onVoltar }) {
                   <th style={{ padding: '12px', textAlign: 'center' }}>Ações</th>
                 </tr>
               </thead>
-
               <tbody>
-                {transacoes.map(tx => (
+                {transacoesFiltradas.map((tx) => (
                   <tr key={tx.id} style={{ borderTop: '1px solid #e5e7eb' }}>
-                    <td style={{ padding: '12px' }}>{formatarData(tx.data)}</td>
-
-                    <td style={{ padding: '12px' }}>{tx.descricao}</td>
-
-                    <td style={{
-                      padding: '12px',
-                      textAlign: 'right',
-                      color: tx.tipo === 'CREDITO' ? '#10b981' : '#ef4444',
-                      fontWeight: 'bold'
-                    }}>
-                      {tx.tipo === 'CREDITO' ? '+' : '-'}
-                      {formatarMoeda(tx.valor)}
+                    <td style={{ padding: '12px', textAlign: 'center' }}>
+                      <input type="checkbox" checked={selecionadas.includes(tx.id)} onChange={() => alternarSelecionada(tx.id)} />
                     </td>
-
+                    <td style={{ padding: '12px' }}>{formatarData(tx.data)}</td>
+                    <td style={{ padding: '12px' }}>{tx.descricao}</td>
+                    <td style={{ padding: '12px', textAlign: 'right', color: tx.tipo === 'CREDITO' ? '#10b981' : '#ef4444', fontWeight: 'bold' }}>
+                      {tx.tipo === 'CREDITO' ? '+' : '-'}{formatarMoeda(tx.valor)}
+                    </td>
                     <td style={{ padding: '12px' }}>
-                      <span style={{
-                        background: '#e5e7eb',
-                        padding: '4px 8px',
-                        borderRadius: '4px',
-                        fontSize: '12px'
-                      }}>
-                        {tx.categoria_nome || 'Sem categoria'}
+                      <span style={{ background: tx.categoria_origem === 'AUTO' ? '#dbeafe' : '#e5e7eb', padding: '4px 8px', borderRadius: '4px', fontSize: '12px' }}>
+                        {tx.categoria_nome || 'Sem categoria'}{tx.categoria_origem === 'AUTO' ? ' • auto' : ''}
                       </span>
                     </td>
-
                     <td style={{ padding: '12px', textAlign: 'center' }}>
-                      <button
-                        onClick={() => {
-                          setTransacaoSelecionada(tx);
-                          setCategoriaModalAberta(true);
-                        }}
-                        style={{
-                          background: '#667eea',
-                          color: 'white',
-                          border: 'none',
-                          padding: '4px 12px',
-                          borderRadius: '4px',
-                          cursor: 'pointer',
-                          fontSize: '12px'
-                        }}
-                      >
-                        Categorizar
-                      </button>
+                      <div style={{ display: 'flex', justifyContent: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                        <button onClick={() => abrirModalIndividual(tx)} style={{ background: '#667eea', color: 'white', border: 'none', padding: '4px 12px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>
+                          Categorizar
+                        </button>
+                        <button onClick={() => abrirModalExclusao(tx)} style={{ background: 'white', color: '#dc2626', border: '1px solid #dc2626', padding: '4px 12px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>
+                          Excluir
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
+                {transacoesFiltradas.length === 0 && (
+                  <tr><td colSpan="6" style={{ padding: '24px', textAlign: 'center', color: '#6b7280' }}>Nenhuma transação corresponde aos filtros.</td></tr>
+                )}
               </tbody>
             </table>
           </div>
         )}
       </div>
 
-      {categoriaModalAberta && transacaoSelecionada && (
-        <div style={{
-          position: 'fixed',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          background: 'rgba(0,0,0,0.5)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          zIndex: 1000
-        }}>
-          <div style={{
-            background: 'white',
-            borderRadius: '12px',
-            padding: '30px',
-            maxWidth: '400px',
-            width: '90%'
-          }}>
-            <h3>
-              Categorizar: {transacaoSelecionada.descricao.substring(0, 30)}
-            </h3>
+      {categoriaModalAberta && (
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <div style={{ background: 'white', borderRadius: '12px', padding: '30px', maxWidth: '520px', width: '90%' }}>
+            <h3 style={{ marginTop: 0 }}>{transacaoSelecionada ? `Categorizar: ${transacaoSelecionada.descricao.substring(0, 45)}` : `Categorizar ${selecionadas.length} transação(ões)`}</h3>
+            {transacaoSelecionada && <p style={{ color: '#666', marginBottom: '20px' }}>{formatarMoeda(transacaoSelecionada.valor)}</p>}
 
-            <p style={{ color: '#666', marginBottom: '20px' }}>
-              {formatarMoeda(transacaoSelecionada.valor)}
+            <label style={{ display: 'grid', gap: '6px', marginBottom: '14px', fontSize: '14px' }}>
+              Categoria
+              <select value={categoriaEscolhida} onChange={(event) => setCategoriaEscolhida(event.target.value)} style={{ padding: '12px', borderRadius: '8px', border: '1px solid #d1d5db' }}>
+                <option value="">Selecione uma categoria</option>
+                {categorias.map((cat) => <option key={cat.id} value={cat.id}>{cat.emoji} {cat.nome}</option>)}
+              </select>
+            </label>
+
+            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px', fontSize: '14px' }}>
+              <input type="checkbox" checked={criarRegra} onChange={(event) => setCriarRegra(event.target.checked)} />
+              {transacaoSelecionada ? 'Aplicar automaticamente para transações semelhantes desse fornecedor' : 'Criar regra para transações futuras'}
+            </label>
+
+            {criarRegra && (
+              <label style={{ display: 'grid', gap: '6px', marginBottom: '18px', fontSize: '14px' }}>
+                Termo da regra sugerida
+                <input value={termoRegra} onChange={(event) => setTermoRegra(event.target.value)} placeholder="AUTO POSTO PRESIDENTE LTDA" style={{ padding: '12px', borderRadius: '8px', border: '1px solid #d1d5db' }} />
+                <small style={{ color: '#6b7280' }}>O backend normaliza acentos, pontuação e descrições Pix antes de comparar.</small>
+              </label>
+            )}
+
+            <div style={{ display: 'flex', gap: '10px' }}>
+              <button onClick={handleCategorizar} disabled={salvandoCategoria} style={{ background: '#667eea', color: 'white', border: 'none', padding: '12px', borderRadius: '8px', cursor: 'pointer', flex: 1 }}>
+                {salvandoCategoria ? 'Salvando...' : 'Salvar categorização'}
+              </button>
+              <button onClick={fecharModal} disabled={salvandoCategoria} style={{ background: '#e5e7eb', border: 'none', padding: '12px', borderRadius: '8px', cursor: 'pointer', flex: 1 }}>
+                Cancelar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {modalExclusaoAberto && transacaoParaExcluir && (
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <div style={{ background: 'white', borderRadius: '12px', padding: '30px', maxWidth: '520px', width: '90%' }}>
+            <h3 style={{ marginTop: 0, color: '#991b1b' }}>Excluir transação</h3>
+            <p style={{ color: '#374151', lineHeight: 1.5 }}>
+              Tem certeza que deseja excluir esta transação? Essa ação não poderá ser desfeita.
             </p>
 
-            <div style={{ display: 'grid', gap: '10px', marginBottom: '20px' }}>
-              {categorias.map(cat => (
-                <button
-                  key={cat.id}
-                  onClick={() => handleCategorizar(cat.id)}
-                  style={{
-                    background: '#f3f4f6',
-                    border: '1px solid #e5e7eb',
-                    padding: '12px',
-                    borderRadius: '8px',
-                    cursor: 'pointer',
-                    textAlign: 'left',
-                    fontSize: '14px'
-                  }}
-                >
-                  {cat.emoji} {cat.nome}
-                </button>
-              ))}
+            <div style={{ background: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: '8px', padding: '14px', margin: '18px 0' }}>
+              <p style={{ margin: '0 0 8px' }}><strong>Data:</strong> {formatarData(transacaoParaExcluir.data)}</p>
+              <p style={{ margin: '0 0 8px' }}><strong>Descrição:</strong> {transacaoParaExcluir.descricao}</p>
+              <p style={{ margin: 0 }}><strong>Valor:</strong> {transacaoParaExcluir.tipo === 'CREDITO' ? '+' : '-'}{formatarMoeda(transacaoParaExcluir.valor)}</p>
             </div>
 
-            <button
-              onClick={() => {
-                setCategoriaModalAberta(false);
-                setTransacaoSelecionada(null);
-              }}
-              style={{
-                background: '#e5e7eb',
-                border: 'none',
-                padding: '12px',
-                borderRadius: '8px',
-                cursor: 'pointer',
-                width: '100%'
-              }}
-            >
-              Cancelar
-            </button>
+            <div style={{ display: 'flex', gap: '10px' }}>
+              <button onClick={fecharModalExclusao} disabled={excluindoTransacao} style={{ background: '#e5e7eb', border: 'none', padding: '12px', borderRadius: '8px', cursor: excluindoTransacao ? 'not-allowed' : 'pointer', flex: 1 }}>
+                Cancelar
+              </button>
+              <button onClick={handleExcluirTransacao} disabled={excluindoTransacao} style={{ background: '#dc2626', color: 'white', border: 'none', padding: '12px', borderRadius: '8px', cursor: excluindoTransacao ? 'not-allowed' : 'pointer', flex: 1 }}>
+                {excluindoTransacao ? 'Excluindo...' : 'Excluir transação'}
+              </button>
+            </div>
           </div>
         </div>
       )}
