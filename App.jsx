@@ -293,6 +293,177 @@ async function lerXlsxPadrao(file) {
   }));
 }
 
+
+const CRC32_TABELA = (() => {
+  const tabela = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    tabela[i] = c >>> 0;
+  }
+  return tabela;
+})();
+
+function calcularCrc32(bytes) {
+  let crc = 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) crc = CRC32_TABELA[(crc ^ bytes[i]) & 0xff] ^ (crc >>> 8);
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function concatenarUint8(partes) {
+  const total = partes.reduce((soma, parte) => soma + parte.length, 0);
+  const resultado = new Uint8Array(total);
+  let offset = 0;
+  partes.forEach((parte) => {
+    resultado.set(parte, offset);
+    offset += parte.length;
+  });
+  return resultado;
+}
+
+function uint16(valor) {
+  const bytes = new Uint8Array(2);
+  new DataView(bytes.buffer).setUint16(0, valor, true);
+  return bytes;
+}
+
+function uint32(valor) {
+  const bytes = new Uint8Array(4);
+  new DataView(bytes.buffer).setUint32(0, valor >>> 0, true);
+  return bytes;
+}
+
+function criarZipSemCompressao(arquivos) {
+  const encoder = new TextEncoder();
+  const locais = [];
+  const centrais = [];
+  let offset = 0;
+
+  arquivos.forEach(({ nome, conteudo }) => {
+    const nomeBytes = encoder.encode(nome);
+    const dados = typeof conteudo === 'string' ? encoder.encode(conteudo) : conteudo;
+    const crc = calcularCrc32(dados);
+
+    const local = concatenarUint8([
+      uint32(0x04034b50), uint16(20), uint16(0), uint16(0), uint16(0), uint16(0), uint32(crc),
+      uint32(dados.length), uint32(dados.length), uint16(nomeBytes.length), uint16(0), nomeBytes, dados,
+    ]);
+    locais.push(local);
+
+    const central = concatenarUint8([
+      uint32(0x02014b50), uint16(20), uint16(20), uint16(0), uint16(0), uint16(0), uint16(0), uint32(crc),
+      uint32(dados.length), uint32(dados.length), uint16(nomeBytes.length), uint16(0), uint16(0), uint16(0), uint16(0),
+      uint32(0), uint32(offset), nomeBytes,
+    ]);
+    centrais.push(central);
+    offset += local.length;
+  });
+
+  const dadosLocais = concatenarUint8(locais);
+  const dadosCentrais = concatenarUint8(centrais);
+  const eocd = concatenarUint8([
+    uint32(0x06054b50), uint16(0), uint16(0), uint16(arquivos.length), uint16(arquivos.length),
+    uint32(dadosCentrais.length), uint32(dadosLocais.length), uint16(0),
+  ]);
+
+  return concatenarUint8([dadosLocais, dadosCentrais, eocd]);
+}
+
+function escaparXml(valor) {
+  return String(valor ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+function colunaExcel(indice) {
+  let coluna = '';
+  let numero = indice + 1;
+  while (numero > 0) {
+    const resto = (numero - 1) % 26;
+    coluna = String.fromCharCode(65 + resto) + coluna;
+    numero = Math.floor((numero - 1) / 26);
+  }
+  return coluna;
+}
+
+function criarCelulaXlsx(valor, linha, coluna, estilo = 0) {
+  const ref = `${colunaExcel(coluna)}${linha}`;
+  const atributoEstilo = estilo ? ` s="${estilo}"` : '';
+
+  if (typeof valor === 'number' && Number.isFinite(valor)) {
+    return `<c r="${ref}"${atributoEstilo}><v>${valor}</v></c>`;
+  }
+
+  return `<c r="${ref}" t="inlineStr"${atributoEstilo}><is><t>${escaparXml(valor)}</t></is></c>`;
+}
+
+function criarXlsxTransacoes(linhas) {
+  const cabecalhos = [
+    'Transacao_ID', 'ID', 'Data', 'Conta', 'Descrição', 'Valor', 'Tipo', 'Categoria Macro',
+    'Categoria Detalhada', 'Categoria', 'É Transferência Interna', 'Grupo Transferência', 'Origem Categoria'
+  ];
+  const todasLinhas = [cabecalhos, ...linhas];
+  const sheetRows = todasLinhas.map((linha, rowIndex) => {
+    const numeroLinha = rowIndex + 1;
+    const cells = linha.map((valor, colIndex) => criarCelulaXlsx(valor, numeroLinha, colIndex, rowIndex === 0 ? 1 : 0)).join('');
+    return `<row r="${numeroLinha}">${cells}</row>`;
+  }).join('');
+  const larguraColunas = cabecalhos.map((cabecalho, index) => {
+    const largura = Math.min(48, Math.max(12, ...todasLinhas.map((linha) => String(linha[index] ?? '').length + 2)));
+    return `<col min="${index + 1}" max="${index + 1}" width="${largura}" customWidth="1"/>`;
+  }).join('');
+
+  const sheet = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>
+  <cols>${larguraColunas}</cols>
+  <sheetData>${sheetRows}</sheetData>
+</worksheet>`;
+
+  const workbook = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Transações" sheetId="1" r:id="rId1"/></sheets></workbook>`;
+  const styles = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs></styleSheet>`;
+
+  const arquivos = [
+    { nome: '[Content_Types].xml', conteudo: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>` },
+    { nome: '_rels/.rels', conteudo: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>` },
+    { nome: 'xl/workbook.xml', conteudo: workbook },
+    { nome: 'xl/_rels/workbook.xml.rels', conteudo: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>` },
+    { nome: 'xl/worksheets/sheet1.xml', conteudo: sheet },
+    { nome: 'xl/styles.xml', conteudo: styles },
+  ];
+
+  return criarZipSemCompressao(arquivos);
+}
+
+function baixarArquivo(bytes, nomeArquivo, tipo) {
+  const url = URL.createObjectURL(new Blob([bytes], { type: tipo }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = nomeArquivo;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function formatarDataExcel(data) {
+  const iso = normalizarDataFiltro(data);
+  if (!iso) return '';
+  const [ano, mes, dia] = iso.split('-');
+  return `${dia}/${mes}/${ano}`;
+}
+
+function nomeArquivoExportacao(dataInicial, dataFinal, selecionadas = false) {
+  const prefixo = selecionadas ? 'transacoes_consolidadas_selecionadas' : 'transacoes_consolidadas';
+  if (dataInicial && dataFinal) return `${prefixo}_${dataInicial}_a_${dataFinal}.xlsx`;
+  if (dataInicial) return `${prefixo}_a_partir_de_${dataInicial}.xlsx`;
+  if (dataFinal) return `${prefixo}_ate_${dataFinal}.xlsx`;
+  return `${prefixo}.xlsx`;
+}
+
 function normalizarDataLinha(valor) {
   if (typeof valor === 'number' || /^\d+(\.\d+)?$/.test(String(valor || '').trim())) {
     const numero = Number(valor);
@@ -1542,6 +1713,44 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
     setDataFinal('');
   };
 
+  const montarLinhasExportacao = (items) => items.map((tx) => [
+    tx.id || '',
+    tx.id || '',
+    formatarDataExcel(tx.data),
+    tx.conta_nome || '',
+    tx.descricao || '',
+    Number(tx.valor || 0),
+    tx.tipo === 'CREDITO' ? 'Crédito' : 'Débito',
+    tx.categoria_macro_nome || tx.categoria_nome || '',
+    tx.categoria_detalhada_nome || '',
+    tx.categoria_nome || tx.categoria_macro_nome || '',
+    tx.eh_transferencia_interna ? 'Sim' : 'Não',
+    tx.transferencia_grupo_id || '',
+    tx.categoria_origem || '',
+  ]);
+
+  const exportarExcel = (apenasSelecionadas = false) => {
+    const selecionadasSet = new Set(selecionadas);
+    const baseExportacao = apenasSelecionadas
+      ? transacoesFiltradas.filter((tx) => selecionadasSet.has(tx.id))
+      : transacoesFiltradas;
+
+    if (baseExportacao.length === 0) {
+      alert('Não há transações para exportar com os filtros atuais.');
+      return;
+    }
+
+    try {
+      const linhas = montarLinhasExportacao(baseExportacao);
+      const bytes = criarXlsxTransacoes(linhas);
+      const nomeArquivo = nomeArquivoExportacao(dataInicial, dataFinal, apenasSelecionadas);
+      baixarArquivo(bytes, nomeArquivo, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    } catch (error) {
+      console.error('Erro ao exportar transações:', error);
+      alert('Erro ao exportar transações. Tente novamente.');
+    }
+  };
+
   const abrirModalExclusao = (tx) => {
     setTransacaoParaExcluir(tx);
     setModalExclusaoAberto(true);
@@ -1704,6 +1913,12 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
             </button>
             <button onClick={abrirModalLote} disabled={selecionadas.length === 0} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', background: selecionadas.length ? '#667eea' : '#c7d2fe', color: 'white', cursor: selecionadas.length ? 'pointer' : 'not-allowed' }}>
               Categorizar selecionadas
+            </button>
+            <button onClick={() => exportarExcel(false)} disabled={transacoesFiltradas.length === 0} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', background: transacoesFiltradas.length ? '#16a34a' : '#bbf7d0', color: 'white', cursor: transacoesFiltradas.length ? 'pointer' : 'not-allowed' }}>
+              📊 Exportar Excel
+            </button>
+            <button onClick={() => exportarExcel(true)} disabled={selecionadas.length === 0} style={{ padding: '10px 14px', borderRadius: '8px', border: '1px solid #16a34a', background: selecionadas.length ? 'white' : '#f0fdf4', color: '#15803d', cursor: selecionadas.length ? 'pointer' : 'not-allowed' }}>
+              Exportar selecionadas
             </button>
             <button onClick={verificarTransferenciasInternas} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', background: '#0f766e', color: 'white', cursor: 'pointer' }}>
               Verificar transferências entre contas
