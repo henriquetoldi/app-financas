@@ -878,7 +878,13 @@ function TelaTransacoes({ conta, token, onVoltar }) {
       ]);
 
       setTransacoes(transacoesResponse.data.transacoes || []);
-      setCategorias(categoriasResponse.data.categorias || []);
+      const categoriasUnicas = Array.from(
+        new Map((categoriasResponse.data.categorias || []).map((categoria) => [
+          `${categoria.nome}-${categoria.tipo}-${categoria.usuario_id || 'padrao'}`,
+          categoria,
+        ])).values()
+      );
+      setCategorias(categoriasUnicas);
     } catch (error) {
       alert('Erro ao carregar transações: ' + (error.response?.data?.erro || error.message));
     } finally {
