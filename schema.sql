@@ -83,6 +83,8 @@ CREATE TABLE transacoes (
   categoria_id UUID REFERENCES categorias(id) ON DELETE SET NULL,
   categoria_origem VARCHAR(20),
   regra_categorizacao_id UUID,
+  eh_transferencia_interna BOOLEAN DEFAULT false,
+  transferencia_grupo_id UUID,
   subcategoria VARCHAR(255),
   
   -- Metadados
@@ -103,6 +105,7 @@ CREATE TABLE transacoes (
 CREATE INDEX idx_transacoes_conta ON transacoes(conta_id);
 CREATE INDEX idx_transacoes_categoria ON transacoes(categoria_id);
 CREATE INDEX idx_transacoes_categoria_origem ON transacoes(categoria_origem);
+CREATE INDEX idx_transacoes_transferencia_interna ON transacoes(eh_transferencia_interna, transferencia_grupo_id);
 CREATE INDEX idx_transacoes_data ON transacoes(data);
 CREATE INDEX idx_transacoes_tipo ON transacoes(tipo);
 CREATE INDEX idx_transacoes_hash ON transacoes(hash_transacao);

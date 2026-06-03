@@ -276,7 +276,9 @@ async function inicializarBanco() {
   await pool.query(`
     ALTER TABLE transacoes
       ADD COLUMN IF NOT EXISTS categoria_origem VARCHAR(20),
-      ADD COLUMN IF NOT EXISTS regra_categorizacao_id UUID
+      ADD COLUMN IF NOT EXISTS regra_categorizacao_id UUID,
+      ADD COLUMN IF NOT EXISTS eh_transferencia_interna BOOLEAN DEFAULT false,
+      ADD COLUMN IF NOT EXISTS transferencia_grupo_id UUID
   `);
 
   await pool.query(`
@@ -299,6 +301,7 @@ async function inicializarBanco() {
   await pool.query('CREATE INDEX IF NOT EXISTS idx_transacoes_data ON transacoes(data)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_transacoes_hash ON transacoes(hash_transacao)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_transacoes_categoria_origem ON transacoes(categoria_origem)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_transacoes_transferencia_interna ON transacoes(eh_transferencia_interna, transferencia_grupo_id)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_regras_categorizacao_usuario ON regras_categorizacao(usuario_id, ativo)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_regras_categorizacao_termo ON regras_categorizacao(termo_normalizado)');
   await pool.query(`
@@ -1359,6 +1362,367 @@ app.get('/api/admin/backups', verificarToken, async (req, res) => {
         taxaSucesso: total ? Math.round((sucessos / total) * 100) : 0,
       },
     });
+  } catch (error) {
+    res.status(500).json({ erro: error.message });
+  }
+});
+
+
+// ============================================================================
+// ROTAS: DASHBOARD
+// ============================================================================
+
+function normalizarDataDashboard(valor, fallback) {
+  const texto = String(valor || '').slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(texto)) return texto;
+  return fallback;
+}
+
+app.get('/api/dashboard/resumo', verificarToken, async (req, res) => {
+  try {
+    const hoje = new Date();
+    const inicioMes = new Date(Date.UTC(hoje.getUTCFullYear(), hoje.getUTCMonth(), 1)).toISOString().slice(0, 10);
+    const fimMes = new Date(Date.UTC(hoje.getUTCFullYear(), hoje.getUTCMonth() + 1, 0)).toISOString().slice(0, 10);
+    const dataInicial = normalizarDataDashboard(req.query.dataInicial, inicioMes);
+    const dataFinal = normalizarDataDashboard(req.query.dataFinal, fimMes);
+
+    const transacoesResult = await pool.query(
+      `SELECT
+         t.id,
+         t.data::date AS data,
+         t.valor,
+         t.tipo,
+         t.categoria_id,
+         COALESCE(t.eh_transferencia_interna, false) AS eh_transferencia_interna,
+         COALESCE(cat.nome, 'Sem categoria') AS categoria_nome,
+         conta.id AS conta_id,
+         conta.nome AS conta_nome
+       FROM transacoes t
+       JOIN contas conta ON conta.id = t.conta_id
+       LEFT JOIN categorias cat ON cat.id = t.categoria_id
+       WHERE conta.usuario_id = $1
+         AND t.deletado_em IS NULL
+         AND t.data BETWEEN $2::date AND $3::date`,
+      [req.usuario.usuario_id, dataInicial, dataFinal]
+    );
+
+    const transacoes = transacoesResult.rows.map((tx) => ({
+      ...tx,
+      valor: Number(tx.valor || 0),
+      data: tx.data instanceof Date ? tx.data.toISOString().slice(0, 10) : String(tx.data).slice(0, 10),
+    }));
+
+    const transacoesOperacionais = transacoes.filter((tx) => !tx.eh_transferencia_interna);
+    const transferenciasInternas = transacoes.filter((tx) => tx.eh_transferencia_interna);
+    const receitas = transacoesOperacionais
+      .filter((tx) => tx.tipo === 'CREDITO')
+      .reduce((total, tx) => total + tx.valor, 0);
+    const despesasTransacoes = transacoesOperacionais.filter((tx) => tx.tipo === 'DEBITO');
+    const despesas = despesasTransacoes.reduce((total, tx) => total + tx.valor, 0);
+    const quantidadeTransacoes = transacoes.length;
+    const transacoesCategorizadas = transacoes.filter((tx) => tx.categoria_id).length;
+
+    const movimentacaoPorPeriodoMap = new Map();
+    const despesasPorCategoriaMap = new Map();
+    const movimentacaoPorContaMap = new Map();
+    const gastosPorDiaMap = new Map();
+
+    transacoesOperacionais.forEach((tx) => {
+      const periodo = tx.data;
+      if (!movimentacaoPorPeriodoMap.has(periodo)) {
+        movimentacaoPorPeriodoMap.set(periodo, { periodo, receitas: 0, despesas: 0, saldo: 0 });
+      }
+      const itemPeriodo = movimentacaoPorPeriodoMap.get(periodo);
+      if (tx.tipo === 'CREDITO') itemPeriodo.receitas += tx.valor;
+      if (tx.tipo === 'DEBITO') itemPeriodo.despesas += tx.valor;
+      itemPeriodo.saldo = itemPeriodo.receitas - itemPeriodo.despesas;
+
+      if (!movimentacaoPorContaMap.has(tx.conta_id)) {
+        movimentacaoPorContaMap.set(tx.conta_id, {
+          contaId: tx.conta_id,
+          contaNome: tx.conta_nome,
+          receitas: 0,
+          despesas: 0,
+          saldo: 0,
+          quantidadeTransacoes: 0,
+          volume: 0,
+        });
+      }
+      const itemConta = movimentacaoPorContaMap.get(tx.conta_id);
+      itemConta.quantidadeTransacoes += 1;
+      itemConta.volume += tx.valor;
+      if (tx.tipo === 'CREDITO') itemConta.receitas += tx.valor;
+      if (tx.tipo === 'DEBITO') itemConta.despesas += tx.valor;
+      itemConta.saldo = itemConta.receitas - itemConta.despesas;
+
+      if (tx.tipo === 'DEBITO') {
+        const categoria = tx.categoria_nome || 'Sem categoria';
+        despesasPorCategoriaMap.set(categoria, (despesasPorCategoriaMap.get(categoria) || 0) + tx.valor);
+        gastosPorDiaMap.set(tx.data, (gastosPorDiaMap.get(tx.data) || 0) + tx.valor);
+      }
+    });
+
+    const movimentacaoPorPeriodo = Array.from(movimentacaoPorPeriodoMap.values())
+      .sort((a, b) => a.periodo.localeCompare(b.periodo));
+    const despesasPorCategoria = Array.from(despesasPorCategoriaMap.entries())
+      .map(([categoriaNome, valor]) => ({
+        categoriaNome,
+        valor,
+        percentual: despesas > 0 ? Number(((valor / despesas) * 100).toFixed(1)) : 0,
+      }))
+      .sort((a, b) => b.valor - a.valor)
+      .slice(0, 8);
+    const movimentacaoPorConta = Array.from(movimentacaoPorContaMap.values())
+      .sort((a, b) => b.volume - a.volume);
+
+    const maiorCategoriaDespesa = despesasPorCategoria[0] || null;
+    const contaMaiorMovimento = movimentacaoPorConta[0] || null;
+    const diaMaiorGasto = Array.from(gastosPorDiaMap.entries())
+      .map(([data, valor]) => ({ data, valor }))
+      .sort((a, b) => b.valor - a.valor)[0] || null;
+
+    res.json({
+      periodo: { dataInicial, dataFinal },
+      kpis: {
+        receitas,
+        despesas,
+        saldoLiquido: receitas - despesas,
+        quantidadeTransacoes,
+        ticketMedioDespesa: despesasTransacoes.length ? despesas / despesasTransacoes.length : 0,
+        percentualCategorizado: quantidadeTransacoes ? Number(((transacoesCategorizadas / quantidadeTransacoes) * 100).toFixed(1)) : 0,
+        transferenciasInternas: transferenciasInternas.length,
+        valorTransferenciasInternas: transferenciasInternas.reduce((total, tx) => total + tx.valor, 0),
+      },
+      series: {
+        movimentacaoPorPeriodo,
+        despesasPorCategoria,
+        movimentacaoPorConta,
+      },
+      insights: {
+        maiorCategoriaDespesa,
+        contaMaiorMovimento,
+        diaMaiorGasto,
+        percentualPrincipalCategoria: maiorCategoriaDespesa?.percentual || 0,
+        transacoesSemCategoria: quantidadeTransacoes - transacoesCategorizadas,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ erro: error.message });
+  }
+});
+
+
+function diferencaDias(dataA, dataB) {
+  const a = new Date(`${String(dataA).slice(0, 10)}T00:00:00Z`);
+  const b = new Date(`${String(dataB).slice(0, 10)}T00:00:00Z`);
+  return Math.abs(Math.round((a - b) / 86400000));
+}
+
+function descricaoIndicaTransferencia(descricao) {
+  return /\b(PIX|TRANSFERENCIA|TRANSFERÊNCIA|TED|DOC|ENVIO|ENVIADO|RECEBIDA|RECEBIDO|ENTRE CONTAS)\b/i.test(String(descricao || '').normalize('NFD').replace(/[\u0300-\u036f]/g, ''));
+}
+
+function montarTransacaoTransferencia(tx) {
+  return {
+    id: tx.id,
+    data: tx.data,
+    conta_id: tx.conta_id,
+    conta_nome: tx.conta_nome,
+    descricao: tx.descricao,
+    valor: Number(tx.valor || 0),
+    tipo: tx.tipo,
+  };
+}
+
+async function buscarTransacoesUsuario(usuarioId, filtros = {}) {
+  const valores = [usuarioId];
+  const where = ['conta.usuario_id = $1', 't.deletado_em IS NULL'];
+
+  if (filtros.contaId) {
+    valores.push(filtros.contaId);
+    where.push(`t.conta_id = $${valores.length}`);
+  }
+  if (filtros.categoriaId) {
+    valores.push(filtros.categoriaId);
+    where.push(`t.categoria_id = $${valores.length}`);
+  }
+  if (filtros.status === 'sem') where.push('t.categoria_id IS NULL');
+  if (filtros.status === 'categorizadas') where.push('t.categoria_id IS NOT NULL');
+  if (['CREDITO', 'DEBITO'].includes(filtros.tipo)) {
+    valores.push(filtros.tipo);
+    where.push(`t.tipo = $${valores.length}`);
+  }
+  if (filtros.dataInicial) {
+    valores.push(filtros.dataInicial);
+    where.push(`t.data >= $${valores.length}::date`);
+  }
+  if (filtros.dataFinal) {
+    valores.push(filtros.dataFinal);
+    where.push(`t.data <= $${valores.length}::date`);
+  }
+  if (filtros.busca) {
+    valores.push(`%${String(filtros.busca).trim()}%`);
+    where.push(`t.descricao ILIKE $${valores.length}`);
+  }
+
+  const result = await pool.query(
+    `SELECT t.*, conta.nome AS conta_nome, cat.nome AS categoria_nome
+     FROM transacoes t
+     JOIN contas conta ON conta.id = t.conta_id
+     LEFT JOIN categorias cat ON cat.id = t.categoria_id
+     WHERE ${where.join(' AND ')}
+     ORDER BY t.data DESC, t.criado_em DESC
+     LIMIT 1000`,
+    valores
+  );
+
+  return result.rows;
+}
+
+app.get('/api/transacoes', verificarToken, async (req, res) => {
+  try {
+    await aplicarRegrasAtivasEmTransacoesSemCategoria(req.usuario.usuario_id);
+    const transacoes = await buscarTransacoesUsuario(req.usuario.usuario_id, {
+      contaId: req.query.contaId,
+      categoriaId: req.query.categoriaId,
+      status: req.query.status,
+      tipo: req.query.tipo,
+      dataInicial: req.query.dataInicial,
+      dataFinal: req.query.dataFinal,
+      busca: req.query.busca,
+    });
+
+    res.json({ transacoes });
+  } catch (error) {
+    res.status(500).json({ erro: error.message });
+  }
+});
+
+app.get('/api/transferencias-internas/sugestoes', verificarToken, async (req, res) => {
+  try {
+    const transacoes = await buscarTransacoesUsuario(req.usuario.usuario_id, {
+      contaId: req.query.contaId,
+      dataInicial: req.query.dataInicial,
+      dataFinal: req.query.dataFinal,
+    });
+
+    const candidatas = transacoes
+      .filter((tx) => !tx.eh_transferencia_interna)
+      .map((tx) => ({ ...tx, valor: Number(tx.valor || 0), data: tx.data instanceof Date ? tx.data.toISOString().slice(0, 10) : String(tx.data).slice(0, 10) }));
+    const debitos = candidatas.filter((tx) => tx.tipo === 'DEBITO');
+    const creditos = candidatas.filter((tx) => tx.tipo === 'CREDITO');
+    const sugestoes = [];
+    const usados = new Set();
+
+    for (const debito of debitos) {
+      for (const credito of creditos) {
+        if (usados.has(debito.id) || usados.has(credito.id)) continue;
+        if (debito.conta_id === credito.conta_id) continue;
+
+        const diferencaValor = Math.abs(Math.abs(debito.valor) - Math.abs(credito.valor));
+        if (diferencaValor > 0.05) continue;
+
+        const dias = diferencaDias(debito.data, credito.data);
+        if (dias > 2) continue;
+
+        const motivos = ['Mesmo valor', 'Contas diferentes'];
+        if (dias === 0) motivos.push('Mesma data');
+        if (dias > 0) motivos.push(`Datas próximas (${dias} dia${dias > 1 ? 's' : ''})`);
+        const descricaoTransferencia = descricaoIndicaTransferencia(debito.descricao) || descricaoIndicaTransferencia(credito.descricao);
+        if (descricaoTransferencia) motivos.push('Descrição contém Pix/transferência');
+        const confianca = dias === 0 && descricaoTransferencia ? 'alta' : descricaoTransferencia ? 'média' : 'baixa';
+
+        sugestoes.push({
+          id: `sugestao-${sugestoes.length + 1}`,
+          confianca,
+          motivos,
+          debito: montarTransacaoTransferencia(debito),
+          credito: montarTransacaoTransferencia(credito),
+        });
+        usados.add(debito.id);
+        usados.add(credito.id);
+        break;
+      }
+      if (sugestoes.length >= 50) break;
+    }
+
+    res.json({ sugestoes });
+  } catch (error) {
+    res.status(500).json({ erro: error.message });
+  }
+});
+
+app.post('/api/transferencias-internas/marcar', verificarToken, async (req, res) => {
+  try {
+    const { debitoId, creditoId } = req.body;
+    const result = await pool.query(
+      `SELECT t.*, conta.usuario_id
+       FROM transacoes t
+       JOIN contas conta ON conta.id = t.conta_id
+       WHERE t.id = ANY($1::uuid[]) AND conta.usuario_id = $2 AND t.deletado_em IS NULL`,
+      [[debitoId, creditoId], req.usuario.usuario_id]
+    );
+
+    if (result.rows.length !== 2) {
+      return res.status(404).json({ erro: 'Transações não encontradas ou não pertencem ao usuário.' });
+    }
+
+    const debito = result.rows.find((tx) => tx.tipo === 'DEBITO');
+    const credito = result.rows.find((tx) => tx.tipo === 'CREDITO');
+    if (!debito || !credito) return res.status(400).json({ erro: 'Selecione uma transação de débito e uma de crédito.' });
+    if (debito.conta_id === credito.conta_id) return res.status(400).json({ erro: 'As transações precisam pertencer a contas diferentes.' });
+    const diferencaValor = Math.abs(Math.abs(Number(debito.valor || 0)) - Math.abs(Number(credito.valor || 0)));
+    if (diferencaValor > 0.05) return res.status(400).json({ erro: 'Os valores das transações não são compatíveis.' });
+
+    const grupoId = crypto.randomUUID();
+    await pool.query(
+      `UPDATE transacoes
+       SET eh_transferencia_interna = true,
+           transferencia_grupo_id = $1,
+           atualizado_em = NOW()
+       WHERE id = ANY($2::uuid[])`,
+      [grupoId, [debito.id, credito.id]]
+    );
+
+    res.json({ sucesso: true, transferenciaGrupoId: grupoId, mensagem: 'Transferência interna marcada com sucesso.' });
+  } catch (error) {
+    res.status(500).json({ erro: error.message });
+  }
+});
+
+app.post('/api/transferencias-internas/desmarcar', verificarToken, async (req, res) => {
+  try {
+    const { transferenciaGrupoId, transacaoId } = req.body;
+    let grupoId = transferenciaGrupoId;
+
+    if (!grupoId && transacaoId) {
+      const grupo = await pool.query(
+        `SELECT t.transferencia_grupo_id
+         FROM transacoes t
+         JOIN contas c ON c.id = t.conta_id
+         WHERE t.id = $1 AND c.usuario_id = $2`,
+        [transacaoId, req.usuario.usuario_id]
+      );
+      grupoId = grupo.rows[0]?.transferencia_grupo_id;
+    }
+
+    if (!grupoId) return res.status(400).json({ erro: 'Informe uma transferência para desmarcar.' });
+
+    const result = await pool.query(
+      `UPDATE transacoes t
+       SET eh_transferencia_interna = false,
+           transferencia_grupo_id = NULL,
+           atualizado_em = NOW()
+       FROM contas c
+       WHERE c.id = t.conta_id
+         AND c.usuario_id = $1
+         AND t.transferencia_grupo_id = $2
+       RETURNING t.id`,
+      [req.usuario.usuario_id, grupoId]
+    );
+
+    if (result.rows.length === 0) return res.status(404).json({ erro: 'Transferência interna não encontrada para este usuário.' });
+    res.json({ sucesso: true, atualizadas: result.rows.length, mensagem: 'Transferência interna desmarcada com sucesso.' });
   } catch (error) {
     res.status(500).json({ erro: error.message });
   }
