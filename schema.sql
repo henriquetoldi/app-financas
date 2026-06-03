@@ -168,30 +168,6 @@ CREATE INDEX idx_regras_categorizacao_termo ON regras_categorizacao(termo_normal
 CREATE UNIQUE INDEX idx_regras_categorizacao_unique
   ON regras_categorizacao(usuario_id, categoria_id, termo_normalizado, tipo_match);
 
-CREATE TABLE regras_categorizacao (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  usuario_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
-  categoria_id UUID NOT NULL REFERENCES categorias(id) ON DELETE CASCADE,
-  termo TEXT NOT NULL,
-  termo_normalizado TEXT NOT NULL,
-  tipo_match VARCHAR(20) DEFAULT 'CONTAINS',
-  prioridade INT DEFAULT 0,
-  ativo BOOLEAN DEFAULT true,
-  criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-ALTER TABLE transacoes
-  ADD CONSTRAINT fk_transacoes_regra_categorizacao
-  FOREIGN KEY (regra_categorizacao_id)
-  REFERENCES regras_categorizacao(id)
-  ON DELETE SET NULL;
-
-CREATE INDEX idx_regras_categorizacao_usuario ON regras_categorizacao(usuario_id, ativo);
-CREATE INDEX idx_regras_categorizacao_termo ON regras_categorizacao(termo_normalizado);
-CREATE UNIQUE INDEX idx_regras_categorizacao_unique
-  ON regras_categorizacao(usuario_id, categoria_id, termo_normalizado, tipo_match);
-
 -- ============================================================================
 -- 5. TABELAS DE IMPORTAÇÃO
 -- ============================================================================

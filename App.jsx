@@ -86,6 +86,11 @@ function sugerirTermoRegra(descricao) {
   return partes.find((parte) => /[A-Z]/.test(parte) && parte.length >= 3) || normalizarDescricaoCategorizacao(descricao);
 }
 
+function normalizarDataFiltro(data) {
+  if (!data) return '';
+  return String(data).slice(0, 10);
+}
+
 function criarUsuarioDoToken(token) {
   const payload = decodificarPayloadJwt(token);
 
@@ -885,10 +890,15 @@ function TelaTransacoes({ conta, token, onVoltar }) {
   const [transacaoSelecionada, setTransacaoSelecionada] = useState(null);
   const [selecionadas, setSelecionadas] = useState([]);
   const [filtros, setFiltros] = useState({ busca: '', categoria: 'todas', status: 'todas', tipo: 'todos' });
+  const [dataInicial, setDataInicial] = useState('');
+  const [dataFinal, setDataFinal] = useState('');
   const [categoriaEscolhida, setCategoriaEscolhida] = useState('');
   const [criarRegra, setCriarRegra] = useState(false);
   const [termoRegra, setTermoRegra] = useState('');
   const [salvandoCategoria, setSalvandoCategoria] = useState(false);
+  const [transacaoParaExcluir, setTransacaoParaExcluir] = useState(null);
+  const [modalExclusaoAberto, setModalExclusaoAberto] = useState(false);
+  const [excluindoTransacao, setExcluindoTransacao] = useState(false);
 
   useEffect(() => {
     carregarDados();
@@ -927,16 +937,19 @@ function TelaTransacoes({ conta, token, onVoltar }) {
 
     return transacoes.filter((tx) => {
       const descricao = normalizarDescricaoCategorizacao(tx.descricao);
+      const dataTx = normalizarDataFiltro(tx.data);
       const correspondeBusca = !buscaNormalizada || descricao.includes(buscaNormalizada);
       const correspondeCategoria = filtros.categoria === 'todas' || (tx.categoria_id || 'sem') === filtros.categoria;
       const correspondeStatus = filtros.status === 'todas'
         || (filtros.status === 'sem' && !tx.categoria_id)
         || (filtros.status === 'categorizadas' && Boolean(tx.categoria_id));
       const correspondeTipo = filtros.tipo === 'todos' || tx.tipo === filtros.tipo;
+      const correspondeDataInicial = !dataInicial || dataTx >= dataInicial;
+      const correspondeDataFinal = !dataFinal || dataTx <= dataFinal;
 
-      return correspondeBusca && correspondeCategoria && correspondeStatus && correspondeTipo;
+      return correspondeBusca && correspondeCategoria && correspondeStatus && correspondeTipo && correspondeDataInicial && correspondeDataFinal;
     });
-  }, [transacoes, filtros]);
+  }, [transacoes, filtros, dataInicial, dataFinal]);
 
   const idsFiltrados = transacoesFiltradas.map((tx) => tx.id);
   const todasFiltradasSelecionadas = idsFiltrados.length > 0 && idsFiltrados.every((id) => selecionadas.includes(id));
@@ -1025,6 +1038,57 @@ function TelaTransacoes({ conta, token, onVoltar }) {
 
   const limparFiltros = () => {
     setFiltros({ busca: '', categoria: 'todas', status: 'todas', tipo: 'todos' });
+    setDataInicial('');
+    setDataFinal('');
+  };
+
+  const abrirModalExclusao = (tx) => {
+    setTransacaoParaExcluir(tx);
+    setModalExclusaoAberto(true);
+  };
+
+  const fecharModalExclusao = () => {
+    if (excluindoTransacao) return;
+    setModalExclusaoAberto(false);
+    setTransacaoParaExcluir(null);
+  };
+
+  const handleExcluirTransacao = async () => {
+    if (!transacaoParaExcluir) return;
+
+    try {
+      setExcluindoTransacao(true);
+
+      await axios.delete(`${API_URL}/transacoes/${transacaoParaExcluir.id}`, {
+        headers: authHeaders,
+      });
+
+      setTransacoes((atuais) => atuais.filter((tx) => tx.id !== transacaoParaExcluir.id));
+      setSelecionadas((atuais) => atuais.filter((id) => id !== transacaoParaExcluir.id));
+      setModalExclusaoAberto(false);
+      setTransacaoParaExcluir(null);
+    } catch (error) {
+      alert('Erro ao excluir transação: ' + (error.response?.data?.erro || error.message));
+    } finally {
+      setExcluindoTransacao(false);
+    }
+  };
+
+  const alternarSelecionada = (id) => {
+    setSelecionadas((atuais) => atuais.includes(id)
+      ? atuais.filter((item) => item !== id)
+      : [...atuais, id]);
+  };
+
+  const alternarTodasFiltradas = () => {
+    setSelecionadas((atuais) => {
+      if (todasFiltradasSelecionadas) return atuais.filter((id) => !idsFiltrados.includes(id));
+      return Array.from(new Set([...atuais, ...idsFiltrados]));
+    });
+  };
+
+  const limparFiltros = () => {
+    setFiltros({ busca: '', categoria: 'todas', status: 'todas', tipo: 'todos' });
   };
 
   return (
@@ -1039,7 +1103,7 @@ function TelaTransacoes({ conta, token, onVoltar }) {
 
       <div style={{ padding: '20px', maxWidth: '1200px', margin: '0 auto' }}>
         <div style={{ background: 'white', borderRadius: '12px', padding: '16px', marginBottom: '16px', boxShadow: '0 2px 8px rgba(0,0,0,0.08)' }}>
-          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(220px, 2fr) 1fr 1fr 1fr auto', gap: '12px', alignItems: 'end' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(220px, 2fr) 1fr 1fr 1fr', gap: '12px', alignItems: 'end' }}>
             <label style={{ display: 'grid', gap: '6px', fontSize: '13px', color: '#374151' }}>
               Pesquisar descrição
               <input value={filtros.busca} onChange={(event) => setFiltros({ ...filtros, busca: event.target.value })} placeholder="Ex.: AUTO POSTO" style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} />
@@ -1068,19 +1132,28 @@ function TelaTransacoes({ conta, token, onVoltar }) {
                 <option value="DEBITO">Débito</option>
               </select>
             </label>
-            <button onClick={limparFiltros} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', cursor: 'pointer', background: '#e5e7eb' }}>Limpar filtros</button>
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '14px', gap: '12px', flexWrap: 'wrap' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '12px', alignItems: 'end', marginTop: '14px' }}>
+            <label style={{ display: 'grid', gap: '6px', fontSize: '13px', color: '#374151' }}>
+              Data inicial
+              <input type="date" value={dataInicial} onChange={(event) => setDataInicial(event.target.value)} style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} />
+            </label>
+            <label style={{ display: 'grid', gap: '6px', fontSize: '13px', color: '#374151' }}>
+              Data final
+              <input type="date" value={dataFinal} onChange={(event) => setDataFinal(event.target.value)} style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} />
+            </label>
+            <button onClick={limparFiltros} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', cursor: 'pointer', background: '#e5e7eb' }}>Limpar filtros</button>
+            <button onClick={alternarTodasFiltradas} disabled={transacoesFiltradas.length === 0} style={{ padding: '10px 14px', borderRadius: '8px', border: '1px solid #d1d5db', background: 'white', cursor: transacoesFiltradas.length === 0 ? 'not-allowed' : 'pointer' }}>
+              {todasFiltradasSelecionadas ? 'Limpar seleção filtrada' : 'Selecionar todos filtrados'}
+            </button>
+            <button onClick={abrirModalLote} disabled={selecionadas.length === 0} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', background: selecionadas.length ? '#667eea' : '#c7d2fe', color: 'white', cursor: selecionadas.length ? 'pointer' : 'not-allowed' }}>
+              Categorizar selecionadas
+            </button>
+          </div>
+
+          <div style={{ marginTop: '14px' }}>
             <span style={{ color: '#4b5563', fontSize: '14px' }}>{transacoesFiltradas.length} transação(ões) filtrada(s) • {selecionadas.length} selecionada(s)</span>
-            <div style={{ display: 'flex', gap: '8px' }}>
-              <button onClick={alternarTodasFiltradas} disabled={transacoesFiltradas.length === 0} style={{ padding: '10px 14px', borderRadius: '8px', border: '1px solid #d1d5db', background: 'white', cursor: 'pointer' }}>
-                {todasFiltradasSelecionadas ? 'Limpar seleção filtrada' : 'Selecionar todos filtrados'}
-              </button>
-              <button onClick={abrirModalLote} disabled={selecionadas.length === 0} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', background: selecionadas.length ? '#667eea' : '#c7d2fe', color: 'white', cursor: selecionadas.length ? 'pointer' : 'not-allowed' }}>
-                Categorizar selecionadas
-              </button>
-            </div>
           </div>
         </div>
 
@@ -1122,9 +1195,14 @@ function TelaTransacoes({ conta, token, onVoltar }) {
                       </span>
                     </td>
                     <td style={{ padding: '12px', textAlign: 'center' }}>
-                      <button onClick={() => abrirModalIndividual(tx)} style={{ background: '#667eea', color: 'white', border: 'none', padding: '4px 12px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>
-                        Categorizar
-                      </button>
+                      <div style={{ display: 'flex', justifyContent: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                        <button onClick={() => abrirModalIndividual(tx)} style={{ background: '#667eea', color: 'white', border: 'none', padding: '4px 12px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>
+                          Categorizar
+                        </button>
+                        <button onClick={() => abrirModalExclusao(tx)} style={{ background: 'white', color: '#dc2626', border: '1px solid #dc2626', padding: '4px 12px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>
+                          Excluir
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -1170,6 +1248,32 @@ function TelaTransacoes({ conta, token, onVoltar }) {
               </button>
               <button onClick={fecharModal} disabled={salvandoCategoria} style={{ background: '#e5e7eb', border: 'none', padding: '12px', borderRadius: '8px', cursor: 'pointer', flex: 1 }}>
                 Cancelar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {modalExclusaoAberto && transacaoParaExcluir && (
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <div style={{ background: 'white', borderRadius: '12px', padding: '30px', maxWidth: '520px', width: '90%' }}>
+            <h3 style={{ marginTop: 0, color: '#991b1b' }}>Excluir transação</h3>
+            <p style={{ color: '#374151', lineHeight: 1.5 }}>
+              Tem certeza que deseja excluir esta transação? Essa ação não poderá ser desfeita.
+            </p>
+
+            <div style={{ background: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: '8px', padding: '14px', margin: '18px 0' }}>
+              <p style={{ margin: '0 0 8px' }}><strong>Data:</strong> {formatarData(transacaoParaExcluir.data)}</p>
+              <p style={{ margin: '0 0 8px' }}><strong>Descrição:</strong> {transacaoParaExcluir.descricao}</p>
+              <p style={{ margin: 0 }}><strong>Valor:</strong> {transacaoParaExcluir.tipo === 'CREDITO' ? '+' : '-'}{formatarMoeda(transacaoParaExcluir.valor)}</p>
+            </div>
+
+            <div style={{ display: 'flex', gap: '10px' }}>
+              <button onClick={fecharModalExclusao} disabled={excluindoTransacao} style={{ background: '#e5e7eb', border: 'none', padding: '12px', borderRadius: '8px', cursor: excluindoTransacao ? 'not-allowed' : 'pointer', flex: 1 }}>
+                Cancelar
+              </button>
+              <button onClick={handleExcluirTransacao} disabled={excluindoTransacao} style={{ background: '#dc2626', color: 'white', border: 'none', padding: '12px', borderRadius: '8px', cursor: excluindoTransacao ? 'not-allowed' : 'pointer', flex: 1 }}>
+                {excluindoTransacao ? 'Excluindo...' : 'Excluir transação'}
               </button>
             </div>
           </div>

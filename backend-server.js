@@ -1389,6 +1389,31 @@ app.get('/api/transacoes/:contaId', verificarToken, async (req, res) => {
   }
 });
 
+app.delete('/api/transacoes/:id', verificarToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `DELETE FROM transacoes t
+       USING contas c
+       WHERE t.conta_id = c.id
+         AND t.id = $1
+         AND c.usuario_id = $2
+       RETURNING t.id`,
+      [req.params.id, req.usuario.usuario_id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ erro: 'Transação não encontrada ou não pertence ao usuário' });
+    }
+
+    res.json({
+      sucesso: true,
+      mensagem: 'Transação excluída com sucesso',
+    });
+  } catch (error) {
+    res.status(500).json({ erro: error.message });
+  }
+});
+
 app.patch('/api/transacoes/categorizar-lote', verificarToken, async (req, res) => {
   try {
     const { transacaoIds, categoriaId, criarRegra = false, termoRegra } = req.body;
