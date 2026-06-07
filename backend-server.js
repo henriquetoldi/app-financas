@@ -779,26 +779,131 @@ async function confirmarConciliacaoUsuario(usuarioId, provisaoId, transacaoId, a
   return result.rows[0];
 }
 
+const LIMITE_VALOR_TRANSACAO = 9999999999.99;
+
+function parseValorMonetario(valorOriginal) {
+  if (typeof valorOriginal === 'number') {
+    return {
+      valor: Number.isFinite(valorOriginal) ? valorOriginal : null,
+      erro: Number.isFinite(valorOriginal) ? null : 'A célula contém um número que o app não conseguiu interpretar.',
+      valorOriginal,
+      interpretadoComo: Number.isFinite(valorOriginal) ? valorOriginal : null,
+    };
+  }
+
+  const textoOriginal = String(valorOriginal ?? '').trim();
+  if (!textoOriginal) {
+    return { valor: null, erro: 'A célula de valor está vazia.', valorOriginal, interpretadoComo: null };
+  }
+
+  let texto = textoOriginal.replace(/ /g, ' ').replace(/R\$/gi, '').replace(/\s+/g, '').trim();
+  const negativoPorParenteses = /^\(.+\)$/.test(texto);
+  if (negativoPorParenteses) texto = texto.slice(1, -1);
+  const negativo = negativoPorParenteses || /^-/.test(texto);
+  texto = texto.replace(/^[+-]/, '');
+
+  if (!texto || !/^[0-9.,]+$/.test(texto)) {
+    return {
+      valor: null,
+      erro: 'A célula contém caracteres que não parecem formar um valor monetário.',
+      valorOriginal,
+      interpretadoComo: null,
+    };
+  }
+
+  const ultimaVirgula = texto.lastIndexOf(',');
+  const ultimoPonto = texto.lastIndexOf('.');
+  let decimal = null;
+
+  if (ultimaVirgula >= 0 && ultimoPonto >= 0) {
+    decimal = ultimaVirgula > ultimoPonto ? ',' : '.';
+  } else if (ultimaVirgula >= 0) {
+    const digitosDepois = texto.length - ultimaVirgula - 1;
+    const ocorrencias = (texto.match(/,/g) || []).length;
+    decimal = ocorrencias === 1 && digitosDepois > 0 && digitosDepois <= 2 ? ',' : null;
+  } else if (ultimoPonto >= 0) {
+    const digitosDepois = texto.length - ultimoPonto - 1;
+    const ocorrencias = (texto.match(/\./g) || []).length;
+    decimal = ocorrencias === 1 && digitosDepois > 0 && digitosDepois <= 2 ? '.' : null;
+  }
+
+  const normalizado = decimal === ','
+    ? texto.replace(/\./g, '').replace(',', '.')
+    : decimal === '.'
+      ? texto.replace(/,/g, '')
+      : texto.replace(/[.,]/g, '');
+  const numero = Number(normalizado);
+  const interpretadoComo = Number.isFinite(numero) ? (negativo ? -numero : numero) : null;
+
+  return {
+    valor: interpretadoComo,
+    erro: Number.isFinite(interpretadoComo) ? null : 'Não foi possível converter o conteúdo da célula em número.',
+    valorOriginal,
+    interpretadoComo,
+  };
+}
+
+function criarErroValidacaoImportacao(detalhes) {
+  const erro = new Error(detalhes.erro || 'Erro de validação na importação.');
+  erro.detalhesImportacao = detalhes;
+  return erro;
+}
+
+function formatarValorMoedaErro(valor) {
+  return Number.isFinite(valor) ? valor.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }) : '-';
+}
+
 function validarTransacoesImportacao(transacoes) {
   if (!Array.isArray(transacoes) || transacoes.length === 0) {
     throw new Error('Envie ao menos uma transação para importar.');
   }
 
   return transacoes.map((tx, index) => {
-    const linha = index + 2;
+    const linha = tx._linha || index + 2;
     const data = normalizarDataImportacao(tx.data);
     const descricao = String(tx.descricao || '').trim();
     const categoriaLegada = String(tx.categoria || '').trim();
     const categoriaMacro = String(tx.categoria_macro || tx.categoriaMacro || tx.categoriaMacroNome || categoriaLegada || '').trim() || 'Outros';
     const categoriaDetalhada = String(tx.categoria_detalhada || tx.categoriaDetalhada || tx.categoriaDetalhadaNome || '').trim();
-    const valor = Math.abs(Number(tx.valor));
+    const valorParse = parseValorMonetario(tx.valor);
+    const valor = Math.abs(Number(valorParse.valor));
     const tipo = normalizarTipoTransacao(tx.tipo);
 
-    if (!data) throw new Error(`Linha ${linha}: data inválida.`);
-    if (!descricao) throw new Error(`Linha ${linha}: descrição obrigatória.`);
-    if (!Number.isFinite(valor) || valor <= 0) throw new Error(`Linha ${linha}: valor inválido.`);
-    if (valor >= 10000000000) {
-      throw new Error(`Linha ${linha}: valor ${valor.toLocaleString('pt-BR')} excede o limite suportado de 9.999.999.999,99.`);
+    if (!data) throw criarErroValidacaoImportacao({
+      linha,
+      coluna: 'Data',
+      valorOriginal: tx.data,
+      descricao,
+      erro: 'A data não foi reconhecida pelo app.',
+      sugestao: 'Use uma data válida, como 10/06/2026 ou 2026-06-10.',
+    });
+    if (!descricao) throw criarErroValidacaoImportacao({
+      linha,
+      coluna: 'Descrição',
+      valorOriginal: tx.descricao,
+      descricao,
+      erro: 'A descrição da transação está vazia.',
+      sugestao: 'Preencha a descrição para identificar a transação no extrato.',
+    });
+    if (valorParse.erro || !Number.isFinite(valor) || valor <= 0) throw criarErroValidacaoImportacao({
+      linha,
+      coluna: 'Valor',
+      valorOriginal: valorParse.valorOriginal,
+      valorInterpretado: valorParse.interpretadoComo,
+      descricao,
+      erro: valorParse.erro || 'O valor precisa ser maior que zero após a interpretação.',
+      sugestao: 'Informe o valor em formato brasileiro (1.234,56), americano (1,234.56) ou como número do Excel (1234.56).',
+    });
+    if (valor > LIMITE_VALOR_TRANSACAO) {
+      throw criarErroValidacaoImportacao({
+        linha,
+        coluna: 'Valor',
+        valorOriginal: valorParse.valorOriginal,
+        valorInterpretado: valorParse.interpretadoComo,
+        descricao,
+        erro: `O valor interpretado (${formatarValorMoedaErro(valor)}) excede o limite permitido de ${formatarValorMoedaErro(LIMITE_VALOR_TRANSACAO)}.`,
+        sugestao: 'Confira se o separador de milhar e o separador decimal estão corretos na planilha.',
+      });
     }
 
     return {
@@ -2001,7 +2106,14 @@ async function montarPreviewImportacao(usuarioId, dados) {
         });
       }
     } catch (error) {
-      preview.erros.push({ linha, erro: error.message });
+      preview.erros.push(error.detalhesImportacao || {
+        linha,
+        coluna: 'Linha',
+        valorOriginal: '',
+        descricao: tx.descricao || '',
+        erro: error.message,
+        sugestao: 'Revise os dados desta linha na planilha e tente novamente.',
+      });
     }
   }
 

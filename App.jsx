@@ -294,17 +294,21 @@ async function lerXlsxPadrao(file) {
     throw new Error(`Colunas obrigatórias não encontradas: ${faltantes.join(', ')}.`);
   }
 
-  return linhas.slice(1).filter((linha) => linha.some((valor) => String(valor || '').trim())).map((linha) => ({
-    data: linha[indices.data],
-    descricao: linha[indices.descricao],
-    categoria: indices.categoria >= 0 ? linha[indices.categoria] : '',
-    categoria_macro: indices.categoriaMacro >= 0 ? linha[indices.categoriaMacro] : (indices.categoria >= 0 ? linha[indices.categoria] : ''),
-    categoria_detalhada: indices.categoriaDetalhada >= 0 ? linha[indices.categoriaDetalhada] : '',
-    conta: indices.conta >= 0 ? linha[indices.conta] : '',
-    transacao_id: indices.id >= 0 ? linha[indices.id] : '',
-    valor: linha[indices.valor],
-    tipo: linha[indices.tipo],
-  }));
+  return linhas.slice(1)
+    .map((linha, index) => ({ linha, numeroLinha: index + 2 }))
+    .filter(({ linha }) => linha.some((valor) => String(valor || '').trim()))
+    .map(({ linha, numeroLinha }) => ({
+      _linha: numeroLinha,
+      data: linha[indices.data],
+      descricao: linha[indices.descricao],
+      categoria: indices.categoria >= 0 ? linha[indices.categoria] : '',
+      categoria_macro: indices.categoriaMacro >= 0 ? linha[indices.categoriaMacro] : (indices.categoria >= 0 ? linha[indices.categoria] : ''),
+      categoria_detalhada: indices.categoriaDetalhada >= 0 ? linha[indices.categoriaDetalhada] : '',
+      conta: indices.conta >= 0 ? linha[indices.conta] : '',
+      transacao_id: indices.id >= 0 ? linha[indices.id] : '',
+      valor: linha[indices.valor],
+      tipo: linha[indices.tipo],
+    }));
 }
 
 
@@ -492,9 +496,108 @@ function normalizarDataLinha(valor) {
   return data.toISOString().slice(0, 10);
 }
 
-function normalizarValorLinha(valor) {
-  if (typeof valor === 'number') return valor;
-  return Number(String(valor || '').replace(/R\$/g, '').replace(/\./g, '').replace(',', '.').trim());
+const LIMITE_VALOR_TRANSACAO = 9999999999.99;
+
+function textoValorOriginal(valor) {
+  if (valor === null || valor === undefined || valor === '') return 'vazio';
+  return String(valor);
+}
+
+function parseValorMonetario(valorOriginal) {
+  if (typeof valorOriginal === 'number') {
+    return {
+      valor: Number.isFinite(valorOriginal) ? valorOriginal : null,
+      erro: Number.isFinite(valorOriginal) ? null : 'A célula contém um número que o app não conseguiu interpretar.',
+      valorOriginal,
+      interpretadoComo: Number.isFinite(valorOriginal) ? valorOriginal : null,
+    };
+  }
+
+  const textoOriginal = String(valorOriginal ?? '').trim();
+  if (!textoOriginal) {
+    return {
+      valor: null,
+      erro: 'A célula de valor está vazia.',
+      valorOriginal,
+      interpretadoComo: null,
+    };
+  }
+
+  let texto = textoOriginal
+    .replace(/ /g, ' ')
+    .replace(/R\$/gi, '')
+    .replace(/\s+/g, '')
+    .trim();
+
+  const negativoPorParenteses = /^\(.+\)$/.test(texto);
+  if (negativoPorParenteses) texto = texto.slice(1, -1);
+  const negativo = negativoPorParenteses || /^-/.test(texto);
+  texto = texto.replace(/^[+-]/, '');
+
+  if (!texto || !/^[0-9.,]+$/.test(texto)) {
+    return {
+      valor: null,
+      erro: 'A célula contém caracteres que não parecem formar um valor monetário.',
+      valorOriginal,
+      interpretadoComo: null,
+    };
+  }
+
+  const ultimaVirgula = texto.lastIndexOf(',');
+  const ultimoPonto = texto.lastIndexOf('.');
+  let decimal = null;
+
+  if (ultimaVirgula >= 0 && ultimoPonto >= 0) {
+    decimal = ultimaVirgula > ultimoPonto ? ',' : '.';
+  } else if (ultimaVirgula >= 0) {
+    const digitosDepois = texto.length - ultimaVirgula - 1;
+    const ocorrencias = (texto.match(/,/g) || []).length;
+    decimal = ocorrencias === 1 && digitosDepois > 0 && digitosDepois <= 2 ? ',' : null;
+  } else if (ultimoPonto >= 0) {
+    const digitosDepois = texto.length - ultimoPonto - 1;
+    const ocorrencias = (texto.match(/\./g) || []).length;
+    decimal = ocorrencias === 1 && digitosDepois > 0 && digitosDepois <= 2 ? '.' : null;
+  }
+
+  let normalizado;
+  if (decimal === ',') {
+    normalizado = texto.replace(/\./g, '').replace(',', '.');
+  } else if (decimal === '.') {
+    normalizado = texto.replace(/,/g, '');
+  } else {
+    normalizado = texto.replace(/[.,]/g, '');
+  }
+
+  const numero = Number(normalizado);
+  const interpretadoComo = Number.isFinite(numero) ? (negativo ? -numero : numero) : null;
+
+  return {
+    valor: interpretadoComo,
+    erro: Number.isFinite(interpretadoComo) ? null : 'Não foi possível converter o conteúdo da célula em número.',
+    valorOriginal,
+    interpretadoComo,
+  };
+}
+
+function criarErroImportacaoLinha({ linha, coluna, valorOriginal = '', valorInterpretado = null, descricao = '', erro, sugestao }) {
+  return { linha, coluna, valorOriginal, valorInterpretado, descricao, erro, sugestao };
+}
+
+function formatarValorInterpretado(valor) {
+  return Number.isFinite(valor) ? formatarMoeda(valor) : '-';
+}
+
+function formatarErroImportacao(erro) {
+  if (typeof erro === 'string') return erro;
+  return [
+    `Linha ${erro.linha}`,
+    `Coluna: ${erro.coluna || '-'}`,
+    `Valor lido: "${textoValorOriginal(erro.valorOriginal)}"`,
+    `Valor interpretado: ${formatarValorInterpretado(erro.valorInterpretado)}`,
+    `Descrição: "${erro.descricao || '-'}"`,
+    `Problema: ${erro.erro}`,
+    `Sugestão: ${erro.sugestao || 'Revise a linha na planilha e tente novamente.'}`,
+  ].join('\n');
 }
 
 function validarExcelImportacao(dados) {
@@ -502,22 +605,79 @@ function validarExcelImportacao(dados) {
   const transacoes = [];
 
   dados.forEach((linha, index) => {
-    const numeroLinha = index + 2;
+    const numeroLinha = linha._linha || index + 2;
     const data = normalizarDataLinha(linha.data);
     const descricao = String(linha.descricao || '').trim();
     const categoria = String(linha.categoria || '').trim();
     const categoriaMacro = String(linha.categoria_macro || categoria || '').trim() || 'Outros';
     const categoriaDetalhada = String(linha.categoria_detalhada || '').trim();
-    const valor = normalizarValorLinha(linha.valor);
+    const valorParse = parseValorMonetario(linha.valor);
+    const valor = valorParse.valor;
     const tipoTexto = normalizarTextoColuna(linha.tipo);
 
-    if (!data) erros.push(`Linha ${numeroLinha}: Data inválida.`);
-    if (!descricao) erros.push(`Linha ${numeroLinha}: Descrição obrigatória.`);
-    if (!Number.isFinite(valor) || valor <= 0) erros.push(`Linha ${numeroLinha}: Valor inválido.`);
-    if (Number.isFinite(valor) && Math.abs(valor) >= 10000000000) erros.push(`Linha ${numeroLinha}: Valor excede o limite suportado de 9.999.999.999,99.`);
-    if (!['debito', 'credito'].includes(tipoTexto)) erros.push(`Linha ${numeroLinha}: Tipo deve ser Débito ou Crédito.`);
+    if (!data) {
+      erros.push(criarErroImportacaoLinha({
+        linha: numeroLinha,
+        coluna: 'Data',
+        valorOriginal: linha.data,
+        descricao,
+        erro: 'A data não foi reconhecida pelo app.',
+        sugestao: 'Use uma data válida, como 10/06/2026 ou 2026-06-10.',
+      }));
+    }
+    if (!descricao) {
+      erros.push(criarErroImportacaoLinha({
+        linha: numeroLinha,
+        coluna: 'Descrição',
+        valorOriginal: linha.descricao,
+        descricao,
+        erro: 'A descrição da transação está vazia.',
+        sugestao: 'Preencha a descrição para identificar a transação no extrato.',
+      }));
+    }
+    if (valorParse.erro) {
+      erros.push(criarErroImportacaoLinha({
+        linha: numeroLinha,
+        coluna: 'Valor',
+        valorOriginal: valorParse.valorOriginal,
+        valorInterpretado: valorParse.interpretadoComo,
+        descricao,
+        erro: valorParse.erro,
+        sugestao: 'Informe o valor em formato brasileiro (1.234,56), americano (1,234.56) ou como número do Excel (1234.56).',
+      }));
+    } else if (!Number.isFinite(valor) || Math.abs(valor) <= 0) {
+      erros.push(criarErroImportacaoLinha({
+        linha: numeroLinha,
+        coluna: 'Valor',
+        valorOriginal: valorParse.valorOriginal,
+        valorInterpretado: valorParse.interpretadoComo,
+        descricao,
+        erro: 'O valor precisa ser maior que zero após a interpretação.',
+        sugestao: 'Confira se a célula não está vazia, zerada ou com sinal/formato incorreto.',
+      }));
+    } else if (Math.abs(valor) > LIMITE_VALOR_TRANSACAO) {
+      erros.push(criarErroImportacaoLinha({
+        linha: numeroLinha,
+        coluna: 'Valor',
+        valorOriginal: valorParse.valorOriginal,
+        valorInterpretado: valorParse.interpretadoComo,
+        descricao,
+        erro: `O valor interpretado (${formatarMoeda(valor)}) excede o limite permitido de ${formatarMoeda(LIMITE_VALOR_TRANSACAO)}.`,
+        sugestao: 'Confira se o separador de milhar e o separador decimal estão corretos na planilha.',
+      }));
+    }
+    if (!['debito', 'credito'].includes(tipoTexto)) {
+      erros.push(criarErroImportacaoLinha({
+        linha: numeroLinha,
+        coluna: 'Tipo',
+        valorOriginal: linha.tipo,
+        descricao,
+        erro: 'O tipo precisa indicar se a transação é débito ou crédito.',
+        sugestao: 'Use exatamente Débito ou Crédito na coluna Tipo.',
+      }));
+    }
 
-    if (data && descricao && Number.isFinite(valor) && valor > 0 && ['debito', 'credito'].includes(tipoTexto)) {
+    if (data && descricao && Number.isFinite(valor) && Math.abs(valor) > 0 && Math.abs(valor) <= LIMITE_VALOR_TRANSACAO && ['debito', 'credito'].includes(tipoTexto)) {
       transacoes.push({
         data,
         descricao,
@@ -602,6 +762,7 @@ function ImportarExcel({ contas, token, onConcluida }) {
   const [mapeamentoCategorias, setMapeamentoCategorias] = useState([]);
   const [conciliacoesSelecionadas, setConciliacoesSelecionadas] = useState([]);
   const [conciliacoesIgnoradas, setConciliacoesIgnoradas] = useState([]);
+  const [modalErrosAberto, setModalErrosAberto] = useState(false);
   const [carregando, setCarregando] = useState(false);
 
   const authHeaders = { Authorization: `Bearer ${token}` };
@@ -613,12 +774,23 @@ function ImportarExcel({ contas, token, onConcluida }) {
     setMapeamentoCategorias([]);
     setConciliacoesSelecionadas([]);
     setConciliacoesIgnoradas([]);
+    setModalErrosAberto(false);
     setCarregando(true);
     try {
       const dados = await lerXlsxPadrao(file);
       setValidacao(validarExcelImportacao(dados));
     } catch (error) {
-      setValidacao({ valido: false, erros: [error.message], transacoes: [] });
+      setValidacao({
+        valido: false,
+        erros: [criarErroImportacaoLinha({
+          linha: '-',
+          coluna: 'Arquivo',
+          valorOriginal: file.name,
+          erro: error.message,
+          sugestao: 'Verifique se o arquivo é um XLSX válido com cabeçalho e colunas obrigatórias.',
+        })],
+        transacoes: [],
+      });
     } finally {
       setCarregando(false);
     }
@@ -680,6 +852,7 @@ function ImportarExcel({ contas, token, onConcluida }) {
     setMapeamentoCategorias([]);
     setConciliacoesSelecionadas([]);
     setConciliacoesIgnoradas([]);
+    setModalErrosAberto(false);
   };
 
   const atualizarMapeamentoCategoria = (chave, atualizacao) => {
@@ -701,6 +874,36 @@ function ImportarExcel({ contas, token, onConcluida }) {
     const chave = `${sugestao.provisaoId}|${sugestao.transacaoTempId || sugestao.transacaoId}`;
     setConciliacoesSelecionadas((atuais) => atuais.filter((item) => `${item.provisaoId}|${item.transacaoTempId || item.transacaoId}` !== chave));
     setConciliacoesIgnoradas((atuais) => atuais.some((item) => `${item.provisaoId}|${item.transacaoTempId || item.transacaoId}` === chave) ? atuais : [...atuais, sugestao]);
+  };
+
+  const copiarErrosImportacao = async (erros = []) => {
+    const texto = erros.map(formatarErroImportacao).join('\n\n---\n\n');
+    try {
+      await navigator.clipboard.writeText(texto);
+      alert('Detalhes dos erros copiados para a área de transferência.');
+    } catch (error) {
+      console.error('Erro ao copiar detalhes:', error);
+      alert('Não foi possível copiar automaticamente. Selecione e copie os detalhes exibidos no modal.');
+    }
+  };
+
+  const renderErroImportacao = (erro, index = 0) => {
+    const item = typeof erro === 'string'
+      ? criarErroImportacaoLinha({ linha: '-', coluna: '-', valorOriginal: '', erro, sugestao: 'Revise a planilha e tente novamente.' })
+      : erro;
+
+    return (
+      <div key={`${item.linha || 'linha'}-${item.coluna || 'coluna'}-${item.erro || index}-${index}`} style={{ background: 'white', border: '1px solid #fecaca', borderRadius: '10px', padding: '12px' }}>
+        <strong>Linha {item.linha || '-'} · Coluna {item.coluna || '-'}</strong>
+        <div style={{ display: 'grid', gap: '4px', marginTop: '8px', color: '#7f1d1d', fontSize: '13px' }}>
+          <span><strong>Valor lido:</strong> "{textoValorOriginal(item.valorOriginal)}"</span>
+          <span><strong>Interpretado como:</strong> {formatarValorInterpretado(item.valorInterpretado)}</span>
+          <span><strong>Descrição:</strong> {item.descricao || '-'}</span>
+          <span><strong>Problema:</strong> {item.erro || String(item)}</span>
+          <span><strong>Como corrigir:</strong> {item.sugestao || 'Revise a linha na planilha e tente novamente.'}</span>
+        </div>
+      </div>
+    );
   };
 
   const categoriasPendentes = preview?.categoriasPendentes || [];
@@ -769,9 +972,15 @@ function ImportarExcel({ contas, token, onConcluida }) {
 
       {validacao?.erros?.length > 0 && (
         <div style={{ background: '#fef2f2', color: '#991b1b', borderRadius: '10px', padding: '14px', marginTop: '16px' }}>
-          <strong>❌ Erros encontrados:</strong>
-          <ul>{validacao.erros.slice(0, 10).map((erro) => <li key={erro}>{erro}</li>)}</ul>
-          {validacao.erros.length > 10 && <p>...e mais {validacao.erros.length - 10} erros.</p>}
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
+            <strong>❌ Erros encontrados: {validacao.erros.length}</strong>
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+              <button onClick={() => setModalErrosAberto(true)} style={{ background: 'white', color: '#991b1b', border: '1px solid #fecaca', padding: '8px 10px', borderRadius: '8px', cursor: 'pointer' }}>Ver todos os erros</button>
+              <button onClick={() => copiarErrosImportacao(validacao.erros)} style={{ background: '#991b1b', color: 'white', border: 'none', padding: '8px 10px', borderRadius: '8px', cursor: 'pointer' }}>Copiar detalhes dos erros</button>
+            </div>
+          </div>
+          <p style={{ marginBottom: '10px' }}>Mostrando os 10 primeiros erros com contexto para correção da planilha.</p>
+          <div style={{ display: 'grid', gap: '10px' }}>{validacao.erros.slice(0, 10).map(renderErroImportacao)}</div>
         </div>
       )}
 
@@ -917,8 +1126,11 @@ function ImportarExcel({ contas, token, onConcluida }) {
 
           {(preview.erros || []).length > 0 && (
             <div style={{ background: '#fef2f2', color: '#991b1b', borderRadius: '10px', padding: '12px', marginBottom: '14px' }}>
-              <strong>Linhas com erro</strong>
-              <ul>{preview.erros.slice(0, 8).map((erro) => <li key={`${erro.linha}-${erro.erro}`}>Linha {erro.linha}: {erro.erro}</li>)}</ul>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
+                <strong>Linhas com erro no preview: {preview.erros.length}</strong>
+                <button onClick={() => copiarErrosImportacao(preview.erros)} style={{ background: '#991b1b', color: 'white', border: 'none', padding: '8px 10px', borderRadius: '8px', cursor: 'pointer' }}>Copiar detalhes dos erros</button>
+              </div>
+              <div style={{ display: 'grid', gap: '10px', marginTop: '10px' }}>{preview.erros.slice(0, 8).map(renderErroImportacao)}</div>
             </div>
           )}
         </div>
@@ -937,6 +1149,21 @@ function ImportarExcel({ contas, token, onConcluida }) {
         )}
         <button onClick={limpar} style={{ background: '#e5e7eb', border: 'none', padding: '12px 18px', borderRadius: '8px', cursor: 'pointer' }}>LIMPAR</button>
       </div>
+
+      {modalErrosAberto && validacao?.erros?.length > 0 && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <div style={{ background: '#fef2f2', borderRadius: '14px', padding: '20px', width: '92%', maxWidth: '880px', maxHeight: '85vh', overflowY: 'auto', color: '#991b1b' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '12px' }}>
+              <h3 style={{ margin: 0 }}>Todos os erros de importação ({validacao.erros.length})</h3>
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                <button onClick={() => copiarErrosImportacao(validacao.erros)} style={{ background: '#991b1b', color: 'white', border: 'none', padding: '8px 10px', borderRadius: '8px', cursor: 'pointer' }}>Copiar detalhes dos erros</button>
+                <button onClick={() => setModalErrosAberto(false)} style={{ background: 'white', color: '#991b1b', border: '1px solid #fecaca', padding: '8px 10px', borderRadius: '8px', cursor: 'pointer' }}>Fechar</button>
+              </div>
+            </div>
+            <div style={{ display: 'grid', gap: '10px' }}>{validacao.erros.map(renderErroImportacao)}</div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
