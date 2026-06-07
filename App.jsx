@@ -281,16 +281,19 @@ async function lerXlsxPadrao(file) {
     categoria: indiceOpcional('categoria'),
     categoriaMacro: indiceOpcional('categoria macro', 'categoria_macro', 'macro'),
     categoriaDetalhada: indiceOpcional('categoria detalhada', 'categoria_detalhada', 'subcategoria', 'categoria detalhe'),
-    conta: indiceOpcional('conta', 'conta destino'),
+    conta: indiceOpcional('conta'),
     valor: indiceOpcional('valor'),
     tipo: indiceOpcional('tipo'),
   };
-  const obrigatorias = { data: indices.data, descricao: indices.descricao, valor: indices.valor, tipo: indices.tipo };
+  const obrigatorias = { data: indices.data, conta: indices.conta, descricao: indices.descricao, valor: indices.valor, tipo: indices.tipo };
   const faltantes = Object.entries(obrigatorias)
     .filter(([, indice]) => indice === -1)
     .map(([coluna]) => coluna === 'descricao' ? 'Descrição' : coluna.charAt(0).toUpperCase() + coluna.slice(1));
 
   if (faltantes.length > 0) {
+    if (faltantes.includes('Conta')) {
+      throw new Error('A planilha precisa conter a coluna Conta para identificar em qual conta cada transação será importada.');
+    }
     throw new Error(`Colunas obrigatórias não encontradas: ${faltantes.join(', ')}.`);
   }
 
@@ -611,6 +614,7 @@ function validarExcelImportacao(dados) {
     const categoria = String(linha.categoria || '').trim();
     const categoriaMacro = String(linha.categoria_macro || categoria || '').trim() || 'Outros';
     const categoriaDetalhada = String(linha.categoria_detalhada || '').trim();
+    const conta = String(linha.conta || '').trim();
     const valorParse = parseValorMonetario(linha.valor);
     const valor = valorParse.valor;
     const tipoTexto = normalizarTextoColuna(linha.tipo);
@@ -633,6 +637,16 @@ function validarExcelImportacao(dados) {
         descricao,
         erro: 'A descrição da transação está vazia.',
         sugestao: 'Preencha a descrição para identificar a transação no extrato.',
+      }));
+    }
+    if (!conta) {
+      erros.push(criarErroImportacaoLinha({
+        linha: numeroLinha,
+        coluna: 'Conta',
+        valorOriginal: linha.conta,
+        descricao,
+        erro: 'A coluna Conta está vazia nesta linha.',
+        sugestao: 'Informe a conta dessa transação na planilha.',
       }));
     }
     if (valorParse.erro) {
@@ -677,14 +691,14 @@ function validarExcelImportacao(dados) {
       }));
     }
 
-    if (data && descricao && Number.isFinite(valor) && Math.abs(valor) > 0 && Math.abs(valor) <= LIMITE_VALOR_TRANSACAO && ['debito', 'credito'].includes(tipoTexto)) {
+    if (data && descricao && conta && Number.isFinite(valor) && Math.abs(valor) > 0 && Math.abs(valor) <= LIMITE_VALOR_TRANSACAO && ['debito', 'credito'].includes(tipoTexto)) {
       transacoes.push({
         data,
         descricao,
         categoria,
         categoria_macro: categoriaMacro,
         categoria_detalhada: categoriaDetalhada,
-        conta: String(linha.conta || '').trim() || null,
+        conta,
         transacao_id: String(linha.transacao_id || '').trim() || null,
         valor: Math.abs(valor),
         tipo: tipoTexto === 'credito' ? 'CREDITO' : 'DEBITO',
@@ -755,11 +769,10 @@ function NotificacoesBell({ token }) {
 
 function ImportarExcel({ contas, token, onConcluida }) {
   const [arquivo, setArquivo] = useState(null);
-  const [contaId, setContaId] = useState(contas[0]?.id || '');
-  const [novaConta, setNovaConta] = useState('Importação XLSX');
   const [validacao, setValidacao] = useState(null);
   const [preview, setPreview] = useState(null);
   const [mapeamentoCategorias, setMapeamentoCategorias] = useState([]);
+  const [mapeamentoContas, setMapeamentoContas] = useState([]);
   const [conciliacoesSelecionadas, setConciliacoesSelecionadas] = useState([]);
   const [conciliacoesIgnoradas, setConciliacoesIgnoradas] = useState([]);
   const [modalErrosAberto, setModalErrosAberto] = useState(false);
@@ -772,6 +785,7 @@ function ImportarExcel({ contas, token, onConcluida }) {
     setValidacao(null);
     setPreview(null);
     setMapeamentoCategorias([]);
+    setMapeamentoContas([]);
     setConciliacoesSelecionadas([]);
     setConciliacoesIgnoradas([]);
     setModalErrosAberto(false);
@@ -801,8 +815,6 @@ function ImportarExcel({ contas, token, onConcluida }) {
     setCarregando(true);
     try {
       const response = await axios.post(`${API_URL}/importacoes/xlsx/preview`, {
-        conta_id: contaId || undefined,
-        conta_nome: contaId ? undefined : novaConta,
         transacoes: validacao.transacoes,
         nome_arquivo: arquivo.name,
         arquivo_base64: await arquivoParaBase64(arquivo),
@@ -810,6 +822,12 @@ function ImportarExcel({ contas, token, onConcluida }) {
       setPreview(response.data);
       setConciliacoesSelecionadas([]);
       setConciliacoesIgnoradas([]);
+      setMapeamentoContas((response.data.contasImportacao || []).map((conta) => ({
+        nomePlanilha: conta.nomePlanilha,
+        acao: conta.status === 'CONFIRMADA' ? 'USAR_EXISTENTE' : '',
+        contaExistenteId: conta.contaEncontradaId || '',
+        nomeCorrigido: conta.nomePlanilha,
+      })));
       setMapeamentoCategorias((response.data.categoriasPendentes || []).map((pendencia) => ({
         tipo: pendencia.tipo,
         nomePlanilha: pendencia.nomePlanilha,
@@ -832,6 +850,7 @@ function ImportarExcel({ contas, token, onConcluida }) {
       const response = await axios.post(`${API_URL}/importacoes/xlsx/confirmar`, {
         tokenPreview: preview.tokenPreview,
         acao,
+        mapeamentoContas,
         mapeamentoCategorias,
         conciliacoesConfirmadas: conciliacoesSelecionadas,
         conciliacoesIgnoradas,
@@ -850,6 +869,7 @@ function ImportarExcel({ contas, token, onConcluida }) {
     setValidacao(null);
     setPreview(null);
     setMapeamentoCategorias([]);
+    setMapeamentoContas([]);
     setConciliacoesSelecionadas([]);
     setConciliacoesIgnoradas([]);
     setModalErrosAberto(false);
@@ -860,6 +880,12 @@ function ImportarExcel({ contas, token, onConcluida }) {
       const chaveItem = `${item.tipo}|${item.categoriaMacroPlanilha || ''}|${item.nomePlanilha}`;
       return chaveItem === chave ? { ...item, ...atualizacao } : item;
     }));
+  };
+
+  const atualizarMapeamentoConta = (nomePlanilha, atualizacao) => {
+    setMapeamentoContas((atuais) => atuais.map((item) => (
+      item.nomePlanilha === nomePlanilha ? { ...item, ...atualizacao } : item
+    )));
   };
 
   const alternarConciliacaoSelecionada = (sugestao) => {
@@ -906,6 +932,14 @@ function ImportarExcel({ contas, token, onConcluida }) {
     );
   };
 
+  const contasImportacao = preview?.contasImportacao || [];
+  const contasResolvidas = contasImportacao.every((conta) => {
+    const decisao = mapeamentoContas.find((item) => item.nomePlanilha === conta.nomePlanilha);
+    if (!decisao?.acao) return false;
+    if (decisao.acao === 'USAR_EXISTENTE') return Boolean(decisao.contaExistenteId);
+    if (decisao.acao === 'CRIAR_NOVA' || decisao.acao === 'CORRIGIR_NOME') return Boolean(decisao.nomeCorrigido?.trim());
+    return false;
+  });
   const categoriasPendentes = preview?.categoriasPendentes || [];
   const mapeamentosResolvidos = categoriasPendentes.every((pendencia) => {
     const chavePendencia = `${pendencia.tipo}|${pendencia.categoriaMacroPlanilha || ''}|${pendencia.nomePlanilha}`;
@@ -915,7 +949,7 @@ function ImportarExcel({ contas, token, onConcluida }) {
     if (decisao.acao === 'CORRIGIR_NOME') return Boolean(decisao.nomeCorrigido?.trim());
     return true;
   });
-  const confirmacaoBloqueada = carregando || (categoriasPendentes.length > 0 && !mapeamentosResolvidos);
+  const confirmacaoBloqueada = carregando || !contasResolvidas || (categoriasPendentes.length > 0 && !mapeamentosResolvidos);
   const resumo = preview?.resumo || {};
 
   return (
@@ -930,29 +964,21 @@ function ImportarExcel({ contas, token, onConcluida }) {
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '12px' }}>
           <div style={{ background: 'white', border: '1px solid #e5e7eb', borderRadius: '10px', padding: '12px' }}>
             <strong>Colunas obrigatórias</strong>
-            <p style={{ color: '#6b7280', marginBottom: 0 }}>Data, Descrição, Valor e Tipo.</p>
+            <p style={{ color: '#6b7280', marginBottom: 0 }}>Data, Conta, Descrição, Valor e Tipo.</p>
           </div>
           <div style={{ background: 'white', border: '1px solid #e5e7eb', borderRadius: '10px', padding: '12px' }}>
             <strong>Colunas opcionais</strong>
-            <p style={{ color: '#6b7280', marginBottom: 0 }}>ID/Transacao_ID, Conta, Categoria Macro, Categoria Detalhada ou Categoria.</p>
+            <p style={{ color: '#6b7280', marginBottom: 0 }}>ID/Transacao_ID, Categoria Macro, Categoria Detalhada ou Categoria.</p>
           </div>
         </div>
       </div>
 
-      <div style={{ margin: '18px 0', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '14px', padding: '16px' }}>
-        <label style={{ display: 'block', fontWeight: 'bold', marginBottom: '8px' }}>Conta de destino</label>
-        <p style={{ color: '#92400e', marginTop: 0 }}>
-          A conta de destino participa da chave de identificação da transação quando a planilha não traz ID interno.
+      <div style={{ margin: '18px 0', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '14px', padding: '16px' }}>
+        <strong style={{ color: '#1d4ed8' }}>Conta definida pela planilha</strong>
+        <p style={{ color: '#1e40af', marginBottom: 0 }}>
+          A conta de cada transação deve estar informada na coluna Conta da planilha. O sistema irá validar as contas encontradas no arquivo antes de importar.
+          Ela será usada para vincular cada transação à conta correta e também participa da identificação de transações já cadastradas.
         </p>
-        {contas.length > 0 && (
-          <select value={contaId} onChange={(event) => { setContaId(event.target.value); setPreview(null); }} style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db', marginRight: '10px' }}>
-            {contas.map((conta) => <option key={conta.id} value={conta.id}>{conta.nome}</option>)}
-            <option value="">+ Criar nova conta</option>
-          </select>
-        )}
-        {(!contaId || contas.length === 0) && (
-          <input value={novaConta} onChange={(event) => { setNovaConta(event.target.value); setPreview(null); }} placeholder="Nome da nova conta" style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} />
-        )}
       </div>
 
       <label
@@ -999,6 +1025,68 @@ function ImportarExcel({ contas, token, onConcluida }) {
             <KpiCard titulo="Com alteração" valor={resumo.comAlteracao || 0} detalhe="Dependem de confirmação" cor="#d97706" fundo="#fffbeb" />
             <KpiCard titulo="Com erro" valor={resumo.comErro || 0} detalhe="Não serão aplicadas" cor="#dc2626" fundo="#fef2f2" />
           </div>
+
+          {contasImportacao.length > 0 && (
+            <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '10px', padding: '14px', marginBottom: '14px' }}>
+              <h3 style={{ marginTop: 0 }}>Confirmar contas da importação</h3>
+              <p style={{ color: '#1e40af' }}>
+                Encontramos contas na planilha. Revise abaixo para quais contas as transações serão importadas antes de continuar.
+              </p>
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px', background: 'white' }}>
+                  <thead>
+                    <tr>
+                      <th style={{ textAlign: 'left', padding: '8px' }}>Conta na planilha</th>
+                      <th style={{ textAlign: 'left', padding: '8px' }}>Conta no sistema</th>
+                      <th style={{ textAlign: 'right', padding: '8px' }}>Transações</th>
+                      <th style={{ textAlign: 'left', padding: '8px' }}>Status</th>
+                      <th style={{ textAlign: 'left', padding: '8px' }}>Ação</th>
+                    </tr>
+                  </thead>
+                  <tbody>{contasImportacao.map((contaPlanilha) => {
+                    const decisao = mapeamentoContas.find((item) => item.nomePlanilha === contaPlanilha.nomePlanilha) || {};
+                    const contaSelecionada = contas.find((conta) => conta.id === decisao.contaExistenteId);
+                    const status = decisao.acao === 'USAR_EXISTENTE' && decisao.contaExistenteId
+                      ? (contaPlanilha.status === 'POSSIVEL_CORRESPONDENCIA' ? 'Possível correspondência confirmada' : 'Confirmada')
+                      : decisao.acao === 'CRIAR_NOVA'
+                        ? 'Criar nova conta'
+                        : decisao.acao === 'CORRIGIR_NOME'
+                          ? 'Nome corrigido'
+                          : (contaPlanilha.status === 'NAO_ENCONTRADA' ? 'Pendente' : contaPlanilha.statusLabel || 'Pendente');
+
+                    return (
+                      <tr key={contaPlanilha.nomePlanilha} style={{ borderTop: '1px solid #dbeafe' }}>
+                        <td style={{ padding: '8px', fontWeight: 'bold' }}>{contaPlanilha.nomePlanilha}</td>
+                        <td style={{ padding: '8px' }}>{contaSelecionada?.nome || contaPlanilha.contaEncontradaNome || 'Não encontrada'}</td>
+                        <td style={{ padding: '8px', textAlign: 'right' }}>{contaPlanilha.quantidade}</td>
+                        <td style={{ padding: '8px' }}>{status}</td>
+                        <td style={{ padding: '8px' }}>
+                          <div style={{ display: 'grid', gap: '6px', minWidth: '220px' }}>
+                            <select value={decisao.acao || ''} onChange={(event) => atualizarMapeamentoConta(contaPlanilha.nomePlanilha, { acao: event.target.value })} style={{ padding: '8px', borderRadius: '8px', border: '1px solid #93c5fd' }}>
+                              <option value="">Escolha uma ação</option>
+                              <option value="USAR_EXISTENTE">Usar conta existente</option>
+                              <option value="CRIAR_NOVA">Criar nova conta</option>
+                              <option value="CORRIGIR_NOME">Corrigir nome manualmente</option>
+                            </select>
+                            {decisao.acao === 'USAR_EXISTENTE' && (
+                              <select value={decisao.contaExistenteId || ''} onChange={(event) => atualizarMapeamentoConta(contaPlanilha.nomePlanilha, { contaExistenteId: event.target.value })} style={{ padding: '8px', borderRadius: '8px', border: '1px solid #93c5fd' }}>
+                                <option value="">Selecione a conta</option>
+                                {contas.map((conta) => <option key={conta.id} value={conta.id}>{conta.nome}</option>)}
+                              </select>
+                            )}
+                            {(decisao.acao === 'CRIAR_NOVA' || decisao.acao === 'CORRIGIR_NOME') && (
+                              <input value={decisao.nomeCorrigido || ''} onChange={(event) => atualizarMapeamentoConta(contaPlanilha.nomePlanilha, { nomeCorrigido: event.target.value })} placeholder="Nome da conta" style={{ padding: '8px', borderRadius: '8px', border: '1px solid #93c5fd' }} />
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}</tbody>
+                </table>
+              </div>
+              {!contasResolvidas && <p style={{ color: '#b45309', fontWeight: 'bold', marginBottom: 0 }}>Resolva todas as contas da planilha antes de concluir a importação.</p>}
+            </div>
+          )}
 
           {(preview.categoriasNovas || []).length > 0 && (
             <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '10px', padding: '12px', marginBottom: '14px' }}>

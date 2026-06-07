@@ -865,6 +865,7 @@ function validarTransacoesImportacao(transacoes) {
     const categoriaLegada = String(tx.categoria || '').trim();
     const categoriaMacro = String(tx.categoria_macro || tx.categoriaMacro || tx.categoriaMacroNome || categoriaLegada || '').trim() || 'Outros';
     const categoriaDetalhada = String(tx.categoria_detalhada || tx.categoriaDetalhada || tx.categoriaDetalhadaNome || '').trim();
+    const conta = String(tx.conta || tx.conta_nome || tx.contaNome || '').trim();
     const valorParse = parseValorMonetario(tx.valor);
     const valor = Math.abs(Number(valorParse.valor));
     const tipo = normalizarTipoTransacao(tx.tipo);
@@ -884,6 +885,14 @@ function validarTransacoesImportacao(transacoes) {
       descricao,
       erro: 'A descrição da transação está vazia.',
       sugestao: 'Preencha a descrição para identificar a transação no extrato.',
+    });
+    if (!conta) throw criarErroValidacaoImportacao({
+      linha,
+      coluna: 'Conta',
+      valorOriginal: tx.conta || tx.conta_nome || tx.contaNome,
+      descricao,
+      erro: 'A coluna Conta está vazia nesta linha.',
+      sugestao: 'Informe a conta dessa transação na planilha.',
     });
     if (valorParse.erro || !Number.isFinite(valor) || valor <= 0) throw criarErroValidacaoImportacao({
       linha,
@@ -907,9 +916,10 @@ function validarTransacoesImportacao(transacoes) {
     }
 
     return {
+      _linha: linha,
       id: tx.id || tx.transacao_id || tx.transacaoId || null,
       transacao_id: tx.transacao_id || tx.transacaoId || tx.id || null,
-      conta: tx.conta || tx.conta_nome || tx.contaNome || null,
+      conta,
       data,
       descricao,
       categoria: categoriaLegada || categoriaMacro,
@@ -1970,6 +1980,106 @@ async function resolverContaConfirmacao(usuarioId, preview) {
   return contaId;
 }
 
+function normalizarNomeConta(texto) {
+  return String(texto || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function similaridadeNomeConta(a, b) {
+  const na = normalizarNomeConta(a);
+  const nb = normalizarNomeConta(b);
+  if (!na || !nb) return 0;
+  if (na === nb) return 1;
+  const palavrasA = new Set(na.split(' ').filter(Boolean));
+  const palavrasB = new Set(nb.split(' ').filter(Boolean));
+  const intersecao = [...palavrasA].filter((p) => palavrasB.has(p)).length;
+  const uniao = new Set([...palavrasA, ...palavrasB]).size || 1;
+  return intersecao / uniao;
+}
+
+async function listarContasUsuario(usuarioId) {
+  const result = await pool.query(
+    'SELECT id, nome FROM contas WHERE usuario_id = $1 AND ativo = true ORDER BY nome',
+    [usuarioId]
+  );
+  return result.rows;
+}
+
+function montarResumoContasImportacao(transacoes, contasUsuario) {
+  const agrupadas = new Map();
+  transacoes.forEach((tx) => {
+    const nome = String(tx.conta || '').trim();
+    if (!agrupadas.has(nome)) agrupadas.set(nome, { nomePlanilha: nome, quantidade: 0 });
+    agrupadas.get(nome).quantidade += 1;
+  });
+
+  return [...agrupadas.values()].map((item) => {
+    const normalizado = normalizarNomeConta(item.nomePlanilha);
+    const exata = contasUsuario.find((conta) => normalizarNomeConta(conta.nome) === normalizado);
+    if (exata) {
+      return { ...item, contaEncontradaId: exata.id, contaEncontradaNome: exata.nome, status: 'CONFIRMADA', statusLabel: 'Confirmada', similaridade: 1 };
+    }
+
+    const possivel = contasUsuario
+      .map((conta) => ({ conta, similaridade: similaridadeNomeConta(item.nomePlanilha, conta.nome) }))
+      .sort((a, b) => b.similaridade - a.similaridade)[0];
+
+    if (possivel && possivel.similaridade >= 0.5) {
+      return {
+        ...item,
+        contaEncontradaId: possivel.conta.id,
+        contaEncontradaNome: possivel.conta.nome,
+        status: 'POSSIVEL_CORRESPONDENCIA',
+        statusLabel: 'Possível correspondência',
+        similaridade: possivel.similaridade,
+      };
+    }
+
+    return { ...item, contaEncontradaId: null, contaEncontradaNome: null, status: 'NAO_ENCONTRADA', statusLabel: 'Pendente', similaridade: 0 };
+  });
+}
+
+async function resolverMapeamentoContasConfirmacao(usuarioId, preview, mapeamentoContas = []) {
+  const pendentes = preview.contasImportacao || [];
+  const mapaEntrada = new Map(mapeamentoContas.map((item) => [String(item.nomePlanilha || '').trim(), item]));
+  const resolvidas = new Map();
+
+  for (const contaPreview of pendentes) {
+    const nomePlanilha = String(contaPreview.nomePlanilha || '').trim();
+    const decisao = mapaEntrada.get(nomePlanilha);
+    if (!decisao?.acao) throw new Error('Resolva todas as contas da planilha antes de concluir a importação.');
+
+    if (decisao.acao === 'USAR_EXISTENTE') {
+      if (!decisao.contaExistenteId) throw new Error(`Selecione a conta existente para "${nomePlanilha}".`);
+      const conta = await pool.query(
+        'SELECT id, nome FROM contas WHERE id = $1 AND usuario_id = $2 AND ativo = true',
+        [decisao.contaExistenteId, usuarioId]
+      );
+      if (!conta.rows[0]) throw new Error(`Conta existente inválida para "${nomePlanilha}".`);
+      resolvidas.set(nomePlanilha, { id: conta.rows[0].id, nome: conta.rows[0].nome });
+      continue;
+    }
+
+    if (decisao.acao === 'CRIAR_NOVA' || decisao.acao === 'CORRIGIR_NOME') {
+      const nomeCorrigido = String(decisao.nomeCorrigido || nomePlanilha).trim();
+      if (!nomeCorrigido) throw new Error(`Informe o nome da conta para "${nomePlanilha}".`);
+      let contaId = await buscarContaNormalizada(usuarioId, nomeCorrigido);
+      if (!contaId) contaId = await criarConta(usuarioId, nomeCorrigido);
+      resolvidas.set(nomePlanilha, { id: contaId, nome: nomeCorrigido });
+      continue;
+    }
+
+    throw new Error(`Ação de conta inválida para "${nomePlanilha}".`);
+  }
+
+  return resolvidas;
+}
+
 function limparPreviewsExpirados() {
   const agora = Date.now();
   for (const [tokenPreview, preview] of previewsImportacao.entries()) {
@@ -2047,13 +2157,13 @@ async function buscarTransacaoExistenteParaImportacao(usuarioId, tx, contaId, ha
 }
 
 async function montarPreviewImportacao(usuarioId, dados) {
-  const conta = await resolverContaImportacao(usuarioId, dados);
   const transacoesValidadas = validarTransacoesImportacao(dados.transacoes);
+  const contasUsuario = await listarContasUsuario(usuarioId);
+  const contasImportacao = montarResumoContasImportacao(transacoesValidadas, contasUsuario);
+  const contaPreviewPorNome = new Map(contasImportacao.map((conta) => [conta.nomePlanilha, conta]));
   const preview = {
     usuarioId,
-    contaId: conta.id,
-    contaNome: conta.nome,
-    contaHashKey: conta.hashKey || conta.id,
+    contasImportacao,
     nomeArquivo: dados.nome_arquivo || `importacao_${new Date().toISOString().slice(0, 10)}.xlsx`,
     arquivoBase64: dados.arquivo_base64,
     criadoEm: Date.now(),
@@ -2064,19 +2174,25 @@ async function montarPreviewImportacao(usuarioId, dados) {
     categoriasPendentes: [],
     categoriasNovas: [],
     sugestoesConciliacao: [],
+    transacoesValidadas,
   };
 
   for (const [index, tx] of transacoesValidadas.entries()) {
-    const linha = index + 2;
+    const linha = tx._linha || index + 2;
     try {
       const categorias = await resolverCategoriasPreview(usuarioId, tx, preview);
-      const hash = gerarHashTransacao(tx, conta.hashKey || conta.id);
-      const existente = conta.id ? await buscarTransacaoExistenteParaImportacao(usuarioId, tx, conta.id, hash) : null;
+      const contaPreview = contaPreviewPorNome.get(tx.conta) || { nomePlanilha: tx.conta };
+      const contaIdPreview = contaPreview.contaEncontradaId || null;
+      const contaHashKey = contaIdPreview || `planilha:${normalizarNomeConta(tx.conta)}`;
+      const hash = gerarHashTransacao(tx, contaHashKey);
+      const existente = contaIdPreview ? await buscarTransacaoExistenteParaImportacao(usuarioId, tx, contaIdPreview, hash) : null;
+      tx.hash_transacao = hash;
       const normalizada = {
         ...tx,
         linha,
-        conta_id: conta.id,
-        conta_nome: conta.nome,
+        conta_id: contaIdPreview,
+        conta_nome: contaPreview.contaEncontradaNome || tx.conta,
+        conta_planilha: tx.conta,
         hash_transacao: hash,
         categoria_id: categorias.categoriaId,
         categoria_macro_id: categorias.categoriaMacroId,
@@ -2094,7 +2210,7 @@ async function montarPreviewImportacao(usuarioId, dados) {
         continue;
       }
 
-      const alteracoes = montarAlteracoesTransacao(existente, valoresComparaveis(tx, categorias, conta.id));
+      const alteracoes = montarAlteracoesTransacao(existente, valoresComparaveis(tx, categorias, contaIdPreview));
       if (alteracoes.length === 0) {
         preview.semAlteracao.push({ ...normalizada, transacaoId: existente.id });
       } else {
@@ -2146,6 +2262,7 @@ async function montarPreviewImportacao(usuarioId, dados) {
     erros: preview.erros,
     categoriasPendentes: preview.categoriasPendentes,
     categoriasNovas: preview.categoriasNovas,
+    contasImportacao: preview.contasImportacao,
     sugestoesConciliacao: preview.sugestoesConciliacao,
     tokenPreview,
   };
@@ -2229,7 +2346,7 @@ app.post('/api/importacoes/xlsx/preview', verificarToken, async (req, res) => {
 app.post('/api/importacoes/xlsx/confirmar', verificarToken, async (req, res) => {
   try {
     limparPreviewsExpirados();
-    const { tokenPreview, acao, mapeamentoCategorias = [], conciliacoesConfirmadas = [], conciliacoesIgnoradas = [] } = req.body;
+    const { tokenPreview, acao, mapeamentoContas = [], mapeamentoCategorias = [], conciliacoesConfirmadas = [], conciliacoesIgnoradas = [] } = req.body;
     const preview = previewsImportacao.get(tokenPreview);
 
     if (!preview || preview.usuarioId !== req.usuario.usuario_id) {
@@ -2249,38 +2366,52 @@ app.post('/api/importacoes/xlsx/confirmar', verificarToken, async (req, res) => 
     }
 
     validarMapeamentoCategoriasResolvido(preview, mapeamentoCategorias);
+    const contasResolvidas = await resolverMapeamentoContasConfirmacao(req.usuario.usuario_id, preview, mapeamentoContas);
 
     let inseridas = 0;
     let atualizadas = 0;
-    let ignoradas = preview.semAlteracao.length;
-    const contaIdConfirmada = await resolverContaConfirmacao(req.usuario.usuario_id, preview);
+    let ignoradas = 0;
+    const transacaoPorTempId = new Map();
 
-    if (importarNovas) {
-      for (const tx of preview.novas) {
-        const txConfirmada = await prepararTransacaoConfirmacao(req.usuario.usuario_id, tx, mapeamentoCategorias);
-        const txComConta = { ...txConfirmada, conta_id: contaIdConfirmada, hash_transacao: gerarHashTransacao(txConfirmada, contaIdConfirmada) };
-        const transacaoInseridaId = await inserirTransacaoImportacao(contaIdConfirmada, txComConta);
-        if (transacaoInseridaId) {
-          tx.transacaoIdConfirmada = transacaoInseridaId;
-          inseridas++;
+    for (const tx of (preview.transacoesValidadas || [])) {
+      const contaResolvida = contasResolvidas.get(String(tx.conta || '').trim());
+      if (!contaResolvida) throw new Error(`Resolva a conta da planilha "${tx.conta}" antes de concluir a importação.`);
+
+      const txConfirmada = await prepararTransacaoConfirmacao(req.usuario.usuario_id, tx, mapeamentoCategorias);
+      const hash = gerarHashTransacao(txConfirmada, contaResolvida.id);
+      const existente = await buscarTransacaoExistenteParaImportacao(req.usuario.usuario_id, txConfirmada, contaResolvida.id, hash);
+      const txComConta = { ...txConfirmada, conta_id: contaResolvida.id, conta_nome: contaResolvida.nome, hash_transacao: hash };
+
+      if (!existente) {
+        if (importarNovas) {
+          const transacaoInseridaId = await inserirTransacaoImportacao(contaResolvida.id, txComConta);
+          if (transacaoInseridaId) {
+            tx.transacaoIdConfirmada = transacaoInseridaId;
+            inseridas++;
+            transacaoPorTempId.set(tx.hash_transacao || hash, transacaoInseridaId);
+          }
+        } else {
+          ignoradas++;
         }
+        continue;
       }
-    }
 
-    if (atualizarExistentes) {
-      for (const tx of preview.comAlteracao) {
-        const txConfirmada = await prepararTransacaoConfirmacao(req.usuario.usuario_id, tx, mapeamentoCategorias);
-        const txComConta = { ...txConfirmada, conta_id: contaIdConfirmada, hash_transacao: gerarHashTransacao(txConfirmada, contaIdConfirmada) };
-        if (await atualizarTransacaoImportacao(req.usuario.usuario_id, txComConta)) {
-          tx.transacaoIdConfirmada = tx.transacaoId;
-          atualizadas++;
-        }
+      const categoriasComparacao = {
+        categoriaMacroId: txComConta.categoria_macro_id,
+        categoriaDetalhadaId: txComConta.categoria_detalhada_id,
+      };
+      const alteracoes = montarAlteracoesTransacao(existente, valoresComparaveis(txComConta, categoriasComparacao, contaResolvida.id));
+      tx.transacaoIdConfirmada = existente.id;
+      transacaoPorTempId.set(tx.hash_transacao || hash, existente.id);
+
+      if (alteracoes.length > 0 && atualizarExistentes) {
+        if (await atualizarTransacaoImportacao(req.usuario.usuario_id, { ...txComConta, transacaoId: existente.id })) atualizadas++;
+      } else {
+        ignoradas++;
       }
     }
 
     let conciliacoesAplicadas = 0;
-    const transacoesConfirmadas = [...preview.novas, ...preview.comAlteracao, ...preview.semAlteracao];
-    const transacaoPorTempId = new Map(transacoesConfirmadas.map((tx) => [tx.hash_transacao, tx.transacaoIdConfirmada || tx.transacaoId]));
 
     for (const sugestao of conciliacoesIgnoradas) {
       const transacaoId = sugestao.transacaoId || transacaoPorTempId.get(sugestao.transacaoTempId);
@@ -2315,7 +2446,7 @@ app.post('/api/importacoes/xlsx/confirmar', verificarToken, async (req, res) => 
       mensagem: `Importação confirmada: ${inseridas} inserida(s), ${atualizadas} atualizada(s), ${ignoradas} sem alteração e ${conciliacoesAplicadas} conciliação(ões) aplicada(s).`,
     });
   } catch (error) {
-    const status = /Resolva as categorias pendentes|Selecione|Informe|Categoria/.test(error.message || '') ? 400 : 500;
+    const status = /Resolva|Selecione|Informe|Categoria|Conta/.test(error.message || '') ? 400 : 500;
     res.status(status).json({ erro: 'Erro ao confirmar importação.', detalhes: error.message });
   }
 });
@@ -3409,6 +3540,12 @@ async function buscarConta(usuarioId, nomePasta) {
     [usuarioId, nomePasta]
   );
   return result.rows[0]?.id;
+}
+
+async function buscarContaNormalizada(usuarioId, nomeConta) {
+  const contas = await listarContasUsuario(usuarioId);
+  const normalizado = normalizarNomeConta(nomeConta);
+  return contas.find((conta) => normalizarNomeConta(conta.nome) === normalizado)?.id || null;
 }
 
 async function criarConta(usuarioId, nomePasta) {
