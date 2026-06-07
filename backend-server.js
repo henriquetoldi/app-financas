@@ -113,6 +113,12 @@ async function inicializarBanco() {
     )
   `);
 
+  await pool.query(`
+    ALTER TABLE contas
+      ADD COLUMN IF NOT EXISTS saldo_inicial DECIMAL(12, 2) DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS data_saldo_inicial DATE
+  `);
+
   await pool.query('CREATE INDEX IF NOT EXISTS idx_contas_usuario ON contas(usuario_id)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_contas_banco_tipo ON contas(banco, tipo)');
 
@@ -389,6 +395,26 @@ async function inicializarBanco() {
   await pool.query('CREATE INDEX IF NOT EXISTS idx_conciliacoes_transacao ON conciliacoes(transacao_id)');
   await pool.query("CREATE UNIQUE INDEX IF NOT EXISTS idx_conciliacoes_provisao_ativa ON conciliacoes(provisao_id) WHERE status = 'CONFIRMADA'");
   await pool.query("CREATE UNIQUE INDEX IF NOT EXISTS idx_conciliacoes_transacao_ativa ON conciliacoes(transacao_id) WHERE status = 'CONFIRMADA'");
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS conferencias_saldo (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      usuario_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+      conta_id UUID NOT NULL REFERENCES contas(id) ON DELETE CASCADE,
+      data_referencia DATE NOT NULL,
+      saldo_real DECIMAL(12, 2) NOT NULL,
+      saldo_calculado DECIMAL(12, 2) NOT NULL,
+      diferenca DECIMAL(12, 2) NOT NULL,
+      status VARCHAR(20) NOT NULL DEFAULT 'PENDENTE',
+      observacao TEXT,
+      criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT chk_conferencias_saldo_status CHECK (status IN ('CONCILIADO', 'DIVERGENTE', 'PENDENTE', 'EM_ANALISE'))
+    )
+  `);
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_conferencias_saldo_usuario ON conferencias_saldo(usuario_id)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_conferencias_saldo_conta_data ON conferencias_saldo(conta_id, data_referencia DESC)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_conferencias_saldo_status ON conferencias_saldo(status)');
 
   await pool.query(`
     DO $$
@@ -3530,6 +3556,340 @@ app.patch('/api/regras-categorizacao/:id/desativar', verificarToken, async (req,
   }
 });
 
+
+// ============================================================================
+// ROTAS: CONFERÊNCIA DE SALDOS BANCÁRIOS
+// ============================================================================
+
+function arredondarMoeda(valor) {
+  return Math.round((Number(valor || 0) + Number.EPSILON) * 100) / 100;
+}
+
+function formatarMoedaDiagnostico(valor) {
+  return Number(valor || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+}
+
+function dataISO(data) {
+  if (!data) return null;
+  return data instanceof Date ? data.toISOString().slice(0, 10) : String(data).slice(0, 10);
+}
+
+async function obterContaDoUsuario(usuarioId, contaId) {
+  const result = await pool.query(
+    `SELECT id, nome, saldo_inicial, data_saldo_inicial
+     FROM contas
+     WHERE id = $1 AND usuario_id = $2 AND ativo = true`,
+    [contaId, usuarioId]
+  );
+  return result.rows[0] || null;
+}
+
+async function calcularSaldoContaAteData(usuarioId, contaId, dataReferencia) {
+  if (!contaId || !dataReferencia) throw new Error('Informe contaId e dataReferencia para calcular o saldo.');
+  const conta = await obterContaDoUsuario(usuarioId, contaId);
+  if (!conta) throw new Error('Conta não encontrada para este usuário.');
+
+  const dataSaldoInicial = dataISO(conta.data_saldo_inicial);
+  if (!dataSaldoInicial) {
+    return {
+      contaId: conta.id,
+      contaNome: conta.nome,
+      dataReferencia,
+      saldoInicial: Number(conta.saldo_inicial || 0),
+      dataSaldoInicial: null,
+      saldoInicialConfigurado: false,
+      totalCreditos: 0,
+      totalDebitos: 0,
+      saldoCalculado: null,
+      mensagem: 'Esta conta ainda não possui saldo inicial configurado. Cadastre um saldo inicial para permitir a conferência.',
+    };
+  }
+
+  const totais = await pool.query(
+    `SELECT
+       COALESCE(SUM(CASE WHEN tipo = 'CREDITO' THEN valor ELSE 0 END), 0) AS total_creditos,
+       COALESCE(SUM(CASE WHEN tipo = 'DEBITO' THEN valor ELSE 0 END), 0) AS total_debitos,
+       COUNT(*) AS quantidade_transacoes
+     FROM transacoes
+     WHERE conta_id = $1
+       AND data >= $2
+       AND data <= $3
+       AND deletado_em IS NULL`,
+    [contaId, dataSaldoInicial, dataReferencia]
+  );
+
+  const saldoInicial = Number(conta.saldo_inicial || 0);
+  const totalCreditos = Number(totais.rows[0]?.total_creditos || 0);
+  const totalDebitos = Number(totais.rows[0]?.total_debitos || 0);
+  const saldoCalculado = arredondarMoeda(saldoInicial + totalCreditos - totalDebitos);
+
+  return {
+    contaId: conta.id,
+    contaNome: conta.nome,
+    dataReferencia,
+    saldoInicial,
+    dataSaldoInicial,
+    saldoInicialConfigurado: true,
+    totalCreditos: arredondarMoeda(totalCreditos),
+    totalDebitos: arredondarMoeda(totalDebitos),
+    saldoCalculado,
+    quantidadeTransacoes: Number(totais.rows[0]?.quantidade_transacoes || 0),
+  };
+}
+
+function transacaoResumoDiagnostico(tx) {
+  return {
+    id: tx.id,
+    data: dataISO(tx.data),
+    descricao: tx.descricao,
+    valor: Number(tx.valor || 0),
+    tipo: tx.tipo,
+    contaId: tx.conta_id,
+    contaNome: tx.conta_nome,
+  };
+}
+
+function adicionarDiagnostico(lista, diagnostico) {
+  lista.push({
+    severidade: diagnostico.severidade || 'MEDIA',
+    transacoesRelacionadas: diagnostico.transacoesRelacionadas || [],
+    acoesSugeridas: diagnostico.acoesSugeridas || [],
+    ...diagnostico,
+  });
+}
+
+async function analisarDivergenciaSaldo(usuarioId, { contaId, dataReferencia, saldoReal, saldoCalculado, diferenca }) {
+  const conta = await obterContaDoUsuario(usuarioId, contaId);
+  if (!conta) throw new Error('Conta não encontrada para este usuário.');
+
+  const dataSaldoInicial = dataISO(conta.data_saldo_inicial) || dataReferencia;
+  const diferencaNumerica = arredondarMoeda(Number(diferenca ?? (Number(saldoReal || 0) - Number(saldoCalculado || 0))));
+  const absDiferenca = Math.abs(diferencaNumerica);
+  const toleranciaValor = Math.max(0.05, absDiferenca * 0.02);
+  const diagnosticos = [];
+
+  const transacoesConta = await pool.query(
+    `SELECT t.*, c.nome AS conta_nome
+     FROM transacoes t
+     JOIN contas c ON c.id = t.conta_id
+     WHERE t.conta_id = $1
+       AND t.data >= ($2::date - INTERVAL '3 days')
+       AND t.data <= ($3::date + INTERVAL '3 days')
+       AND t.deletado_em IS NULL
+     ORDER BY t.data, t.valor, t.descricao`,
+    [contaId, dataSaldoInicial, dataReferencia]
+  );
+
+  const dentroPeriodo = transacoesConta.rows.filter((tx) => dataISO(tx.data) >= dataSaldoInicial && dataISO(tx.data) <= dataReferencia);
+
+  for (let i = 0; i < dentroPeriodo.length; i++) {
+    for (let j = i + 1; j < dentroPeriodo.length; j++) {
+      const a = dentroPeriodo[i];
+      const b = dentroPeriodo[j];
+      if (dataISO(a.data) !== dataISO(b.data) || a.tipo !== b.tipo || Math.abs(Number(a.valor) - Number(b.valor)) > 0.01) continue;
+      if (similaridadeTextoConciliacao(a.descricao, b.descricao) < 0.55) continue;
+      adicionarDiagnostico(diagnosticos, {
+        tipo: 'POSSIVEL_DUPLICIDADE',
+        severidade: 'ALTA',
+        descricao: `Encontramos duas transações parecidas em ${dataISO(a.data)} no valor de ${formatarMoedaDiagnostico(a.valor)} que podem estar duplicadas.`,
+        transacoesRelacionadas: [transacaoResumoDiagnostico(a), transacaoResumoDiagnostico(b)],
+        acoesSugeridas: ['Abra as transações relacionadas e confirme se uma delas deve ser excluída ou ignorada.'],
+      });
+      i = dentroPeriodo.length;
+      break;
+    }
+  }
+
+  if (absDiferenca > 0) {
+    const valorProximo = dentroPeriodo.find((tx) => Math.abs(Number(tx.valor) - absDiferenca) <= toleranciaValor);
+    adicionarDiagnostico(diagnosticos, {
+      tipo: 'POSSIVEL_TRANSACAO_AUSENTE',
+      severidade: valorProximo ? 'MEDIA' : 'BAIXA',
+      descricao: valorProximo
+        ? `A diferença é próxima de uma transação já registrada no valor de ${formatarMoedaDiagnostico(valorProximo.valor)}; pode existir lançamento ausente ou duplicado de valor semelhante.`
+        : `A diferença de ${formatarMoedaDiagnostico(absDiferenca)} pode indicar lançamento ausente, taxa, ajuste manual ou item não importado no extrato.`,
+      transacoesRelacionadas: valorProximo ? [transacaoResumoDiagnostico(valorProximo)] : [],
+      acoesSugeridas: ['Compare o extrato bancário com as transações importadas nesse período.'],
+    });
+
+    const sinalInvertido = dentroPeriodo.find((tx) => Math.abs((Number(tx.valor) * 2) - absDiferenca) <= Math.max(0.05, absDiferenca * 0.02));
+    if (sinalInvertido) {
+      adicionarDiagnostico(diagnosticos, {
+        tipo: 'POSSIVEL_ERRO_DE_SINAL',
+        severidade: 'ALTA',
+        descricao: `A diferença é compatível com uma transação de ${formatarMoedaDiagnostico(sinalInvertido.valor)} lançada com tipo invertido entre crédito e débito.`,
+        transacoesRelacionadas: [transacaoResumoDiagnostico(sinalInvertido)],
+        acoesSugeridas: ['Confira se o tipo da transação relacionada está correto.'],
+      });
+    }
+  }
+
+  const foraPeriodo = transacoesConta.rows.filter((tx) => dataISO(tx.data) > dataReferencia || dataISO(tx.data) < dataSaldoInicial).slice(0, 5);
+  if (foraPeriodo.length > 0) {
+    adicionarDiagnostico(diagnosticos, {
+      tipo: 'POSSIVEL_DATA_ERRADA',
+      severidade: 'MEDIA',
+      descricao: 'Há transações próximas ao início/fim do período que podem ter sido lançadas com data diferente do extrato bancário.',
+      transacoesRelacionadas: foraPeriodo.map(transacaoResumoDiagnostico),
+      acoesSugeridas: ['Revise a data das transações próximas à data de referência.'],
+    });
+  }
+
+  const outrasContas = await pool.query(
+    `SELECT t.*, c.nome AS conta_nome
+     FROM transacoes t
+     JOIN contas c ON c.id = t.conta_id
+     WHERE c.usuario_id = $1
+       AND t.conta_id <> $2
+       AND t.data >= $3::date
+       AND t.data <= $4::date
+       AND ABS(t.valor - $5) <= $6
+       AND t.deletado_em IS NULL
+     ORDER BY t.data DESC
+     LIMIT 8`,
+    [usuarioId, contaId, dataSaldoInicial, dataReferencia, absDiferenca, Math.max(1, toleranciaValor)]
+  );
+  if (outrasContas.rows.length > 0) {
+    adicionarDiagnostico(diagnosticos, {
+      tipo: 'POSSIVEL_CONTA_ERRADA',
+      severidade: 'MEDIA',
+      descricao: 'Encontramos transações de valor parecido em outras contas; alguma movimentação pode ter sido importada na conta errada.',
+      transacoesRelacionadas: outrasContas.rows.map(transacaoResumoDiagnostico),
+      acoesSugeridas: ['Confira se as transações relacionadas pertencem à conta correta.'],
+    });
+  }
+
+  const transferencias = await pool.query(
+    `SELECT d.id AS debito_id, d.data AS debito_data, d.descricao AS debito_descricao, d.valor AS debito_valor,
+            cd.nome AS debito_conta_nome, cr.id AS credito_id, cr.data AS credito_data,
+            cr.descricao AS credito_descricao, cr.valor AS credito_valor, cc.nome AS credito_conta_nome
+     FROM transacoes d
+     JOIN contas cd ON cd.id = d.conta_id
+     JOIN transacoes cr ON cr.tipo = 'CREDITO'
+       AND cr.conta_id <> d.conta_id
+       AND ABS(cr.valor - d.valor) <= 0.01
+       AND ABS(cr.data - d.data) <= 3
+       AND cr.deletado_em IS NULL
+       AND COALESCE(cr.eh_transferencia_interna, false) = false
+     JOIN contas cc ON cc.id = cr.conta_id AND cc.usuario_id = cd.usuario_id
+     WHERE cd.usuario_id = $1
+       AND d.conta_id = $2
+       AND d.tipo = 'DEBITO'
+       AND d.data >= $3::date
+       AND d.data <= $4::date
+       AND d.deletado_em IS NULL
+       AND COALESCE(d.eh_transferencia_interna, false) = false
+     LIMIT 5`,
+    [usuarioId, contaId, dataSaldoInicial, dataReferencia]
+  );
+  if (transferencias.rows.length > 0) {
+    const relacionados = transferencias.rows.flatMap((tx) => ([
+      { id: tx.debito_id, data: dataISO(tx.debito_data), descricao: tx.debito_descricao, valor: Number(tx.debito_valor), tipo: 'DEBITO', contaNome: tx.debito_conta_nome },
+      { id: tx.credito_id, data: dataISO(tx.credito_data), descricao: tx.credito_descricao, valor: Number(tx.credito_valor), tipo: 'CREDITO', contaNome: tx.credito_conta_nome },
+    ]));
+    adicionarDiagnostico(diagnosticos, {
+      tipo: 'POSSIVEL_TRANSFERENCIA_INTERNA',
+      severidade: 'BAIXA',
+      descricao: 'Encontramos pares de débito/crédito entre contas que parecem transferências internas ainda não marcadas.',
+      transacoesRelacionadas: relacionados,
+      acoesSugeridas: ['Marque como transferência interna se o par representar movimentação entre suas contas.'],
+    });
+  }
+
+  const resumoIA = diagnosticos.length > 0
+    ? `Encontramos ${diagnosticos.length} hipótese(s) para explicar a diferença de ${formatarMoedaDiagnostico(diferencaNumerica)}. Priorize os itens de severidade alta e compare com o extrato bancário.`
+    : `Não encontramos uma causa provável automática para a diferença de ${formatarMoedaDiagnostico(diferencaNumerica)}. Verifique lançamentos manuais, taxas ou transações não importadas.`;
+
+  return { diferenca: diferencaNumerica, diagnosticos, resumoIA };
+}
+
+app.patch('/api/contas/:id/saldo-inicial', verificarToken, async (req, res) => {
+  try {
+    const { saldoInicial, saldo_inicial, dataSaldoInicial, data_saldo_inicial } = req.body;
+    const saldo = Number(saldoInicial ?? saldo_inicial ?? 0);
+    const data = dataSaldoInicial || data_saldo_inicial;
+    if (!Number.isFinite(saldo)) return res.status(400).json({ erro: 'Saldo inicial inválido.' });
+    if (!data) return res.status(400).json({ erro: 'Informe a data do saldo inicial.' });
+
+    const result = await pool.query(
+      `UPDATE contas
+       SET saldo_inicial = $1, data_saldo_inicial = $2, atualizado_em = NOW()
+       WHERE id = $3 AND usuario_id = $4 AND ativo = true
+       RETURNING id, nome, saldo_inicial, data_saldo_inicial`,
+      [saldo, data, req.params.id, req.usuario.usuario_id]
+    );
+    if (!result.rows[0]) return res.status(404).json({ erro: 'Conta não encontrada para este usuário.' });
+    res.json({ conta: result.rows[0] });
+  } catch (error) {
+    res.status(500).json({ erro: 'Erro ao salvar saldo inicial.', detalhes: error.message });
+  }
+});
+
+app.get('/api/conferencia-saldos/calcular', verificarToken, async (req, res) => {
+  try {
+    const calculo = await calcularSaldoContaAteData(req.usuario.usuario_id, req.query.contaId, req.query.dataReferencia);
+    res.json(calculo);
+  } catch (error) {
+    res.status(/Informe|Conta/.test(error.message || '') ? 400 : 500).json({ erro: 'Erro ao calcular saldo.', detalhes: error.message });
+  }
+});
+
+app.get('/api/conferencia-saldos/historico', verificarToken, async (req, res) => {
+  try {
+    const valores = [req.usuario.usuario_id];
+    const where = ['cs.usuario_id = $1'];
+    if (req.query.contaId && req.query.contaId !== 'todas') {
+      valores.push(req.query.contaId);
+      where.push(`cs.conta_id = $${valores.length}`);
+    }
+    const result = await pool.query(
+      `SELECT cs.*, c.nome AS conta_nome
+       FROM conferencias_saldo cs
+       JOIN contas c ON c.id = cs.conta_id
+       WHERE ${where.join(' AND ')}
+       ORDER BY cs.data_referencia DESC, cs.criado_em DESC
+       LIMIT 100`,
+      valores
+    );
+    res.json({ conferencias: result.rows });
+  } catch (error) {
+    res.status(500).json({ erro: 'Erro ao listar histórico de conferências.', detalhes: error.message });
+  }
+});
+
+app.post('/api/conferencia-saldos', verificarToken, async (req, res) => {
+  try {
+    const { contaId, dataReferencia, saldoReal, observacao, tolerancia = 0.01 } = req.body;
+    const calculo = await calcularSaldoContaAteData(req.usuario.usuario_id, contaId, dataReferencia);
+    if (!calculo.saldoInicialConfigurado) return res.status(400).json({ erro: calculo.mensagem, calculo });
+
+    const saldoRealNumero = Number(saldoReal);
+    if (!Number.isFinite(saldoRealNumero)) return res.status(400).json({ erro: 'Informe um saldo real válido.' });
+
+    const diferenca = arredondarMoeda(saldoRealNumero - Number(calculo.saldoCalculado || 0));
+    const status = Math.abs(diferenca) <= Math.abs(Number(tolerancia || 0.01)) ? 'CONCILIADO' : 'DIVERGENTE';
+    const id = crypto.randomUUID();
+    const result = await pool.query(
+      `INSERT INTO conferencias_saldo (id, usuario_id, conta_id, data_referencia, saldo_real, saldo_calculado, diferenca, status, observacao, criado_em, atualizado_em)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
+       RETURNING *`,
+      [id, req.usuario.usuario_id, contaId, dataReferencia, saldoRealNumero, calculo.saldoCalculado, diferenca, status, observacao || null]
+    );
+    res.json({ ...result.rows[0], calculo });
+  } catch (error) {
+    res.status(/Informe|Conta|Saldo/.test(error.message || '') ? 400 : 500).json({ erro: 'Erro ao salvar conferência de saldo.', detalhes: error.message });
+  }
+});
+
+app.post('/api/conferencia-saldos/analisar', verificarToken, async (req, res) => {
+  try {
+    const resultado = await analisarDivergenciaSaldo(req.usuario.usuario_id, req.body || {});
+    res.json(resultado);
+  } catch (error) {
+    res.status(/Informe|Conta/.test(error.message || '') ? 400 : 500).json({ erro: 'Erro ao analisar divergência.', detalhes: error.message });
+  }
+});
+
 // ============================================================================
 // ROTAS: CONTAS
 // ============================================================================
@@ -3577,10 +3937,19 @@ app.get('/api/contas', verificarToken, async (req, res) => {
            WHERE conta_id = $1`,
           [conta.id]
         );
+        const conferenciaResult = await pool.query(
+          `SELECT data_referencia, status, diferenca
+           FROM conferencias_saldo
+           WHERE conta_id = $1 AND usuario_id = $2
+           ORDER BY data_referencia DESC, criado_em DESC
+           LIMIT 1`,
+          [conta.id, req.usuario.usuario_id]
+        );
 
         return {
           ...conta,
-          saldo: parseFloat(saldoResult.rows[0]?.saldo || 0)
+          saldo: parseFloat(saldoResult.rows[0]?.saldo || 0),
+          ultima_conferencia: conferenciaResult.rows[0] || null,
         };
       })
     );

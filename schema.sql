@@ -55,6 +55,7 @@ CREATE TABLE contas (
   -- Status
   ativo BOOLEAN DEFAULT true,
   saldo_inicial DECIMAL(12, 2) DEFAULT 0,
+  data_saldo_inicial DATE,
   saldo_atual DECIMAL(12, 2),
   
   criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -115,6 +116,28 @@ CREATE INDEX idx_transacoes_tipo ON transacoes(tipo);
 CREATE INDEX idx_transacoes_hash ON transacoes(hash_transacao);
 CREATE INDEX idx_transacoes_importacao ON transacoes(importacao_id);
 CREATE INDEX idx_transacoes_conta_data ON transacoes(conta_id, data);
+
+-- ============================================================================
+-- 3.1. TABELA DE CONFERÊNCIAS DE SALDO
+-- ============================================================================
+
+CREATE TABLE conferencias_saldo (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  usuario_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+  conta_id UUID NOT NULL REFERENCES contas(id) ON DELETE CASCADE,
+  data_referencia DATE NOT NULL,
+  saldo_real DECIMAL(12, 2) NOT NULL,
+  saldo_calculado DECIMAL(12, 2) NOT NULL,
+  diferenca DECIMAL(12, 2) NOT NULL,
+  status VARCHAR(20) NOT NULL DEFAULT 'PENDENTE' CHECK (status IN ('CONCILIADO', 'DIVERGENTE', 'PENDENTE', 'EM_ANALISE')),
+  observacao TEXT,
+  criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_conferencias_saldo_usuario ON conferencias_saldo(usuario_id);
+CREATE INDEX idx_conferencias_saldo_conta_data ON conferencias_saldo(conta_id, data_referencia DESC);
+CREATE INDEX idx_conferencias_saldo_status ON conferencias_saldo(status);
 
 -- ============================================================================
 -- 4. TABELAS DE CATEGORIAS

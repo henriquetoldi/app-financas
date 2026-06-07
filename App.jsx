@@ -1563,6 +1563,10 @@ function Dashboard({ usuario, token, onLogout }) {
     }
   };
 
+  if (modo === 'conferencia-saldos') {
+    return <TelaConferenciaSaldos contas={contas} token={token} onVoltar={() => setModo('home')} onAtualizarContas={carregarContas} />;
+  }
+
   if (modo === 'provisoes') {
     return <TelaProvisoes contas={contas} token={token} onVoltar={() => setModo('home')} />;
   }
@@ -1583,6 +1587,12 @@ function Dashboard({ usuario, token, onLogout }) {
   const insightsDashboard = resumoDashboard?.insights || {};
   const saldoLiquido = Number(kpisDashboard.saldoLiquido || 0);
   const provisoesDashboard = kpisDashboard.provisoes || {};
+  const contasSemConferenciaRecente = contas.filter((conta) => {
+    const data = conta.ultima_conferencia?.data_referencia;
+    if (!data) return true;
+    const dias = Math.floor((Date.now() - new Date(data).getTime()) / (1000 * 60 * 60 * 24));
+    return dias > 30;
+  });
 
   return (
     <div style={{ minHeight: '100vh', background: '#f5f5f5' }}>
@@ -1687,6 +1697,12 @@ function Dashboard({ usuario, token, onLogout }) {
                         📌 Provisões
                       </button>
                       <button
+                        onClick={() => setModo('conferencia-saldos')}
+                        style={{ background: '#1d4ed8', color: 'white', border: 'none', padding: '10px 16px', borderRadius: '8px', cursor: 'pointer' }}
+                      >
+                        🏦 Conferir saldos
+                      </button>
+                      <button
                         onClick={() => setModo('importar')}
                         style={{ background: '#667eea', color: 'white', border: 'none', padding: '10px 16px', borderRadius: '8px', cursor: 'pointer' }}
                       >
@@ -1694,6 +1710,13 @@ function Dashboard({ usuario, token, onLogout }) {
                       </button>
                     </div>
                   </div>
+
+                  {contasSemConferenciaRecente.length > 0 && (
+                    <div style={{ background: '#fffbeb', border: '1px solid #fde68a', color: '#92400e', borderRadius: '10px', padding: '12px', marginBottom: '14px', display: 'flex', justifyContent: 'space-between', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
+                      <span>{contasSemConferenciaRecente[0].nome} {contasSemConferenciaRecente[0].ultima_conferencia ? 'não é conferida há mais de 30 dias.' : 'ainda não possui conferência de saldo.'}</span>
+                      <button onClick={() => setModo('conferencia-saldos')} style={{ background: '#1d4ed8', color: 'white', border: 'none', padding: '8px 12px', borderRadius: '8px', cursor: 'pointer' }}>Conferir saldos</button>
+                    </div>
+                  )}
 
                   <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '14px' }}>
                     {[
@@ -1874,6 +1897,7 @@ function Dashboard({ usuario, token, onLogout }) {
                           <span>Período: {resumoConta ? `${resumoConta.quantidadeTransacoes} transação(ões)` : 'sem movimentação'}</span>
                           <span>Receitas: {formatarMoeda(resumoConta?.receitas || 0)}</span>
                           <span>Despesas: {formatarMoeda(resumoConta?.despesas || 0)}</span>
+                          <span>Última conferência: {conta.ultima_conferencia ? `${formatarData(conta.ultima_conferencia.data_referencia)} • ${conta.ultima_conferencia.status}` : 'não realizada'}</span>
                         </div>
 
                         <p style={{ color: '#999', fontSize: '12px' }}>
@@ -1950,6 +1974,273 @@ function Dashboard({ usuario, token, onLogout }) {
 // ============================================================================
 // TELA DE PROVISÕES
 // ============================================================================
+
+
+function badgeStatusConferencia(status) {
+  const mapa = {
+    CONCILIADO: ['#dcfce7', '#166534'],
+    DIVERGENTE: ['#fee2e2', '#991b1b'],
+    PENDENTE: ['#fef3c7', '#92400e'],
+    EM_ANALISE: ['#dbeafe', '#1d4ed8'],
+  };
+  return mapa[status] || ['#e5e7eb', '#374151'];
+}
+
+function TelaConferenciaSaldos({ contas = [], token, onVoltar, onAtualizarContas }) {
+  const contaInicial = contas[0]?.id || '';
+  const [contaId, setContaId] = useState(contaInicial);
+  const [dataReferencia, setDataReferencia] = useState(dataLocalISO(new Date()));
+  const [periodoInicial, setPeriodoInicial] = useState('');
+  const [periodoFinal, setPeriodoFinal] = useState(dataLocalISO(new Date()));
+  const [tolerancia, setTolerancia] = useState('0,01');
+  const [saldoReal, setSaldoReal] = useState('');
+  const [observacao, setObservacao] = useState('');
+  const [saldoInicial, setSaldoInicial] = useState('0,00');
+  const [dataSaldoInicial, setDataSaldoInicial] = useState(dataLocalISO(new Date()));
+  const [calculo, setCalculo] = useState(null);
+  const [conferencia, setConferencia] = useState(null);
+  const [diagnostico, setDiagnostico] = useState(null);
+  const [historico, setHistorico] = useState([]);
+  const [carregando, setCarregando] = useState(false);
+
+  const authHeaders = { Authorization: `Bearer ${token}` };
+  const contaSelecionada = contas.find((conta) => conta.id === contaId);
+
+  useEffect(() => {
+    if (contaSelecionada) {
+      setSaldoInicial(String(contaSelecionada.saldo_inicial ?? contaSelecionada.saldoInicial ?? 0).replace('.', ','));
+      setDataSaldoInicial((contaSelecionada.data_saldo_inicial || contaSelecionada.dataSaldoInicial || dataLocalISO(new Date())).slice(0, 10));
+      setPeriodoInicial((contaSelecionada.data_saldo_inicial || contaSelecionada.dataSaldoInicial || '').slice(0, 10));
+    }
+  }, [contaId, contas.length]);
+
+  useEffect(() => {
+    carregarHistorico();
+  }, [contaId]);
+
+  const numeroFormulario = (valor, fallback = 0) => {
+    const parse = parseValorMonetario(valor);
+    return Number.isFinite(parse.valor) ? parse.valor : fallback;
+  };
+
+  const salvarSaldoInicial = async () => {
+    if (!contaId) return alert('Selecione uma conta.');
+    if (!dataSaldoInicial) return alert('Informe a data do saldo inicial.');
+    setCarregando(true);
+    try {
+      await axios.patch(`${API_URL}/contas/${contaId}/saldo-inicial`, {
+        saldoInicial: numeroFormulario(saldoInicial, 0),
+        dataSaldoInicial,
+      }, { headers: authHeaders });
+      alert('Saldo inicial salvo.');
+      await onAtualizarContas?.();
+      await calcularSaldo();
+    } catch (error) {
+      alert(error.response?.data?.detalhes || error.response?.data?.erro || error.message);
+    } finally {
+      setCarregando(false);
+    }
+  };
+
+  const calcularSaldo = async () => {
+    if (!contaId) return alert('Selecione uma conta.');
+    if (!dataReferencia) return alert('Informe a data de referência.');
+    setCarregando(true);
+    setDiagnostico(null);
+    try {
+      const response = await axios.get(`${API_URL}/conferencia-saldos/calcular`, {
+        headers: authHeaders,
+        params: { contaId, dataReferencia },
+      });
+      setCalculo(response.data);
+      setPeriodoInicial(response.data.dataSaldoInicial || periodoInicial);
+      setPeriodoFinal(response.data.dataReferencia || dataReferencia);
+    } catch (error) {
+      alert(error.response?.data?.detalhes || error.response?.data?.erro || error.message);
+    } finally {
+      setCarregando(false);
+    }
+  };
+
+  const salvarConferencia = async () => {
+    if (!calculo?.saldoInicialConfigurado) return alert('Cadastre o saldo inicial antes de salvar a conferência.');
+    const saldoRealNumero = numeroFormulario(saldoReal, NaN);
+    if (!Number.isFinite(saldoRealNumero)) return alert('Informe um saldo real válido.');
+    setCarregando(true);
+    try {
+      const response = await axios.post(`${API_URL}/conferencia-saldos`, {
+        contaId,
+        dataReferencia,
+        saldoReal: saldoRealNumero,
+        observacao,
+        tolerancia: Math.abs(numeroFormulario(tolerancia, 0.01)),
+      }, { headers: authHeaders });
+      setConferencia(response.data);
+      await carregarHistorico();
+      if (response.data.status === 'DIVERGENTE') {
+        await analisarDivergencia(response.data);
+      } else {
+        setDiagnostico(null);
+      }
+    } catch (error) {
+      alert(error.response?.data?.detalhes || error.response?.data?.erro || error.message);
+    } finally {
+      setCarregando(false);
+    }
+  };
+
+  const analisarDivergencia = async (base = conferencia) => {
+    const saldoCalculado = Number(base?.saldo_calculado ?? base?.saldoCalculado ?? calculo?.saldoCalculado ?? 0);
+    const saldoRealNumero = Number(base?.saldo_real ?? base?.saldoReal ?? numeroFormulario(saldoReal, 0));
+    const diferenca = Number(base?.diferenca ?? (saldoRealNumero - saldoCalculado));
+    setCarregando(true);
+    try {
+      const response = await axios.post(`${API_URL}/conferencia-saldos/analisar`, {
+        contaId,
+        dataReferencia,
+        saldoReal: saldoRealNumero,
+        saldoCalculado,
+        diferenca,
+      }, { headers: authHeaders });
+      setDiagnostico(response.data);
+    } catch (error) {
+      alert(error.response?.data?.detalhes || error.response?.data?.erro || error.message);
+    } finally {
+      setCarregando(false);
+    }
+  };
+
+  const carregarHistorico = async () => {
+    if (!contaId) return;
+    try {
+      const response = await axios.get(`${API_URL}/conferencia-saldos/historico`, {
+        headers: authHeaders,
+        params: { contaId },
+      });
+      setHistorico(response.data.conferencias || []);
+    } catch (error) {
+      console.error('Erro ao carregar histórico de conferências:', error);
+    }
+  };
+
+  const resultadoAtual = conferencia || (calculo && Number.isFinite(numeroFormulario(saldoReal, NaN)) ? {
+    saldo_real: numeroFormulario(saldoReal, 0),
+    saldo_calculado: calculo.saldoCalculado,
+    diferenca: Number.isFinite(Number(calculo.saldoCalculado)) ? numeroFormulario(saldoReal, 0) - Number(calculo.saldoCalculado) : null,
+    status: Math.abs((numeroFormulario(saldoReal, 0) - Number(calculo.saldoCalculado || 0))) <= Math.abs(numeroFormulario(tolerancia, 0.01)) ? 'CONCILIADO' : 'DIVERGENTE',
+  } : null);
+
+  return (
+    <div style={{ minHeight: '100vh', background: '#f8fafc', padding: '20px' }}>
+      <button onClick={onVoltar} style={{ background: '#e5e7eb', border: 'none', padding: '8px 12px', borderRadius: '6px', cursor: 'pointer' }}>← Voltar</button>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'center', flexWrap: 'wrap' }}>
+        <div>
+          <h1 style={{ margin: '14px 0 4px' }}>🏦 Conferência de Saldos Bancários</h1>
+          <p style={{ color: '#64748b', marginTop: 0 }}>Compare o saldo calculado pelo app com o saldo real do banco e veja diagnósticos automáticos de divergência.</p>
+        </div>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '14px', marginBottom: '16px' }}>
+        <div style={{ background: 'white', border: '1px solid #e5e7eb', borderRadius: '12px', padding: '14px' }}>
+          <h3 style={{ marginTop: 0 }}>Filtros da conferência</h3>
+          <div style={{ display: 'grid', gap: '10px' }}>
+            <label>Conta<select value={contaId} onChange={(e) => { setContaId(e.target.value); setCalculo(null); setConferencia(null); setDiagnostico(null); }} style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }}>{contas.map((c) => <option key={c.id} value={c.id}>{c.nome}</option>)}</select></label>
+            <label>Data de referência<input type="date" value={dataReferencia} onChange={(e) => { setDataReferencia(e.target.value); setConferencia(null); setDiagnostico(null); }} style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }} /></label>
+            <label>Período inicial<input type="date" value={periodoInicial} onChange={(e) => setPeriodoInicial(e.target.value)} disabled style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px', background: '#f8fafc' }} /></label>
+            <label>Período final<input type="date" value={periodoFinal} onChange={(e) => setPeriodoFinal(e.target.value)} disabled style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px', background: '#f8fafc' }} /></label>
+            <label>Tolerância de diferença<input value={tolerancia} onChange={(e) => setTolerancia(e.target.value)} placeholder="0,01" style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }} /></label>
+            <button onClick={calcularSaldo} disabled={carregando || !contaId} style={{ background: '#2563eb', color: 'white', border: 'none', padding: '10px 14px', borderRadius: '8px', cursor: 'pointer' }}>Calcular saldo</button>
+          </div>
+        </div>
+
+        <div style={{ background: 'white', border: '1px solid #e5e7eb', borderRadius: '12px', padding: '14px' }}>
+          <h3 style={{ marginTop: 0 }}>Saldo inicial da conta</h3>
+          {!contaSelecionada?.data_saldo_inicial && !contaSelecionada?.dataSaldoInicial && (
+            <p style={{ background: '#fffbeb', color: '#92400e', padding: '10px', borderRadius: '8px' }}>Esta conta ainda não possui saldo inicial configurado. Cadastre um saldo inicial para permitir a conferência.</p>
+          )}
+          <div style={{ display: 'grid', gap: '10px' }}>
+            <label>Saldo inicial<input value={saldoInicial} onChange={(e) => setSaldoInicial(e.target.value)} placeholder="0,00" style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }} /></label>
+            <label>Data saldo inicial<input type="date" value={dataSaldoInicial} onChange={(e) => setDataSaldoInicial(e.target.value)} style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }} /></label>
+            <button onClick={salvarSaldoInicial} disabled={carregando || !contaId} style={{ background: '#0f766e', color: 'white', border: 'none', padding: '10px 14px', borderRadius: '8px', cursor: 'pointer' }}>Salvar saldo inicial</button>
+          </div>
+        </div>
+
+        <div style={{ background: 'white', border: '1px solid #e5e7eb', borderRadius: '12px', padding: '14px' }}>
+          <h3 style={{ marginTop: 0 }}>Saldo real do banco</h3>
+          <div style={{ display: 'grid', gap: '10px' }}>
+            <label>Saldo real informado<input value={saldoReal} onChange={(e) => { setSaldoReal(e.target.value); setConferencia(null); }} placeholder="-516,87" style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }} /></label>
+            <label>Observação<textarea value={observacao} onChange={(e) => setObservacao(e.target.value)} placeholder="Saldo conferido no extrato" rows={3} style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }} /></label>
+            <button onClick={salvarConferencia} disabled={carregando || !calculo?.saldoInicialConfigurado} style={{ background: '#7c3aed', color: 'white', border: 'none', padding: '10px 14px', borderRadius: '8px', cursor: 'pointer', opacity: calculo?.saldoInicialConfigurado ? 1 : 0.6 }}>Salvar conferência</button>
+          </div>
+        </div>
+      </div>
+
+      {carregando && <p>Processando...</p>}
+
+      {calculo && !calculo.saldoInicialConfigurado && (
+        <div style={{ background: '#fffbeb', border: '1px solid #fde68a', color: '#92400e', borderRadius: '12px', padding: '14px', marginBottom: '16px' }}>{calculo.mensagem}</div>
+      )}
+
+      {calculo?.saldoInicialConfigurado && (
+        <div style={{ background: 'white', border: '1px solid #e5e7eb', borderRadius: '12px', padding: '14px', marginBottom: '16px' }}>
+          <h3 style={{ marginTop: 0 }}>Resultado da conferência</h3>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '10px' }}>
+            <KpiCard titulo="Saldo inicial" valor={formatarMoeda(calculo.saldoInicial)} detalhe={formatarData(calculo.dataSaldoInicial)} cor="#475569" fundo="#f8fafc" />
+            <KpiCard titulo="Créditos no período" valor={formatarMoeda(calculo.totalCreditos)} detalhe={`${calculo.quantidadeTransacoes || 0} transação(ões)`} cor="#059669" fundo="#ecfdf5" />
+            <KpiCard titulo="Débitos no período" valor={formatarMoeda(calculo.totalDebitos)} detalhe="Débitos importados" cor="#dc2626" fundo="#fef2f2" />
+            <KpiCard titulo="Saldo calculado" valor={formatarMoeda(calculo.saldoCalculado)} detalhe="Saldo do app" cor="#2563eb" fundo="#eff6ff" />
+            {resultadoAtual && <KpiCard titulo="Saldo real" valor={formatarMoeda(resultadoAtual.saldo_real)} detalhe="Informado pelo usuário" cor="#7c3aed" fundo="#f5f3ff" />}
+            {resultadoAtual && <KpiCard titulo="Diferença" valor={formatarMoeda(resultadoAtual.diferenca)} detalhe="Real - calculado" cor={Math.abs(Number(resultadoAtual.diferenca || 0)) <= numeroFormulario(tolerancia, 0.01) ? '#059669' : '#dc2626'} fundo={Math.abs(Number(resultadoAtual.diferenca || 0)) <= numeroFormulario(tolerancia, 0.01) ? '#ecfdf5' : '#fef2f2'} />}
+          </div>
+
+          {resultadoAtual && (
+            <div style={{ marginTop: '14px', display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+              {(() => { const [bg, cor] = badgeStatusConferencia(resultadoAtual.status); return <span style={{ background: bg, color: cor, padding: '6px 10px', borderRadius: '999px', fontWeight: 'bold' }}>{resultadoAtual.status}</span>; })()}
+              {resultadoAtual.status === 'CONCILIADO' ? <strong style={{ color: '#166534' }}>Saldo conciliado com sucesso.</strong> : <strong style={{ color: '#991b1b' }}>Saldo divergente: revise a diferença e execute a análise inteligente.</strong>}
+              {resultadoAtual.status === 'DIVERGENTE' && <button onClick={() => analisarDivergencia(resultadoAtual)} style={{ background: '#1d4ed8', color: 'white', border: 'none', padding: '9px 12px', borderRadius: '8px', cursor: 'pointer' }}>Analisar divergência</button>}
+            </div>
+          )}
+        </div>
+      )}
+
+      {diagnostico && (
+        <div style={{ background: '#eef2ff', border: '1px solid #c7d2fe', borderRadius: '12px', padding: '14px', marginBottom: '16px' }}>
+          <h3 style={{ marginTop: 0 }}>Análise inteligente</h3>
+          <p style={{ color: '#3730a3' }}>{diagnostico.resumoIA}</p>
+          <div style={{ display: 'grid', gap: '10px' }}>
+            {(diagnostico.diagnosticos || []).map((item, index) => (
+              <div key={`${item.tipo}-${index}`} style={{ background: 'white', border: '1px solid #c7d2fe', borderRadius: '10px', padding: '12px' }}>
+                <strong>{index + 1}. {item.tipo} · {item.severidade}</strong>
+                <p style={{ margin: '6px 0', color: '#334155' }}>{item.descricao}</p>
+                {(item.acoesSugeridas || []).length > 0 && <p style={{ margin: '6px 0', color: '#475569' }}><strong>Ação sugerida:</strong> {item.acoesSugeridas.join(' ')}</p>}
+                {(item.transacoesRelacionadas || []).length > 0 && (
+                  <div style={{ overflowX: 'auto', marginTop: '8px' }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
+                      <thead><tr><th style={{ textAlign: 'left', padding: '6px' }}>Data</th><th style={{ textAlign: 'left', padding: '6px' }}>Conta</th><th style={{ textAlign: 'left', padding: '6px' }}>Descrição</th><th style={{ textAlign: 'right', padding: '6px' }}>Valor</th><th style={{ textAlign: 'left', padding: '6px' }}>Tipo</th></tr></thead>
+                      <tbody>{item.transacoesRelacionadas.map((tx, idx) => <tr key={`${tx.id || idx}-${idx}`} style={{ borderTop: '1px solid #e0e7ff' }}><td style={{ padding: '6px' }}>{formatarData(tx.data)}</td><td style={{ padding: '6px' }}>{tx.contaNome || '-'}</td><td style={{ padding: '6px' }}>{tx.descricao}</td><td style={{ padding: '6px', textAlign: 'right' }}>{formatarMoeda(tx.valor)}</td><td style={{ padding: '6px' }}>{tx.tipo}</td></tr>)}</tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div style={{ background: 'white', border: '1px solid #e5e7eb', borderRadius: '12px', padding: '14px' }}>
+        <h3 style={{ marginTop: 0 }}>Histórico de conferências</h3>
+        {historico.length === 0 ? <p style={{ color: '#64748b' }}>Nenhuma conferência salva para esta conta.</p> : (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+              <thead><tr><th style={{ textAlign: 'left', padding: '8px' }}>Data referência</th><th style={{ textAlign: 'left', padding: '8px' }}>Conta</th><th style={{ textAlign: 'right', padding: '8px' }}>Saldo real</th><th style={{ textAlign: 'right', padding: '8px' }}>Saldo calculado</th><th style={{ textAlign: 'right', padding: '8px' }}>Diferença</th><th style={{ textAlign: 'left', padding: '8px' }}>Status</th><th style={{ textAlign: 'left', padding: '8px' }}>Criado em</th></tr></thead>
+              <tbody>{historico.map((item) => { const [bg, cor] = badgeStatusConferencia(item.status); return <tr key={item.id} style={{ borderTop: '1px solid #e5e7eb' }}><td style={{ padding: '8px' }}>{formatarData(item.data_referencia)}</td><td style={{ padding: '8px' }}>{item.conta_nome}</td><td style={{ padding: '8px', textAlign: 'right' }}>{formatarMoeda(item.saldo_real)}</td><td style={{ padding: '8px', textAlign: 'right' }}>{formatarMoeda(item.saldo_calculado)}</td><td style={{ padding: '8px', textAlign: 'right' }}>{formatarMoeda(item.diferenca)}</td><td style={{ padding: '8px' }}><span style={{ background: bg, color: cor, padding: '4px 8px', borderRadius: '999px', fontWeight: 'bold' }}>{item.status}</span></td><td style={{ padding: '8px' }}>{formatarData(item.criado_em)}</td></tr>; })}</tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function TelaProvisoes({ contas = [], token, onVoltar }) {
   const [provisoes, setProvisoes] = useState([]);
