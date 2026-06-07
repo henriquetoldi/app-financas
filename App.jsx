@@ -2,7 +2,7 @@
 // FRONTEND: React App
 // ============================================================================
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import axios from 'axios';
 
 const API_URL = import.meta.env.VITE_API_URL || '/api';
@@ -1578,6 +1578,7 @@ function Dashboard({ usuario, token, onLogout }) {
         contas={contas}
         token={token}
         onVoltar={() => setModo('home')}
+        onAtualizarContas={carregarContas}
       />
     );
   }
@@ -2517,7 +2518,7 @@ function TelaProvisoes({ contas = [], token, onVoltar }) {
 // TELA DE TRANSAÇÕES
 // ============================================================================
 
-function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
+function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualizarContas }) {
   const [transacoes, setTransacoes] = useState([]);
   const [categorias, setCategorias] = useState([]);
   const [carregando, setCarregando] = useState(true);
@@ -2539,6 +2540,14 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
   const [sugestoesTransferencia, setSugestoesTransferencia] = useState([]);
   const [carregandoSugestoes, setCarregandoSugestoes] = useState(false);
   const [marcandoTransferencia, setMarcandoTransferencia] = useState(null);
+  const [sortField, setSortField] = useState('data');
+  const [sortDirection, setSortDirection] = useState('desc');
+  const [sortIsDefault, setSortIsDefault] = useState(true);
+  const [modalSaldoInicialAberto, setModalSaldoInicialAberto] = useState(false);
+  const [formSaldoInicial, setFormSaldoInicial] = useState({ dataSaldoInicial: '', saldoInicial: '', observacao: '' });
+  const [salvandoSaldoInicial, setSalvandoSaldoInicial] = useState(false);
+  const [destacarInicioBase, setDestacarInicioBase] = useState(false);
+  const tabelaRef = useRef(null);
 
   useEffect(() => {
     carregarDados();
@@ -2605,6 +2614,18 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
   const categoriasDetalhadasFiltro = categorias.filter((cat) => (cat.nivel || (cat.categoria_pai_id ? 'DETALHADA' : 'MACRO')) === 'DETALHADA' && (filtros.categoriaMacro === 'todas' || cat.categoria_pai_id === filtros.categoriaMacro));
   const nomeCategoriaMacro = (tx) => tx.categoria_macro_nome || (!tx.categoria_detalhada_id ? tx.categoria_nome : '') || 'Sem categoria';
   const nomeCategoriaDetalhada = (tx) => tx.categoria_detalhada_nome || (tx.categoria_detalhada_id ? tx.categoria_nome : '') || '-';
+  const textoStatusFlags = (tx) => [
+    tx.eh_transferencia_interna ? 'Transferência interna' : '',
+    tx.conciliacao_id ? 'Conciliada' : '',
+  ].filter(Boolean).join(' ') || '-';
+  const contaSelecionadaFiltro = filtros.conta !== 'todas' ? contas.find((conta) => conta.id === filtros.conta) : null;
+  const dataAnteriorISO = (data) => {
+    if (!data) return dataLocalISO(new Date());
+    const d = new Date(`${normalizarDataFiltro(data)}T00:00:00`);
+    if (Number.isNaN(d.getTime())) return dataLocalISO(new Date());
+    d.setDate(d.getDate() - 1);
+    return dataLocalISO(d);
+  };
   const estiloBadgeCategoria = (origem) => ({
     background: origem === 'AUTO' ? '#dbeafe' : '#e5e7eb',
     color: origem === 'AUTO' ? '#1d4ed8' : '#374151',
@@ -2613,6 +2634,134 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
     fontSize: '12px',
     display: 'inline-block',
   });
+
+  const valorOrdenacao = (tx, campo) => {
+    if (campo === 'data') return normalizarDataFiltro(tx.data) || '';
+    if (campo === 'conta') return tx.conta_nome || '';
+    if (campo === 'descricao') return tx.descricao || '';
+    if (campo === 'valor') return Number(tx.valor || 0);
+    if (campo === 'tipo') return tx.tipo === 'CREDITO' ? 'Crédito' : 'Débito';
+    if (campo === 'categoriaMacro') return nomeCategoriaMacro(tx);
+    if (campo === 'categoriaDetalhada') return nomeCategoriaDetalhada(tx);
+    if (campo === 'status') return textoStatusFlags(tx);
+    return '';
+  };
+
+  const compararTransacoes = (a, b, campo, direcao) => {
+    const valorA = valorOrdenacao(a, campo);
+    const valorB = valorOrdenacao(b, campo);
+    const vazioA = valorA === null || valorA === undefined || valorA === '' || valorA === '-';
+    const vazioB = valorB === null || valorB === undefined || valorB === '' || valorB === '-';
+    if (vazioA && vazioB) return 0;
+    if (vazioA) return 1;
+    if (vazioB) return -1;
+
+    let comparacao;
+    if (campo === 'valor') comparacao = Number(valorA) - Number(valorB);
+    else comparacao = String(valorA).localeCompare(String(valorB), 'pt-BR', { numeric: true, sensitivity: 'base' });
+
+    return direcao === 'desc' ? -comparacao : comparacao;
+  };
+
+  const transacoesOrdenadas = useMemo(() => {
+    const campo = sortField || 'data';
+    const direcao = sortDirection || 'desc';
+    return [...transacoesFiltradas].sort((a, b) => compararTransacoes(a, b, campo, direcao));
+  }, [transacoesFiltradas, sortField, sortDirection]);
+
+  const resumoBase = useMemo(() => {
+    if (transacoesFiltradas.length === 0) return null;
+    const porDataAsc = [...transacoesFiltradas].sort((a, b) => compararTransacoes(a, b, 'data', 'asc'));
+    const totalCreditos = transacoesFiltradas.filter((tx) => tx.tipo === 'CREDITO').reduce((soma, tx) => soma + Number(tx.valor || 0), 0);
+    const totalDebitos = transacoesFiltradas.filter((tx) => tx.tipo === 'DEBITO').reduce((soma, tx) => soma + Number(tx.valor || 0), 0);
+    const porConta = Array.from(transacoesFiltradas.reduce((mapa, tx) => {
+      const chave = tx.conta_id || 'sem-conta';
+      if (!mapa.has(chave)) mapa.set(chave, { contaId: tx.conta_id, contaNome: tx.conta_nome || 'Conta', transacoes: [] });
+      mapa.get(chave).transacoes.push(tx);
+      return mapa;
+    }, new Map()).values()).map((item) => {
+      const ordenadas = [...item.transacoes].sort((a, b) => compararTransacoes(a, b, 'data', 'asc'));
+      return {
+        ...item,
+        primeira: ordenadas[0],
+        ultima: ordenadas[ordenadas.length - 1],
+        quantidade: item.transacoes.length,
+      };
+    }).sort((a, b) => String(a.contaNome).localeCompare(String(b.contaNome), 'pt-BR'));
+
+    return {
+      primeira: porDataAsc[0],
+      ultima: porDataAsc[porDataAsc.length - 1],
+      quantidade: transacoesFiltradas.length,
+      saldoCalculadoPeriodo: totalCreditos - totalDebitos,
+      porConta,
+    };
+  }, [transacoesFiltradas]);
+
+  const primeiraTransacaoBase = resumoBase?.primeira || null;
+
+  const handleSort = (field) => {
+    setDestacarInicioBase(false);
+    if (sortIsDefault || sortField !== field) {
+      setSortField(field);
+      setSortDirection('asc');
+      setSortIsDefault(false);
+      return;
+    }
+    if (sortDirection === 'asc') {
+      setSortDirection('desc');
+      setSortIsDefault(false);
+      return;
+    }
+    setSortField('data');
+    setSortDirection('desc');
+    setSortIsDefault(true);
+  };
+
+  const rotuloOrdenacao = (label, field) => `${label}${sortField === field ? (sortDirection === 'asc' ? ' ▲' : ' ▼') : ''}`;
+  const estiloCabecalhoOrdenavel = (align = 'left') => ({ padding: '12px', textAlign: align, cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap' });
+
+  const verInicioBase = () => {
+    setSortField('data');
+    setSortDirection('asc');
+    setSortIsDefault(false);
+    setDestacarInicioBase(true);
+    setTimeout(() => tabelaRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0);
+  };
+
+  const abrirModalSaldoInicial = () => {
+    if (!contaSelecionadaFiltro) return alert('Selecione uma conta específica para configurar o saldo inicial.');
+    if (!primeiraTransacaoBase) return alert('Não há transações para sugerir o início da base desta conta.');
+    setFormSaldoInicial({
+      dataSaldoInicial: dataAnteriorISO(primeiraTransacaoBase.data),
+      saldoInicial: String(contaSelecionadaFiltro.saldo_inicial ?? 0).replace('.', ','),
+      observacao: '',
+    });
+    setModalSaldoInicialAberto(true);
+  };
+
+  const salvarSaldoInicialConta = async () => {
+    if (!contaSelecionadaFiltro) return;
+    const parse = parseValorMonetario(formSaldoInicial.saldoInicial);
+    if (!Number.isFinite(parse.valor)) return alert('Informe um saldo inicial válido.');
+    if (!formSaldoInicial.dataSaldoInicial) return alert('Informe a data do saldo inicial.');
+    setSalvandoSaldoInicial(true);
+    try {
+      await axios.patch(`${API_URL}/contas/${contaSelecionadaFiltro.id}/saldo-inicial`, {
+        saldoInicial: parse.valor,
+        dataSaldoInicial: formSaldoInicial.dataSaldoInicial,
+        observacao: formSaldoInicial.observacao,
+      }, { headers: authHeaders });
+      alert('Saldo inicial salvo.');
+      setModalSaldoInicialAberto(false);
+      await onAtualizarContas?.();
+      await carregarDados();
+    } catch (error) {
+      alert(error.response?.data?.detalhes || error.response?.data?.erro || error.message);
+    } finally {
+      setSalvandoSaldoInicial(false);
+    }
+  };
 
   const abrirModalIndividual = (tx) => {
     setTransacaoSelecionada(tx);
@@ -2725,8 +2874,8 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
   const exportarExcel = (apenasSelecionadas = false) => {
     const selecionadasSet = new Set(selecionadas);
     const baseExportacao = apenasSelecionadas
-      ? transacoesFiltradas.filter((tx) => selecionadasSet.has(tx.id))
-      : transacoesFiltradas;
+      ? transacoesOrdenadas.filter((tx) => selecionadasSet.has(tx.id))
+      : transacoesOrdenadas;
 
     if (baseExportacao.length === 0) {
       alert('Não há transações para exportar com os filtros atuais.');
@@ -2901,13 +3050,13 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
               <input type="date" value={dataFinal} onChange={(event) => setDataFinal(event.target.value)} style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} />
             </label>
             <button onClick={limparFiltros} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', cursor: 'pointer', background: '#e5e7eb' }}>Limpar filtros</button>
-            <button onClick={alternarTodasFiltradas} disabled={transacoesFiltradas.length === 0} style={{ padding: '10px 14px', borderRadius: '8px', border: '1px solid #d1d5db', background: 'white', cursor: transacoesFiltradas.length === 0 ? 'not-allowed' : 'pointer' }}>
+            <button onClick={alternarTodasFiltradas} disabled={transacoesOrdenadas.length === 0} style={{ padding: '10px 14px', borderRadius: '8px', border: '1px solid #d1d5db', background: 'white', cursor: transacoesOrdenadas.length === 0 ? 'not-allowed' : 'pointer' }}>
               {todasFiltradasSelecionadas ? 'Limpar seleção filtrada' : 'Selecionar todos filtrados'}
             </button>
             <button onClick={abrirModalLote} disabled={selecionadas.length === 0} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', background: selecionadas.length ? '#667eea' : '#c7d2fe', color: 'white', cursor: selecionadas.length ? 'pointer' : 'not-allowed' }}>
               Categorizar selecionadas
             </button>
-            <button onClick={() => exportarExcel(false)} disabled={transacoesFiltradas.length === 0} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', background: transacoesFiltradas.length ? '#16a34a' : '#bbf7d0', color: 'white', cursor: transacoesFiltradas.length ? 'pointer' : 'not-allowed' }}>
+            <button onClick={() => exportarExcel(false)} disabled={transacoesOrdenadas.length === 0} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', background: transacoesOrdenadas.length ? '#16a34a' : '#bbf7d0', color: 'white', cursor: transacoesOrdenadas.length ? 'pointer' : 'not-allowed' }}>
               📊 Exportar Excel
             </button>
             <button onClick={() => exportarExcel(true)} disabled={selecionadas.length === 0} style={{ padding: '10px 14px', borderRadius: '8px', border: '1px solid #16a34a', background: selecionadas.length ? 'white' : '#f0fdf4', color: '#15803d', cursor: selecionadas.length ? 'pointer' : 'not-allowed' }}>
@@ -2916,12 +3065,47 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
             <button onClick={verificarTransferenciasInternas} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', background: '#0f766e', color: 'white', cursor: 'pointer' }}>
               Verificar transferências entre contas
             </button>
+            <button onClick={verInicioBase} disabled={!resumoBase} style={{ padding: '10px 14px', borderRadius: '8px', border: '1px solid #1d4ed8', background: resumoBase ? 'white' : '#eff6ff', color: '#1d4ed8', cursor: resumoBase ? 'pointer' : 'not-allowed' }}>
+              Ver início da base
+            </button>
+            <button onClick={abrirModalSaldoInicial} disabled={!contaSelecionadaFiltro || !primeiraTransacaoBase} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', background: contaSelecionadaFiltro && primeiraTransacaoBase ? '#7c3aed' : '#ddd6fe', color: 'white', cursor: contaSelecionadaFiltro && primeiraTransacaoBase ? 'pointer' : 'not-allowed' }}>
+              Configurar saldo inicial desta conta
+            </button>
           </div>
 
           <div style={{ marginTop: '14px' }}>
-            <span style={{ color: '#4b5563', fontSize: '14px' }}>{transacoesFiltradas.length} transação(ões) filtrada(s) • {selecionadas.length} selecionada(s)</span>
+            <span style={{ color: '#4b5563', fontSize: '14px' }}>{transacoesOrdenadas.length} transação(ões) filtrada(s) • {selecionadas.length} selecionada(s)</span>
           </div>
         </div>
+
+        {resumoBase && (
+          <div style={{ background: 'white', border: '1px solid #dbeafe', borderRadius: '12px', padding: '16px', marginBottom: '16px', boxShadow: '0 2px 8px rgba(0,0,0,0.06)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap', alignItems: 'flex-start' }}>
+              <div>
+                <h3 style={{ margin: '0 0 8px' }}>{contaSelecionadaFiltro ? `Conta: ${contaSelecionadaFiltro.nome}` : 'Todas as contas'}</h3>
+                <p style={{ margin: '4px 0', color: '#475569' }}>Primeira transação importada: <strong>{formatarData(resumoBase.primeira.data)}</strong></p>
+                <p style={{ margin: '4px 0', color: '#475569' }}>Última transação importada: <strong>{formatarData(resumoBase.ultima.data)}</strong></p>
+                <p style={{ margin: '4px 0', color: '#475569' }}>Quantidade de transações: <strong>{resumoBase.quantidade}</strong></p>
+                <p style={{ margin: '4px 0', color: '#475569' }}>Saldo calculado no período exibido: <strong>{formatarMoeda(resumoBase.saldoCalculadoPeriodo)}</strong></p>
+              </div>
+              {contaSelecionadaFiltro && !contaSelecionadaFiltro.data_saldo_inicial && (
+                <div style={{ background: '#fffbeb', color: '#92400e', border: '1px solid #fde68a', borderRadius: '10px', padding: '12px', maxWidth: '420px' }}>
+                  <strong>Saldo inicial ausente</strong>
+                  <p style={{ margin: '6px 0' }}>Esta conta ainda não possui saldo inicial configurado. Para conferir o saldo bancário, informe o saldo da conta no dia anterior à primeira transação importada.</p>
+                  <button onClick={abrirModalSaldoInicial} style={{ background: '#7c3aed', color: 'white', border: 'none', borderRadius: '8px', padding: '8px 10px', cursor: 'pointer' }}>Configurar saldo inicial</button>
+                </div>
+              )}
+            </div>
+            {!contaSelecionadaFiltro && resumoBase.porConta.length > 1 && (
+              <div style={{ marginTop: '14px', overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+                  <thead><tr style={{ background: '#f8fafc' }}><th style={{ textAlign: 'left', padding: '8px' }}>Conta</th><th style={{ textAlign: 'left', padding: '8px' }}>Primeira</th><th style={{ textAlign: 'left', padding: '8px' }}>Última</th><th style={{ textAlign: 'right', padding: '8px' }}>Transações</th></tr></thead>
+                  <tbody>{resumoBase.porConta.map((item) => <tr key={item.contaId || item.contaNome} style={{ borderTop: '1px solid #e5e7eb' }}><td style={{ padding: '8px' }}>{item.contaNome}</td><td style={{ padding: '8px' }}>{formatarData(item.primeira.data)}</td><td style={{ padding: '8px' }}>{formatarData(item.ultima.data)}</td><td style={{ padding: '8px', textAlign: 'right' }}>{item.quantidade}</td></tr>)}</tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
 
         {carregando ? (
           <p>Carregando transações...</p>
@@ -2930,27 +3114,27 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
             <h2>Nenhuma transação encontrada</h2>
           </div>
         ) : (
-          <div style={{ background: 'white', borderRadius: '12px', overflowX: 'auto', boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }}>
+          <div ref={tabelaRef} style={{ background: 'white', borderRadius: '12px', overflowX: 'auto', boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }}>
             <table style={{ width: '100%', minWidth: '1120px', borderCollapse: 'collapse' }}>
               <thead>
                 <tr style={{ background: '#f9fafb' }}>
                   <th style={{ padding: '12px', textAlign: 'center' }}>
                     <input type="checkbox" checked={todasFiltradasSelecionadas} onChange={alternarTodasFiltradas} />
                   </th>
-                  <th style={{ padding: '12px', textAlign: 'left' }}>Data</th>
-                  <th style={{ padding: '12px', textAlign: 'left' }}>Conta</th>
-                  <th style={{ padding: '12px', textAlign: 'left' }}>Descrição</th>
-                  <th style={{ padding: '12px', textAlign: 'right' }}>Valor</th>
-                  <th style={{ padding: '12px', textAlign: 'left' }}>Tipo</th>
-                  <th style={{ padding: '12px', textAlign: 'left' }}>Categoria macro</th>
-                  <th style={{ padding: '12px', textAlign: 'left' }}>Categoria detalhada</th>
-                  <th style={{ padding: '12px', textAlign: 'left' }}>Status/flags</th>
+                  <th onClick={() => handleSort('data')} style={estiloCabecalhoOrdenavel('left')}>{rotuloOrdenacao('Data', 'data')}</th>
+                  <th onClick={() => handleSort('conta')} style={estiloCabecalhoOrdenavel('left')}>{rotuloOrdenacao('Conta', 'conta')}</th>
+                  <th onClick={() => handleSort('descricao')} style={estiloCabecalhoOrdenavel('left')}>{rotuloOrdenacao('Descrição', 'descricao')}</th>
+                  <th onClick={() => handleSort('valor')} style={estiloCabecalhoOrdenavel('right')}>{rotuloOrdenacao('Valor', 'valor')}</th>
+                  <th onClick={() => handleSort('tipo')} style={estiloCabecalhoOrdenavel('left')}>{rotuloOrdenacao('Tipo', 'tipo')}</th>
+                  <th onClick={() => handleSort('categoriaMacro')} style={estiloCabecalhoOrdenavel('left')}>{rotuloOrdenacao('Categoria macro', 'categoriaMacro')}</th>
+                  <th onClick={() => handleSort('categoriaDetalhada')} style={estiloCabecalhoOrdenavel('left')}>{rotuloOrdenacao('Categoria detalhada', 'categoriaDetalhada')}</th>
+                  <th onClick={() => handleSort('status')} style={estiloCabecalhoOrdenavel('left')}>{rotuloOrdenacao('Status/flags', 'status')}</th>
                   <th style={{ padding: '12px', textAlign: 'center' }}>Ações</th>
                 </tr>
               </thead>
               <tbody>
-                {transacoesFiltradas.map((tx) => (
-                  <tr key={tx.id} style={{ borderTop: '1px solid #e5e7eb' }}>
+                {transacoesOrdenadas.map((tx) => (
+                  <tr key={tx.id} style={{ borderTop: '1px solid #e5e7eb', background: destacarInicioBase && primeiraTransacaoBase?.id === tx.id ? '#fef3c7' : 'white' }}>
                     <td style={{ padding: '12px', textAlign: 'center' }}>
                       <input type="checkbox" checked={selecionadas.includes(tx.id)} onChange={() => alternarSelecionada(tx.id)} />
                     </td>
@@ -2999,7 +3183,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
                     </td>
                   </tr>
                 ))}
-                {transacoesFiltradas.length === 0 && (
+                {transacoesOrdenadas.length === 0 && (
                   <tr><td colSpan="10" style={{ padding: '24px', textAlign: 'center', color: '#6b7280' }}>Nenhuma transação corresponde aos filtros.</td></tr>
                 )}
               </tbody>
@@ -3007,6 +3191,40 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
           </div>
         )}
       </div>
+
+      {modalSaldoInicialAberto && contaSelecionadaFiltro && primeiraTransacaoBase && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <div style={{ background: 'white', borderRadius: '12px', padding: '24px', maxWidth: '560px', width: '92%' }}>
+            <h3 style={{ marginTop: 0 }}>Configurar saldo inicial desta conta</h3>
+            <p style={{ color: '#475569' }}>
+              Informe o saldo real da conta no dia anterior à primeira transação importada. Assim o app conseguirá calcular o saldo corretamente a partir dos registros importados.
+            </p>
+            <div style={{ display: 'grid', gap: '10px', marginBottom: '14px' }}>
+              <div style={{ background: '#f8fafc', border: '1px solid #e5e7eb', borderRadius: '8px', padding: '10px' }}>
+                <p style={{ margin: '4px 0' }}><strong>Conta:</strong> {contaSelecionadaFiltro.nome}</p>
+                <p style={{ margin: '4px 0' }}><strong>Primeira transação importada:</strong> {formatarData(primeiraTransacaoBase.data)} · {primeiraTransacaoBase.descricao} · {formatarMoeda(primeiraTransacaoBase.valor)}</p>
+                <p style={{ margin: '4px 0' }}><strong>Data sugerida para saldo inicial:</strong> {formatarData(dataAnteriorISO(primeiraTransacaoBase.data))}</p>
+              </div>
+              <label style={{ display: 'grid', gap: '6px', fontSize: '14px' }}>
+                Data do saldo inicial
+                <input type="date" value={formSaldoInicial.dataSaldoInicial} onChange={(event) => setFormSaldoInicial({ ...formSaldoInicial, dataSaldoInicial: event.target.value })} style={{ padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }} />
+              </label>
+              <label style={{ display: 'grid', gap: '6px', fontSize: '14px' }}>
+                Saldo inicial
+                <input value={formSaldoInicial.saldoInicial} onChange={(event) => setFormSaldoInicial({ ...formSaldoInicial, saldoInicial: event.target.value })} placeholder="0,00" style={{ padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }} />
+              </label>
+              <label style={{ display: 'grid', gap: '6px', fontSize: '14px' }}>
+                Observação
+                <textarea value={formSaldoInicial.observacao} onChange={(event) => setFormSaldoInicial({ ...formSaldoInicial, observacao: event.target.value })} placeholder="Ex.: saldo real no extrato antes do início da base" rows={3} style={{ padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }} />
+              </label>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', flexWrap: 'wrap' }}>
+              <button onClick={() => setModalSaldoInicialAberto(false)} disabled={salvandoSaldoInicial} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', background: '#e5e7eb', cursor: 'pointer' }}>Cancelar</button>
+              <button onClick={salvarSaldoInicialConta} disabled={salvandoSaldoInicial} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', background: '#7c3aed', color: 'white', cursor: 'pointer' }}>{salvandoSaldoInicial ? 'Salvando...' : 'Salvar saldo inicial'}</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {categoriaModalAberta && (
         <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
