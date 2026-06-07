@@ -1247,9 +1247,15 @@ async function montarRespostaTransacoes(rows) {
   if (rows.length === 0) return [];
   const ids = rows.map((row) => row.id);
   const result = await pool.query(
-      `SELECT t.*, cat.nome as categoria_nome, cm.nome AS categoria_macro_nome, cd.nome AS categoria_detalhada_nome
+      `SELECT t.*,
+            COALESCE(t.categoria_macro_id, CASE WHEN cat.categoria_pai_id IS NULL THEN t.categoria_id ELSE cat.categoria_pai_id END) AS categoria_macro_id,
+            COALESCE(t.categoria_detalhada_id, CASE WHEN cat.categoria_pai_id IS NOT NULL THEN t.categoria_id ELSE NULL END) AS categoria_detalhada_id,
+            cat.nome as categoria_nome,
+            COALESCE(cm.nome, cat_macro.nome, CASE WHEN cat.categoria_pai_id IS NULL THEN cat.nome ELSE NULL END) AS categoria_macro_nome,
+            COALESCE(cd.nome, CASE WHEN cat.categoria_pai_id IS NOT NULL THEN cat.nome ELSE NULL END) AS categoria_detalhada_nome
      FROM transacoes t
      LEFT JOIN categorias cat ON t.categoria_id = cat.id
+     LEFT JOIN categorias cat_macro ON cat_macro.id = cat.categoria_pai_id
      LEFT JOIN categorias cm ON t.categoria_macro_id = cm.id
      LEFT JOIN categorias cd ON t.categoria_detalhada_id = cd.id
      WHERE t.id = ANY($1::uuid[])
@@ -2850,11 +2856,11 @@ async function buscarTransacoesUsuario(usuarioId, filtros = {}) {
   }
   if (filtros.categoriaMacroId) {
     valores.push(filtros.categoriaMacroId);
-    where.push(`t.categoria_macro_id = $${valores.length}`);
+    where.push(`(t.categoria_macro_id = $${valores.length} OR (t.categoria_macro_id IS NULL AND (t.categoria_id = $${valores.length} OR cat.categoria_pai_id = $${valores.length})))`);
   }
   if (filtros.categoriaDetalhadaId) {
     valores.push(filtros.categoriaDetalhadaId);
-    where.push(`t.categoria_detalhada_id = $${valores.length}`);
+    where.push(`(t.categoria_detalhada_id = $${valores.length} OR (t.categoria_detalhada_id IS NULL AND t.categoria_id = $${valores.length} AND cat.categoria_pai_id IS NOT NULL))`);
   }
   if (filtros.status === 'sem') where.push('t.categoria_macro_id IS NULL AND t.categoria_id IS NULL');
   if (filtros.status === 'categorizadas') where.push('(t.categoria_macro_id IS NOT NULL OR t.categoria_id IS NOT NULL)');
@@ -2876,16 +2882,20 @@ async function buscarTransacoesUsuario(usuarioId, filtros = {}) {
   }
 
   const result = await pool.query(
-    `SELECT t.*, conta.nome AS conta_nome,
+    `SELECT t.*,
+            COALESCE(t.categoria_macro_id, CASE WHEN cat.categoria_pai_id IS NULL THEN t.categoria_id ELSE cat.categoria_pai_id END) AS categoria_macro_id,
+            COALESCE(t.categoria_detalhada_id, CASE WHEN cat.categoria_pai_id IS NOT NULL THEN t.categoria_id ELSE NULL END) AS categoria_detalhada_id,
+            conta.nome AS conta_nome,
             cat.nome AS categoria_nome,
-            cm.nome AS categoria_macro_nome,
-            cd.nome AS categoria_detalhada_nome,
+            COALESCE(cm.nome, cat_macro.nome, CASE WHEN cat.categoria_pai_id IS NULL THEN cat.nome ELSE NULL END) AS categoria_macro_nome,
+            COALESCE(cd.nome, CASE WHEN cat.categoria_pai_id IS NOT NULL THEN cat.nome ELSE NULL END) AS categoria_detalhada_nome,
             ca.id AS conciliacao_id,
             ca.provisao_id AS provisao_conciliada_id,
             p.descricao AS provisao_conciliada_descricao
      FROM transacoes t
      JOIN contas conta ON conta.id = t.conta_id
      LEFT JOIN categorias cat ON cat.id = t.categoria_id
+     LEFT JOIN categorias cat_macro ON cat_macro.id = cat.categoria_pai_id
      LEFT JOIN categorias cm ON cm.id = t.categoria_macro_id
      LEFT JOIN categorias cd ON cd.id = t.categoria_detalhada_id
      LEFT JOIN conciliacoes ca ON ca.transacao_id = t.id AND ca.status = 'CONFIRMADA'
@@ -3059,11 +3069,17 @@ app.get('/api/transacoes/:contaId', verificarToken, async (req, res) => {
     await aplicarRegrasAtivasEmTransacoesSemCategoria(req.usuario.usuario_id);
 
     const result = await pool.query(
-      `SELECT t.*, c.nome as categoria_nome, cm.nome AS categoria_macro_nome, cd.nome AS categoria_detalhada_nome,
+      `SELECT t.*,
+              COALESCE(t.categoria_macro_id, CASE WHEN c.categoria_pai_id IS NULL THEN t.categoria_id ELSE c.categoria_pai_id END) AS categoria_macro_id,
+              COALESCE(t.categoria_detalhada_id, CASE WHEN c.categoria_pai_id IS NOT NULL THEN t.categoria_id ELSE NULL END) AS categoria_detalhada_id,
+              c.nome as categoria_nome,
+              COALESCE(cm.nome, c_macro.nome, CASE WHEN c.categoria_pai_id IS NULL THEN c.nome ELSE NULL END) AS categoria_macro_nome,
+              COALESCE(cd.nome, CASE WHEN c.categoria_pai_id IS NOT NULL THEN c.nome ELSE NULL END) AS categoria_detalhada_nome,
               ca.id AS conciliacao_id, ca.provisao_id AS provisao_conciliada_id, p.descricao AS provisao_conciliada_descricao
        FROM transacoes t
        JOIN contas conta ON conta.id = t.conta_id
        LEFT JOIN categorias c ON t.categoria_id = c.id
+       LEFT JOIN categorias c_macro ON c_macro.id = c.categoria_pai_id
        LEFT JOIN categorias cm ON t.categoria_macro_id = cm.id
        LEFT JOIN categorias cd ON t.categoria_detalhada_id = cd.id
        LEFT JOIN conciliacoes ca ON ca.transacao_id = t.id AND ca.status = 'CONFIRMADA'

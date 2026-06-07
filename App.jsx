@@ -1997,6 +1997,16 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
   const categoriasMacro = categorias.filter((cat) => (cat.nivel || (cat.categoria_pai_id ? 'DETALHADA' : 'MACRO')) === 'MACRO');
   const categoriasDetalhadasModal = categorias.filter((cat) => (cat.nivel || (cat.categoria_pai_id ? 'DETALHADA' : 'MACRO')) === 'DETALHADA' && cat.categoria_pai_id === categoriaMacroEscolhida);
   const categoriasDetalhadasFiltro = categorias.filter((cat) => (cat.nivel || (cat.categoria_pai_id ? 'DETALHADA' : 'MACRO')) === 'DETALHADA' && (filtros.categoriaMacro === 'todas' || cat.categoria_pai_id === filtros.categoriaMacro));
+  const nomeCategoriaMacro = (tx) => tx.categoria_macro_nome || (!tx.categoria_detalhada_id ? tx.categoria_nome : '') || 'Sem categoria';
+  const nomeCategoriaDetalhada = (tx) => tx.categoria_detalhada_nome || (tx.categoria_detalhada_id ? tx.categoria_nome : '') || '-';
+  const estiloBadgeCategoria = (origem) => ({
+    background: origem === 'AUTO' ? '#dbeafe' : '#e5e7eb',
+    color: origem === 'AUTO' ? '#1d4ed8' : '#374151',
+    padding: '4px 8px',
+    borderRadius: '4px',
+    fontSize: '12px',
+    display: 'inline-block',
+  });
 
   const abrirModalIndividual = (tx) => {
     setTransacaoSelecionada(tx);
@@ -2098,9 +2108,9 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
     tx.descricao || '',
     Number(tx.valor || 0),
     tx.tipo === 'CREDITO' ? 'Crédito' : 'Débito',
-    tx.categoria_macro_nome || tx.categoria_nome || '',
-    tx.categoria_detalhada_nome || '',
-    tx.categoria_nome || tx.categoria_macro_nome || '',
+    nomeCategoriaMacro(tx) === 'Sem categoria' ? '' : nomeCategoriaMacro(tx),
+    nomeCategoriaDetalhada(tx) === '-' ? '' : nomeCategoriaDetalhada(tx),
+    tx.categoria_nome || nomeCategoriaMacro(tx),
     tx.eh_transferencia_interna ? 'Sim' : 'Não',
     tx.transferencia_grupo_id || '',
     tx.categoria_origem || '',
@@ -2314,8 +2324,8 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
             <h2>Nenhuma transação encontrada</h2>
           </div>
         ) : (
-          <div style={{ background: 'white', borderRadius: '12px', overflow: 'hidden', boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <div style={{ background: 'white', borderRadius: '12px', overflowX: 'auto', boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }}>
+            <table style={{ width: '100%', minWidth: '1120px', borderCollapse: 'collapse' }}>
               <thead>
                 <tr style={{ background: '#f9fafb' }}>
                   <th style={{ padding: '12px', textAlign: 'center' }}>
@@ -2326,7 +2336,9 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
                   <th style={{ padding: '12px', textAlign: 'left' }}>Descrição</th>
                   <th style={{ padding: '12px', textAlign: 'right' }}>Valor</th>
                   <th style={{ padding: '12px', textAlign: 'left' }}>Tipo</th>
-                  <th style={{ padding: '12px', textAlign: 'left' }}>Categoria</th>
+                  <th style={{ padding: '12px', textAlign: 'left' }}>Categoria macro</th>
+                  <th style={{ padding: '12px', textAlign: 'left' }}>Categoria detalhada</th>
+                  <th style={{ padding: '12px', textAlign: 'left' }}>Status/flags</th>
                   <th style={{ padding: '12px', textAlign: 'center' }}>Ações</th>
                 </tr>
               </thead>
@@ -2338,27 +2350,31 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
                     </td>
                     <td style={{ padding: '12px' }}>{formatarData(tx.data)}</td>
                     <td style={{ padding: '12px', color: '#475569', fontSize: '13px' }}>{tx.conta_nome || 'Conta'}</td>
-                    <td style={{ padding: '12px' }}>
-                      {tx.descricao}
-                      {tx.eh_transferencia_interna && (
-                        <span style={{ marginLeft: '8px', background: '#ccfbf1', color: '#0f766e', padding: '3px 7px', borderRadius: '999px', fontSize: '11px', fontWeight: 'bold' }}>
-                          Transferência interna
-                        </span>
-                      )}
-                      {tx.conciliacao_id && (
-                        <span title={tx.provisao_conciliada_descricao ? `Provisão: ${tx.provisao_conciliada_descricao}` : 'Vinculada a provisão'} style={{ marginLeft: '8px', background: '#dcfce7', color: '#166534', padding: '3px 7px', borderRadius: '999px', fontSize: '11px', fontWeight: 'bold' }}>
-                          Conciliada
-                        </span>
-                      )}
-                    </td>
+                    <td style={{ padding: '12px' }}>{tx.descricao}</td>
                     <td style={{ padding: '12px', textAlign: 'right', color: tx.tipo === 'CREDITO' ? '#10b981' : '#ef4444', fontWeight: 'bold' }}>
                       {tx.tipo === 'CREDITO' ? '+' : '-'}{formatarMoeda(tx.valor)}
                     </td>
                     <td style={{ padding: '12px' }}>{tx.tipo === 'CREDITO' ? 'Crédito' : 'Débito'}</td>
                     <td style={{ padding: '12px' }}>
-                      <span style={{ background: tx.categoria_origem === 'AUTO' ? '#dbeafe' : '#e5e7eb', padding: '4px 8px', borderRadius: '4px', fontSize: '12px' }}>
-                        {tx.categoria_macro_nome || tx.categoria_nome || 'Sem categoria'}{tx.categoria_detalhada_nome ? ` › ${tx.categoria_detalhada_nome}` : ''}{tx.categoria_origem === 'AUTO' ? ' • auto' : ''}
-                      </span>
+                      <span style={estiloBadgeCategoria(tx.categoria_origem)}>{nomeCategoriaMacro(tx)}{tx.categoria_origem === 'AUTO' ? ' • auto' : ''}</span>
+                    </td>
+                    <td style={{ padding: '12px' }}>
+                      <span style={estiloBadgeCategoria(tx.categoria_origem)}>{nomeCategoriaDetalhada(tx)}</span>
+                    </td>
+                    <td style={{ padding: '12px' }}>
+                      <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                        {tx.eh_transferencia_interna && (
+                          <span style={{ background: '#ccfbf1', color: '#0f766e', padding: '3px 7px', borderRadius: '999px', fontSize: '11px', fontWeight: 'bold' }}>
+                            Transferência interna
+                          </span>
+                        )}
+                        {tx.conciliacao_id && (
+                          <span title={tx.provisao_conciliada_descricao ? `Provisão: ${tx.provisao_conciliada_descricao}` : 'Vinculada a provisão'} style={{ background: '#dcfce7', color: '#166534', padding: '3px 7px', borderRadius: '999px', fontSize: '11px', fontWeight: 'bold' }}>
+                            Conciliada
+                          </span>
+                        )}
+                        {!tx.eh_transferencia_interna && !tx.conciliacao_id && <span style={{ color: '#9ca3af' }}>-</span>}
+                      </div>
                     </td>
                     <td style={{ padding: '12px', textAlign: 'center' }}>
                       <div style={{ display: 'flex', justifyContent: 'center', gap: '8px', flexWrap: 'wrap' }}>
@@ -2378,7 +2394,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
                   </tr>
                 ))}
                 {transacoesFiltradas.length === 0 && (
-                  <tr><td colSpan="8" style={{ padding: '24px', textAlign: 'center', color: '#6b7280' }}>Nenhuma transação corresponde aos filtros.</td></tr>
+                  <tr><td colSpan="10" style={{ padding: '24px', textAlign: 'center', color: '#6b7280' }}>Nenhuma transação corresponde aos filtros.</td></tr>
                 )}
               </tbody>
             </table>
