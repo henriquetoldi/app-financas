@@ -15,6 +15,20 @@ function formatarData(data) {
   return new Date(data).toLocaleDateString('pt-BR');
 }
 
+const STATUS_PROVISAO_OPCOES = ['PENDENTE', 'CONCILIADA', 'ATRASADA', 'CANCELADA', 'IGNORADA'];
+const TIPOS_PROVISAO_OPCOES = ['CREDITO', 'DEBITO'];
+
+function badgeStatusProvisao(status) {
+  const cores = {
+    PENDENTE: ['#fef3c7', '#92400e'],
+    CONCILIADA: ['#dcfce7', '#166534'],
+    ATRASADA: ['#fee2e2', '#991b1b'],
+    CANCELADA: ['#e5e7eb', '#374151'],
+    IGNORADA: ['#ede9fe', '#5b21b6'],
+  };
+  return cores[status] || ['#e5e7eb', '#374151'];
+}
+
 function formatarMoeda(valor) {
   return new Intl.NumberFormat('pt-BR', {
     style: 'currency',
@@ -586,6 +600,8 @@ function ImportarExcel({ contas, token, onConcluida }) {
   const [validacao, setValidacao] = useState(null);
   const [preview, setPreview] = useState(null);
   const [mapeamentoCategorias, setMapeamentoCategorias] = useState([]);
+  const [conciliacoesSelecionadas, setConciliacoesSelecionadas] = useState([]);
+  const [conciliacoesIgnoradas, setConciliacoesIgnoradas] = useState([]);
   const [carregando, setCarregando] = useState(false);
 
   const authHeaders = { Authorization: `Bearer ${token}` };
@@ -595,6 +611,8 @@ function ImportarExcel({ contas, token, onConcluida }) {
     setValidacao(null);
     setPreview(null);
     setMapeamentoCategorias([]);
+    setConciliacoesSelecionadas([]);
+    setConciliacoesIgnoradas([]);
     setCarregando(true);
     try {
       const dados = await lerXlsxPadrao(file);
@@ -618,6 +636,8 @@ function ImportarExcel({ contas, token, onConcluida }) {
         arquivo_base64: await arquivoParaBase64(arquivo),
       }, { headers: authHeaders });
       setPreview(response.data);
+      setConciliacoesSelecionadas([]);
+      setConciliacoesIgnoradas([]);
       setMapeamentoCategorias((response.data.categoriasPendentes || []).map((pendencia) => ({
         tipo: pendencia.tipo,
         nomePlanilha: pendencia.nomePlanilha,
@@ -641,6 +661,8 @@ function ImportarExcel({ contas, token, onConcluida }) {
         tokenPreview: preview.tokenPreview,
         acao,
         mapeamentoCategorias,
+        conciliacoesConfirmadas: conciliacoesSelecionadas,
+        conciliacoesIgnoradas,
       }, { headers: authHeaders });
       alert(response.data.mensagem || 'Importação concluída.');
       onConcluida();
@@ -656,6 +678,8 @@ function ImportarExcel({ contas, token, onConcluida }) {
     setValidacao(null);
     setPreview(null);
     setMapeamentoCategorias([]);
+    setConciliacoesSelecionadas([]);
+    setConciliacoesIgnoradas([]);
   };
 
   const atualizarMapeamentoCategoria = (chave, atualizacao) => {
@@ -663,6 +687,20 @@ function ImportarExcel({ contas, token, onConcluida }) {
       const chaveItem = `${item.tipo}|${item.categoriaMacroPlanilha || ''}|${item.nomePlanilha}`;
       return chaveItem === chave ? { ...item, ...atualizacao } : item;
     }));
+  };
+
+  const alternarConciliacaoSelecionada = (sugestao) => {
+    const chave = `${sugestao.provisaoId}|${sugestao.transacaoTempId || sugestao.transacaoId}`;
+    setConciliacoesIgnoradas((atuais) => atuais.filter((item) => `${item.provisaoId}|${item.transacaoTempId || item.transacaoId}` !== chave));
+    setConciliacoesSelecionadas((atuais) => atuais.some((item) => `${item.provisaoId}|${item.transacaoTempId || item.transacaoId}` === chave)
+      ? atuais.filter((item) => `${item.provisaoId}|${item.transacaoTempId || item.transacaoId}` !== chave)
+      : [...atuais, sugestao]);
+  };
+
+  const ignorarConciliacaoPreview = (sugestao) => {
+    const chave = `${sugestao.provisaoId}|${sugestao.transacaoTempId || sugestao.transacaoId}`;
+    setConciliacoesSelecionadas((atuais) => atuais.filter((item) => `${item.provisaoId}|${item.transacaoTempId || item.transacaoId}` !== chave));
+    setConciliacoesIgnoradas((atuais) => atuais.some((item) => `${item.provisaoId}|${item.transacaoTempId || item.transacaoId}` === chave) ? atuais : [...atuais, sugestao]);
   };
 
   const categoriasPendentes = preview?.categoriasPendentes || [];
@@ -816,6 +854,46 @@ function ImportarExcel({ contas, token, onConcluida }) {
                 })}
               </div>
               {!mapeamentosResolvidos && <p style={{ color: '#b45309', fontWeight: 'bold', marginBottom: 0 }}>Resolva as categorias pendentes antes de concluir a importação.</p>}
+            </div>
+          )}
+
+          {(preview.sugestoesConciliacao || []).length > 0 && (
+            <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '10px', padding: '14px', marginBottom: '14px' }}>
+              <h3 style={{ marginTop: 0 }}>Possíveis conciliações encontradas</h3>
+              <p style={{ color: '#1d4ed8' }}>Encontramos provisões que parecem corresponder às transações importadas. Revise antes de confirmar: nada será conciliado automaticamente.</p>
+              <div style={{ display: 'grid', gap: '12px' }}>
+                {(preview.sugestoesConciliacao || []).map((sugestao) => {
+                  const chave = `${sugestao.provisaoId}|${sugestao.transacaoTempId || sugestao.transacaoId}`;
+                  const selecionada = conciliacoesSelecionadas.some((item) => `${item.provisaoId}|${item.transacaoTempId || item.transacaoId}` === chave);
+                  const ignorada = conciliacoesIgnoradas.some((item) => `${item.provisaoId}|${item.transacaoTempId || item.transacaoId}` === chave);
+                  return (
+                    <div key={chave} style={{ background: 'white', border: selecionada ? '2px solid #2563eb' : '1px solid #bfdbfe', borderRadius: '10px', padding: '12px', opacity: ignorada ? 0.55 : 1 }}>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(230px, 1fr))', gap: '12px' }}>
+                        <div>
+                          <strong>Provisão</strong>
+                          <p style={{ margin: '6px 0' }}>{sugestao.provisao?.descricao}</p>
+                          <small>{formatarData(sugestao.provisao?.data_prevista)} • {formatarMoeda(sugestao.provisao?.valor_previsto)} • {sugestao.provisao?.tipo}</small>
+                        </div>
+                        <div>
+                          <strong>Transação real</strong>
+                          <p style={{ margin: '6px 0' }}>{sugestao.transacao?.descricao}</p>
+                          <small>{formatarData(sugestao.transacao?.data)} • {formatarMoeda(sugestao.transacao?.valor)} • {sugestao.transacao?.tipo}</small>
+                        </div>
+                        <div>
+                          <strong>Análise</strong>
+                          <p style={{ margin: '6px 0' }}><span style={{ background: '#dbeafe', color: '#1d4ed8', padding: '3px 7px', borderRadius: '999px', fontSize: '12px', fontWeight: 'bold' }}>{sugestao.confianca}</span> score {Number(sugestao.score || 0).toFixed(2)}</p>
+                          <small>{(sugestao.motivos || []).join(' • ')}</small>
+                        </div>
+                      </div>
+                      <div style={{ display: 'flex', gap: '8px', marginTop: '10px', flexWrap: 'wrap' }}>
+                        <button onClick={() => alternarConciliacaoSelecionada(sugestao)} style={{ background: selecionada ? '#1d4ed8' : 'white', color: selecionada ? 'white' : '#1d4ed8', border: '1px solid #1d4ed8', padding: '8px 10px', borderRadius: '8px', cursor: 'pointer' }}>{selecionada ? 'Selecionada para confirmar' : 'Confirmar conciliação'}</button>
+                        <button onClick={() => ignorarConciliacaoPreview(sugestao)} style={{ background: ignorada ? '#6b7280' : 'white', color: ignorada ? 'white' : '#6b7280', border: '1px solid #6b7280', padding: '8px 10px', borderRadius: '8px', cursor: 'pointer' }}>Ignorar sugestão</button>
+                        <button onClick={() => setConciliacoesSelecionadas((atuais) => atuais.filter((item) => `${item.provisaoId}|${item.transacaoTempId || item.transacaoId}` !== chave))} style={{ background: 'white', color: '#92400e', border: '1px solid #f59e0b', padding: '8px 10px', borderRadius: '8px', cursor: 'pointer' }}>Manter pendente</button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
 
@@ -1170,6 +1248,10 @@ function Dashboard({ usuario, token, onLogout }) {
     }
   };
 
+  if (modo === 'provisoes') {
+    return <TelaProvisoes contas={contas} token={token} onVoltar={() => setModo('home')} />;
+  }
+
   if (modo === 'transacoes' && (contaSelecionada || contas.length > 0)) {
     return (
       <TelaTransacoes
@@ -1185,6 +1267,7 @@ function Dashboard({ usuario, token, onLogout }) {
   const seriesDashboard = resumoDashboard?.series || {};
   const insightsDashboard = resumoDashboard?.insights || {};
   const saldoLiquido = Number(kpisDashboard.saldoLiquido || 0);
+  const provisoesDashboard = kpisDashboard.provisoes || {};
 
   return (
     <div style={{ minHeight: '100vh', background: '#f5f5f5' }}>
@@ -1283,6 +1366,12 @@ function Dashboard({ usuario, token, onLogout }) {
                         Ver transações consolidadas
                       </button>
                       <button
+                        onClick={() => setModo('provisoes')}
+                        style={{ background: '#0f766e', color: 'white', border: 'none', padding: '10px 16px', borderRadius: '8px', cursor: 'pointer' }}
+                      >
+                        📌 Provisões
+                      </button>
+                      <button
                         onClick={() => setModo('importar')}
                         style={{ background: '#667eea', color: 'white', border: 'none', padding: '10px 16px', borderRadius: '8px', cursor: 'pointer' }}
                       >
@@ -1339,6 +1428,18 @@ function Dashboard({ usuario, token, onLogout }) {
                   <KpiCard titulo="Ticket médio despesa" valor={formatarMoeda(kpisDashboard.ticketMedioDespesa)} detalhe="Média dos débitos" cor="#7c3aed" />
                   <KpiCard titulo="Categorizado" valor={formatarPercentual(kpisDashboard.percentualCategorizado)} detalhe="Transações com categoria" cor="#0f766e" />
                   <KpiCard titulo="Transferências internas" valor={Number(kpisDashboard.transferenciasInternas || 0)} detalhe="Não entram nos KPIs financeiros" cor="#0f766e" />
+                </div>
+
+                <div style={{ background: 'white', borderRadius: '14px', padding: '16px', marginBottom: '20px' }}>
+                  <h3 style={{ marginTop: 0 }}>Provisões no período</h3>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '12px' }}>
+                    <KpiCard titulo="Provisionado a pagar" valor={formatarMoeda(provisoesDashboard.totalProvisionadoPagar)} detalhe="Débitos previstos" cor="#dc2626" fundo="#fef2f2" />
+                    <KpiCard titulo="Provisionado a receber" valor={formatarMoeda(provisoesDashboard.totalProvisionadoReceber)} detalhe="Créditos previstos" cor="#059669" fundo="#ecfdf5" />
+                    <KpiCard titulo="Realizado conciliado" valor={formatarMoeda(provisoesDashboard.totalRealizadoConciliado)} detalhe="Transações vinculadas" cor="#2563eb" fundo="#eff6ff" />
+                    <KpiCard titulo="Provisões pendentes" valor={Number(provisoesDashboard.pendentes || 0)} detalhe="Aguardando conciliação" cor="#d97706" fundo="#fffbeb" />
+                    <KpiCard titulo="Provisões conciliadas" valor={Number(provisoesDashboard.conciliadas || 0)} detalhe={`${formatarPercentual(provisoesDashboard.percentualConciliado)} do total`} cor="#0f766e" fundo="#f0fdfa" />
+                    <KpiCard titulo="Provisões atrasadas" valor={Number(provisoesDashboard.atrasadas || 0)} detalhe="Status atrasada" cor="#b91c1c" fundo="#fef2f2" />
+                  </div>
                 </div>
 
                 {carregandoDashboard ? (
@@ -1526,6 +1627,282 @@ function Dashboard({ usuario, token, onLogout }) {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+
+// ============================================================================
+// TELA DE PROVISÕES
+// ============================================================================
+
+function TelaProvisoes({ contas = [], token, onVoltar }) {
+  const [provisoes, setProvisoes] = useState([]);
+  const [categorias, setCategorias] = useState([]);
+  const [transacoes, setTransacoes] = useState([]);
+  const [filtros, setFiltros] = useState({ dataInicial: '', dataFinal: '', status: 'todos', tipo: 'todos', contaId: 'todas', categoriaMacroId: 'todas', categoriaDetalhadaId: 'todas', busca: '' });
+  const [modalAberto, setModalAberto] = useState(false);
+  const [editando, setEditando] = useState(null);
+  const [form, setForm] = useState({ descricao: '', valorPrevisto: '', tipo: 'DEBITO', dataPrevista: dataLocalISO(new Date()), dataVencimento: '', contaId: '', categoriaMacroId: '', categoriaDetalhadaId: '', observacao: '', recorrente: false, periodicidade: '' });
+  const [sugestoes, setSugestoes] = useState([]);
+  const [provisaoConciliando, setProvisaoConciliando] = useState(null);
+  const [carregando, setCarregando] = useState(false);
+  const authHeaders = { Authorization: `Bearer ${token}` };
+
+  const categoriasMacro = categorias.filter((cat) => (cat.nivel || (cat.categoria_pai_id ? 'DETALHADA' : 'MACRO')) === 'MACRO');
+  const categoriasDetalhadas = categorias.filter((cat) => (cat.nivel || (cat.categoria_pai_id ? 'DETALHADA' : 'MACRO')) === 'DETALHADA' && (!form.categoriaMacroId || cat.categoria_pai_id === form.categoriaMacroId));
+  const categoriasDetalhadasFiltro = categorias.filter((cat) => (cat.nivel || (cat.categoria_pai_id ? 'DETALHADA' : 'MACRO')) === 'DETALHADA' && (filtros.categoriaMacroId === 'todas' || cat.categoria_pai_id === filtros.categoriaMacroId));
+
+  const carregarDados = async () => {
+    setCarregando(true);
+    try {
+      const params = new URLSearchParams();
+      Object.entries(filtros).forEach(([chave, valor]) => { if (valor && valor !== 'todos' && valor !== 'todas') params.set(chave, valor); });
+      const [provisoesResponse, categoriasResponse, transacoesResponse] = await Promise.all([
+        axios.get(`${API_URL}/provisoes?${params.toString()}`, { headers: authHeaders }),
+        axios.get(`${API_URL}/categorias`, { headers: authHeaders }),
+        axios.get(`${API_URL}/transacoes`, { headers: authHeaders }),
+      ]);
+      setProvisoes(provisoesResponse.data.provisoes || []);
+      setCategorias(categoriasResponse.data.categorias || []);
+      setTransacoes(transacoesResponse.data.transacoes || []);
+    } catch (error) {
+      alert(error.response?.data?.erro || error.message);
+    } finally {
+      setCarregando(false);
+    }
+  };
+
+  useEffect(() => { carregarDados(); }, []);
+
+  const abrirNova = () => {
+    setEditando(null);
+    setForm({ descricao: '', valorPrevisto: '', tipo: 'DEBITO', dataPrevista: dataLocalISO(new Date()), dataVencimento: '', contaId: '', categoriaMacroId: '', categoriaDetalhadaId: '', observacao: '', recorrente: false, periodicidade: '' });
+    setModalAberto(true);
+  };
+
+  const abrirEdicao = (provisao) => {
+    setEditando(provisao);
+    setForm({
+      descricao: provisao.descricao || '',
+      valorPrevisto: provisao.valor_previsto || '',
+      tipo: provisao.tipo || 'DEBITO',
+      dataPrevista: normalizarDataFiltro(provisao.data_prevista),
+      dataVencimento: normalizarDataFiltro(provisao.data_vencimento),
+      contaId: provisao.conta_id || '',
+      categoriaMacroId: provisao.categoria_macro_id || '',
+      categoriaDetalhadaId: provisao.categoria_detalhada_id || '',
+      observacao: provisao.observacao || '',
+      recorrente: Boolean(provisao.recorrente),
+      periodicidade: provisao.periodicidade || '',
+    });
+    setModalAberto(true);
+  };
+
+  const salvarProvisao = async () => {
+    try {
+      const payload = { ...form, valorPrevisto: Number(form.valorPrevisto), contaId: form.contaId || null, categoriaMacroId: form.categoriaMacroId || null, categoriaDetalhadaId: form.categoriaDetalhadaId || null, dataVencimento: form.dataVencimento || null };
+      if (editando) await axios.patch(`${API_URL}/provisoes/${editando.id}`, payload, { headers: authHeaders });
+      else await axios.post(`${API_URL}/provisoes`, payload, { headers: authHeaders });
+      setModalAberto(false);
+      await carregarDados();
+    } catch (error) {
+      alert(error.response?.data?.erro || error.message);
+    }
+  };
+
+  const excluirProvisao = async (provisao) => {
+    if (!window.confirm(`Excluir provisão "${provisao.descricao}"?`)) return;
+    try {
+      await axios.delete(`${API_URL}/provisoes/${provisao.id}${provisao.status === 'CONCILIADA' ? '?confirmar=true' : ''}`, { headers: authHeaders });
+      await carregarDados();
+    } catch (error) {
+      alert(error.response?.data?.erro || error.message);
+    }
+  };
+
+  const atualizarStatus = async (provisao, status) => {
+    try {
+      await axios.patch(`${API_URL}/provisoes/${provisao.id}`, { status }, { headers: authHeaders });
+      await carregarDados();
+    } catch (error) {
+      alert(error.response?.data?.erro || error.message);
+    }
+  };
+
+  const duplicarProvisao = async (provisao) => {
+    try {
+      await axios.post(`${API_URL}/provisoes/${provisao.id}/duplicar`, {}, { headers: authHeaders });
+      await carregarDados();
+    } catch (error) {
+      alert(error.response?.data?.erro || error.message);
+    }
+  };
+
+  const abrirConciliacao = async (provisao) => {
+    setProvisaoConciliando(provisao);
+    setSugestoes([]);
+    try {
+      const dataPrevista = normalizarDataFiltro(provisao.data_prevista);
+      const base = new Date(`${dataPrevista}T00:00:00Z`);
+      const dataInicial = new Date(base); dataInicial.setUTCDate(base.getUTCDate() - 3);
+      const dataFinal = new Date(base); dataFinal.setUTCDate(base.getUTCDate() + 3);
+      const response = await axios.post(`${API_URL}/conciliacoes/sugerir`, { provisaoId: provisao.id, dataInicial: dataInicial.toISOString().slice(0, 10), dataFinal: dataFinal.toISOString().slice(0, 10) }, { headers: authHeaders });
+      setSugestoes(response.data.sugestoes || []);
+    } catch (error) {
+      alert(error.response?.data?.erro || error.message);
+    }
+  };
+
+  const confirmarConciliacao = async (sugestao) => {
+    try {
+      await axios.post(`${API_URL}/conciliacoes/confirmar`, { provisaoId: sugestao.provisaoId, transacaoId: sugestao.transacaoId }, { headers: authHeaders });
+      setProvisaoConciliando(null);
+      await carregarDados();
+    } catch (error) {
+      alert(error.response?.data?.erro || error.message);
+    }
+  };
+
+  const ignorarSugestao = async (sugestao) => {
+    try {
+      await axios.post(`${API_URL}/conciliacoes/ignorar`, { provisaoId: sugestao.provisaoId, transacaoId: sugestao.transacaoId, confianca: sugestao.confianca, score: sugestao.score, motivos: sugestao.motivos }, { headers: authHeaders });
+      setSugestoes((atuais) => atuais.filter((item) => item.transacaoId !== sugestao.transacaoId));
+    } catch (error) {
+      alert(error.response?.data?.erro || error.message);
+    }
+  };
+
+  const desfazerConciliacao = async (provisao) => {
+    if (!provisao.conciliacao_id || !window.confirm('Desfazer conciliação desta provisão?')) return;
+    try {
+      await axios.post(`${API_URL}/conciliacoes/desfazer`, { conciliacaoId: provisao.conciliacao_id }, { headers: authHeaders });
+      await carregarDados();
+    } catch (error) {
+      alert(error.response?.data?.erro || error.message);
+    }
+  };
+
+  const aplicarFiltros = () => carregarDados();
+
+  return (
+    <div style={{ minHeight: '100vh', background: '#f5f5f5' }}>
+      <div style={{ background: '#1f2937', color: 'white', padding: '20px' }}>
+        <button onClick={onVoltar} style={{ background: 'rgba(255,255,255,0.2)', color: 'white', border: '1px solid rgba(255,255,255,0.3)', padding: '8px 12px', borderRadius: '6px', cursor: 'pointer' }}>← Voltar</button>
+        <h1 style={{ margin: '14px 0 4px' }}>📌 Provisões</h1>
+        <p style={{ margin: 0, opacity: 0.8 }}>Cadastre valores previstos e confirme conciliações com transações reais.</p>
+      </div>
+
+      <div style={{ padding: '20px', maxWidth: '1280px', margin: '0 auto' }}>
+        <div style={{ background: 'white', borderRadius: '14px', padding: '16px', marginBottom: '16px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap', marginBottom: '12px' }}>
+            <h2 style={{ margin: 0 }}>Contas provisionadas</h2>
+            <button onClick={abrirNova} style={{ background: '#2563eb', color: 'white', border: 'none', padding: '10px 14px', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold' }}>+ Nova provisão</button>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '10px' }}>
+            <input type="date" value={filtros.dataInicial} onChange={(e) => setFiltros({ ...filtros, dataInicial: e.target.value })} style={{ padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }} />
+            <input type="date" value={filtros.dataFinal} onChange={(e) => setFiltros({ ...filtros, dataFinal: e.target.value })} style={{ padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }} />
+            <select value={filtros.status} onChange={(e) => setFiltros({ ...filtros, status: e.target.value })} style={{ padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }}><option value="todos">Todos status</option>{STATUS_PROVISAO_OPCOES.map((s) => <option key={s} value={s}>{s}</option>)}</select>
+            <select value={filtros.tipo} onChange={(e) => setFiltros({ ...filtros, tipo: e.target.value })} style={{ padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }}><option value="todos">Todos tipos</option><option value="CREDITO">Crédito</option><option value="DEBITO">Débito</option></select>
+            <select value={filtros.contaId} onChange={(e) => setFiltros({ ...filtros, contaId: e.target.value })} style={{ padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }}><option value="todas">Todas contas</option>{contas.map((c) => <option key={c.id} value={c.id}>{c.nome}</option>)}</select>
+            <select value={filtros.categoriaMacroId} onChange={(e) => setFiltros({ ...filtros, categoriaMacroId: e.target.value, categoriaDetalhadaId: 'todas' })} style={{ padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }}><option value="todas">Todas macros</option>{categoriasMacro.map((c) => <option key={c.id} value={c.id}>{c.nome}</option>)}</select>
+            <select value={filtros.categoriaDetalhadaId} onChange={(e) => setFiltros({ ...filtros, categoriaDetalhadaId: e.target.value })} style={{ padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }}><option value="todas">Todas detalhadas</option>{categoriasDetalhadasFiltro.map((c) => <option key={c.id} value={c.id}>{c.nome}</option>)}</select>
+            <input value={filtros.busca} onChange={(e) => setFiltros({ ...filtros, busca: e.target.value })} placeholder="Buscar descrição" style={{ padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }} />
+            <button onClick={aplicarFiltros} style={{ background: '#111827', color: 'white', border: 'none', padding: '10px', borderRadius: '8px', cursor: 'pointer' }}>Filtrar</button>
+          </div>
+        </div>
+
+        <div style={{ background: 'white', borderRadius: '14px', overflowX: 'auto' }}>
+          {carregando ? <p style={{ padding: '20px' }}>Carregando provisões...</p> : (
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '14px' }}>
+              <thead style={{ background: '#f8fafc' }}><tr>{['Data prevista','Vencimento','Descrição','Conta','Valor previsto','Tipo','Categoria','Status','Transação conciliada','Ações'].map((h) => <th key={h} style={{ padding: '12px', textAlign: 'left' }}>{h}</th>)}</tr></thead>
+              <tbody>
+                {provisoes.map((p) => {
+                  const [bg, cor] = badgeStatusProvisao(p.status);
+                  return (
+                    <tr key={p.id} style={{ borderTop: '1px solid #e5e7eb' }}>
+                      <td style={{ padding: '12px' }}>{formatarData(p.data_prevista)}</td>
+                      <td style={{ padding: '12px' }}>{p.data_vencimento ? formatarData(p.data_vencimento) : '-'}</td>
+                      <td style={{ padding: '12px' }}>{p.descricao}</td>
+                      <td style={{ padding: '12px' }}>{p.conta_nome || '-'}</td>
+                      <td style={{ padding: '12px', fontWeight: 'bold', color: p.tipo === 'CREDITO' ? '#059669' : '#dc2626' }}>{formatarMoeda(p.valor_previsto)}</td>
+                      <td style={{ padding: '12px' }}>{p.tipo}</td>
+                      <td style={{ padding: '12px' }}>{p.categoria_macro_nome || 'Sem categoria'}{p.categoria_detalhada_nome ? ` › ${p.categoria_detalhada_nome}` : ''}</td>
+                      <td style={{ padding: '12px' }}><span style={{ background: bg, color: cor, padding: '4px 8px', borderRadius: '999px', fontSize: '12px', fontWeight: 'bold' }}>{p.status}</span></td>
+                      <td style={{ padding: '12px' }}>{p.transacao_conciliada_id ? `${p.transacao_conciliada_descricao || 'Transação'} (${formatarData(p.transacao_conciliada_data)})` : '-'}</td>
+                      <td style={{ padding: '12px' }}>
+                        <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                          <button onClick={() => abrirEdicao(p)} style={{ padding: '5px 8px', borderRadius: '6px', border: '1px solid #d1d5db', background: 'white', cursor: 'pointer' }}>Editar</button>
+                          <button onClick={() => excluirProvisao(p)} style={{ padding: '5px 8px', borderRadius: '6px', border: '1px solid #dc2626', color: '#dc2626', background: 'white', cursor: 'pointer' }}>Excluir</button>
+                          <button onClick={() => abrirConciliacao(p)} disabled={!['PENDENTE','ATRASADA'].includes(p.status)} style={{ padding: '5px 8px', borderRadius: '6px', border: '1px solid #2563eb', color: '#2563eb', background: 'white', cursor: ['PENDENTE','ATRASADA'].includes(p.status) ? 'pointer' : 'not-allowed' }}>Conciliar</button>
+                          <button onClick={() => duplicarProvisao(p)} style={{ padding: '5px 8px', borderRadius: '6px', border: '1px solid #6b7280', background: 'white', cursor: 'pointer' }}>Duplicar</button>
+                          {p.status !== 'CANCELADA' && <button onClick={() => atualizarStatus(p, 'CANCELADA')} style={{ padding: '5px 8px', borderRadius: '6px', border: '1px solid #6b7280', background: 'white', cursor: 'pointer' }}>Cancelar</button>}
+                          {p.status !== 'IGNORADA' && <button onClick={() => atualizarStatus(p, 'IGNORADA')} style={{ padding: '5px 8px', borderRadius: '6px', border: '1px solid #7c3aed', color: '#7c3aed', background: 'white', cursor: 'pointer' }}>Ignorar</button>}
+                          {p.conciliacao_id && <button onClick={() => desfazerConciliacao(p)} style={{ padding: '5px 8px', borderRadius: '6px', border: '1px solid #f59e0b', color: '#92400e', background: 'white', cursor: 'pointer' }}>Desfazer</button>}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+                {provisoes.length === 0 && <tr><td colSpan="10" style={{ padding: '24px', textAlign: 'center', color: '#6b7280' }}>Nenhuma provisão encontrada.</td></tr>}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </div>
+
+      {modalAberto && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <div style={{ background: 'white', borderRadius: '14px', padding: '24px', width: '92%', maxWidth: '680px', maxHeight: '90vh', overflowY: 'auto' }}>
+            <h2 style={{ marginTop: 0 }}>{editando ? 'Editar provisão' : 'Nova provisão'}</h2>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '12px' }}>
+              <label>Descrição<input value={form.descricao} onChange={(e) => setForm({ ...form, descricao: e.target.value })} style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px', boxSizing: 'border-box' }} /></label>
+              <label>Valor previsto<input type="number" min="0" step="0.01" value={form.valorPrevisto} onChange={(e) => setForm({ ...form, valorPrevisto: e.target.value })} style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px', boxSizing: 'border-box' }} /></label>
+              <label>Tipo<select value={form.tipo} onChange={(e) => setForm({ ...form, tipo: e.target.value })} style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }}>{TIPOS_PROVISAO_OPCOES.map((t) => <option key={t} value={t}>{t}</option>)}</select></label>
+              <label>Data prevista<input type="date" value={form.dataPrevista} onChange={(e) => setForm({ ...form, dataPrevista: e.target.value })} style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px', boxSizing: 'border-box' }} /></label>
+              <label>Data de vencimento<input type="date" value={form.dataVencimento} onChange={(e) => setForm({ ...form, dataVencimento: e.target.value })} style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px', boxSizing: 'border-box' }} /></label>
+              <label>Conta esperada<select value={form.contaId} onChange={(e) => setForm({ ...form, contaId: e.target.value })} style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }}><option value="">Sem conta</option>{contas.map((c) => <option key={c.id} value={c.id}>{c.nome}</option>)}</select></label>
+              <label>Categoria macro<select value={form.categoriaMacroId} onChange={(e) => setForm({ ...form, categoriaMacroId: e.target.value, categoriaDetalhadaId: '' })} style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }}><option value="">Sem macro</option>{categoriasMacro.map((c) => <option key={c.id} value={c.id}>{c.nome}</option>)}</select></label>
+              <label>Categoria detalhada<select value={form.categoriaDetalhadaId} onChange={(e) => setForm({ ...form, categoriaDetalhadaId: e.target.value })} style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }}><option value="">Sem detalhamento</option>{categoriasDetalhadas.map((c) => <option key={c.id} value={c.id}>{c.nome}</option>)}</select></label>
+            </div>
+            <label style={{ display: 'block', marginTop: '12px' }}>Observação<textarea value={form.observacao} onChange={(e) => setForm({ ...form, observacao: e.target.value })} rows="3" style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px', boxSizing: 'border-box' }} /></label>
+            <label style={{ display: 'flex', gap: '8px', marginTop: '12px', alignItems: 'center' }}><input type="checkbox" checked={form.recorrente} onChange={(e) => setForm({ ...form, recorrente: e.target.checked })} /> Recorrente</label>
+            {form.recorrente && <select value={form.periodicidade} onChange={(e) => setForm({ ...form, periodicidade: e.target.value })} style={{ marginTop: '8px', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }}><option value="">Periodicidade</option><option value="SEMANAL">Semanal</option><option value="MENSAL">Mensal</option><option value="ANUAL">Anual</option></select>}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '18px' }}>
+              <button onClick={() => setModalAberto(false)} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', background: '#e5e7eb', cursor: 'pointer' }}>Cancelar</button>
+              <button onClick={salvarProvisao} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', background: '#2563eb', color: 'white', cursor: 'pointer' }}>Salvar</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {provisaoConciliando && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <div style={{ background: 'white', borderRadius: '14px', padding: '24px', width: '92%', maxWidth: '900px', maxHeight: '90vh', overflowY: 'auto' }}>
+            <h2 style={{ marginTop: 0 }}>Conciliar: {provisaoConciliando.descricao}</h2>
+            <p style={{ color: '#6b7280' }}>Escolha uma transação candidata. A conciliação só será aplicada após confirmação.</p>
+            <div style={{ display: 'grid', gap: '10px' }}>
+              {sugestoes.map((s) => (
+                <div key={s.transacaoId} style={{ border: '1px solid #d1d5db', borderRadius: '10px', padding: '12px' }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '10px' }}>
+                    <strong>{s.transacao.descricao}</strong>
+                    <span>{formatarData(s.transacao.data)} • {formatarMoeda(s.transacao.valor)}</span>
+                    <span>{s.transacao.conta_nome || 'Conta'} • {s.transacao.categoria_macro_nome || 'Sem categoria'}</span>
+                    <span>{s.confianca} ({Number(s.score || 0).toFixed(2)})</span>
+                  </div>
+                  <small style={{ color: '#6b7280' }}>{(s.motivos || []).join(' • ')}</small>
+                  <div style={{ display: 'flex', gap: '8px', marginTop: '10px' }}>
+                    <button onClick={() => confirmarConciliacao(s)} style={{ background: '#16a34a', color: 'white', border: 'none', padding: '8px 10px', borderRadius: '8px', cursor: 'pointer' }}>Confirmar conciliação</button>
+                    <button onClick={() => ignorarSugestao(s)} style={{ background: 'white', color: '#6b7280', border: '1px solid #6b7280', padding: '8px 10px', borderRadius: '8px', cursor: 'pointer' }}>Ignorar sugestão</button>
+                  </div>
+                </div>
+              ))}
+              {sugestoes.length === 0 && <p style={{ color: '#6b7280' }}>Nenhuma transação candidata encontrada pelos critérios iniciais.</p>}
+            </div>
+            <button onClick={() => setProvisaoConciliando(null)} style={{ marginTop: '14px', padding: '10px 14px', borderRadius: '8px', border: 'none', background: '#e5e7eb', cursor: 'pointer' }}>Fechar</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1966,6 +2343,11 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
                       {tx.eh_transferencia_interna && (
                         <span style={{ marginLeft: '8px', background: '#ccfbf1', color: '#0f766e', padding: '3px 7px', borderRadius: '999px', fontSize: '11px', fontWeight: 'bold' }}>
                           Transferência interna
+                        </span>
+                      )}
+                      {tx.conciliacao_id && (
+                        <span title={tx.provisao_conciliada_descricao ? `Provisão: ${tx.provisao_conciliada_descricao}` : 'Vinculada a provisão'} style={{ marginLeft: '8px', background: '#dcfce7', color: '#166534', padding: '3px 7px', borderRadius: '999px', fontSize: '11px', fontWeight: 'bold' }}>
+                          Conciliada
                         </span>
                       )}
                     </td>
