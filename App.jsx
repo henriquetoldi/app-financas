@@ -2,7 +2,7 @@
 // FRONTEND: React App
 // ============================================================================
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import axios from 'axios';
 
 const API_URL = import.meta.env.VITE_API_URL || '/api';
@@ -13,6 +13,20 @@ const API_URL = import.meta.env.VITE_API_URL || '/api';
 
 function formatarData(data) {
   return new Date(data).toLocaleDateString('pt-BR');
+}
+
+const STATUS_PROVISAO_OPCOES = ['PENDENTE', 'CONCILIADA', 'ATRASADA', 'CANCELADA', 'IGNORADA'];
+const TIPOS_PROVISAO_OPCOES = ['CREDITO', 'DEBITO'];
+
+function badgeStatusProvisao(status) {
+  const cores = {
+    PENDENTE: ['#fef3c7', '#92400e'],
+    CONCILIADA: ['#dcfce7', '#166534'],
+    ATRASADA: ['#fee2e2', '#991b1b'],
+    CANCELADA: ['#e5e7eb', '#374151'],
+    IGNORADA: ['#ede9fe', '#5b21b6'],
+  };
+  return cores[status] || ['#e5e7eb', '#374151'];
 }
 
 function formatarMoeda(valor) {
@@ -267,30 +281,37 @@ async function lerXlsxPadrao(file) {
     categoria: indiceOpcional('categoria'),
     categoriaMacro: indiceOpcional('categoria macro', 'categoria_macro', 'macro'),
     categoriaDetalhada: indiceOpcional('categoria detalhada', 'categoria_detalhada', 'subcategoria', 'categoria detalhe'),
-    conta: indiceOpcional('conta', 'conta destino'),
+    conta: indiceOpcional('conta'),
     valor: indiceOpcional('valor'),
     tipo: indiceOpcional('tipo'),
   };
-  const obrigatorias = { data: indices.data, descricao: indices.descricao, valor: indices.valor, tipo: indices.tipo };
+  const obrigatorias = { data: indices.data, conta: indices.conta, descricao: indices.descricao, valor: indices.valor, tipo: indices.tipo };
   const faltantes = Object.entries(obrigatorias)
     .filter(([, indice]) => indice === -1)
     .map(([coluna]) => coluna === 'descricao' ? 'Descrição' : coluna.charAt(0).toUpperCase() + coluna.slice(1));
 
   if (faltantes.length > 0) {
+    if (faltantes.includes('Conta')) {
+      throw new Error('A planilha precisa conter a coluna Conta para identificar em qual conta cada transação será importada.');
+    }
     throw new Error(`Colunas obrigatórias não encontradas: ${faltantes.join(', ')}.`);
   }
 
-  return linhas.slice(1).filter((linha) => linha.some((valor) => String(valor || '').trim())).map((linha) => ({
-    data: linha[indices.data],
-    descricao: linha[indices.descricao],
-    categoria: indices.categoria >= 0 ? linha[indices.categoria] : '',
-    categoria_macro: indices.categoriaMacro >= 0 ? linha[indices.categoriaMacro] : (indices.categoria >= 0 ? linha[indices.categoria] : ''),
-    categoria_detalhada: indices.categoriaDetalhada >= 0 ? linha[indices.categoriaDetalhada] : '',
-    conta: indices.conta >= 0 ? linha[indices.conta] : '',
-    transacao_id: indices.id >= 0 ? linha[indices.id] : '',
-    valor: linha[indices.valor],
-    tipo: linha[indices.tipo],
-  }));
+  return linhas.slice(1)
+    .map((linha, index) => ({ linha, numeroLinha: index + 2 }))
+    .filter(({ linha }) => linha.some((valor) => String(valor || '').trim()))
+    .map(({ linha, numeroLinha }) => ({
+      _linha: numeroLinha,
+      data: linha[indices.data],
+      descricao: linha[indices.descricao],
+      categoria: indices.categoria >= 0 ? linha[indices.categoria] : '',
+      categoria_macro: indices.categoriaMacro >= 0 ? linha[indices.categoriaMacro] : (indices.categoria >= 0 ? linha[indices.categoria] : ''),
+      categoria_detalhada: indices.categoriaDetalhada >= 0 ? linha[indices.categoriaDetalhada] : '',
+      conta: indices.conta >= 0 ? linha[indices.conta] : '',
+      transacao_id: indices.id >= 0 ? linha[indices.id] : '',
+      valor: linha[indices.valor],
+      tipo: linha[indices.tipo],
+    }));
 }
 
 
@@ -478,9 +499,108 @@ function normalizarDataLinha(valor) {
   return data.toISOString().slice(0, 10);
 }
 
-function normalizarValorLinha(valor) {
-  if (typeof valor === 'number') return valor;
-  return Number(String(valor || '').replace(/R\$/g, '').replace(/\./g, '').replace(',', '.').trim());
+const LIMITE_VALOR_TRANSACAO = 9999999999.99;
+
+function textoValorOriginal(valor) {
+  if (valor === null || valor === undefined || valor === '') return 'vazio';
+  return String(valor);
+}
+
+function parseValorMonetario(valorOriginal) {
+  if (typeof valorOriginal === 'number') {
+    return {
+      valor: Number.isFinite(valorOriginal) ? valorOriginal : null,
+      erro: Number.isFinite(valorOriginal) ? null : 'A célula contém um número que o app não conseguiu interpretar.',
+      valorOriginal,
+      interpretadoComo: Number.isFinite(valorOriginal) ? valorOriginal : null,
+    };
+  }
+
+  const textoOriginal = String(valorOriginal ?? '').trim();
+  if (!textoOriginal) {
+    return {
+      valor: null,
+      erro: 'A célula de valor está vazia.',
+      valorOriginal,
+      interpretadoComo: null,
+    };
+  }
+
+  let texto = textoOriginal
+    .replace(/ /g, ' ')
+    .replace(/R\$/gi, '')
+    .replace(/\s+/g, '')
+    .trim();
+
+  const negativoPorParenteses = /^\(.+\)$/.test(texto);
+  if (negativoPorParenteses) texto = texto.slice(1, -1);
+  const negativo = negativoPorParenteses || /^-/.test(texto);
+  texto = texto.replace(/^[+-]/, '');
+
+  if (!texto || !/^[0-9.,]+$/.test(texto)) {
+    return {
+      valor: null,
+      erro: 'A célula contém caracteres que não parecem formar um valor monetário.',
+      valorOriginal,
+      interpretadoComo: null,
+    };
+  }
+
+  const ultimaVirgula = texto.lastIndexOf(',');
+  const ultimoPonto = texto.lastIndexOf('.');
+  let decimal = null;
+
+  if (ultimaVirgula >= 0 && ultimoPonto >= 0) {
+    decimal = ultimaVirgula > ultimoPonto ? ',' : '.';
+  } else if (ultimaVirgula >= 0) {
+    const digitosDepois = texto.length - ultimaVirgula - 1;
+    const ocorrencias = (texto.match(/,/g) || []).length;
+    decimal = ocorrencias === 1 && digitosDepois > 0 && digitosDepois <= 2 ? ',' : null;
+  } else if (ultimoPonto >= 0) {
+    const digitosDepois = texto.length - ultimoPonto - 1;
+    const ocorrencias = (texto.match(/\./g) || []).length;
+    decimal = ocorrencias === 1 && digitosDepois > 0 && digitosDepois <= 2 ? '.' : null;
+  }
+
+  let normalizado;
+  if (decimal === ',') {
+    normalizado = texto.replace(/\./g, '').replace(',', '.');
+  } else if (decimal === '.') {
+    normalizado = texto.replace(/,/g, '');
+  } else {
+    normalizado = texto.replace(/[.,]/g, '');
+  }
+
+  const numero = Number(normalizado);
+  const interpretadoComo = Number.isFinite(numero) ? (negativo ? -numero : numero) : null;
+
+  return {
+    valor: interpretadoComo,
+    erro: Number.isFinite(interpretadoComo) ? null : 'Não foi possível converter o conteúdo da célula em número.',
+    valorOriginal,
+    interpretadoComo,
+  };
+}
+
+function criarErroImportacaoLinha({ linha, coluna, valorOriginal = '', valorInterpretado = null, descricao = '', erro, sugestao }) {
+  return { linha, coluna, valorOriginal, valorInterpretado, descricao, erro, sugestao };
+}
+
+function formatarValorInterpretado(valor) {
+  return Number.isFinite(valor) ? formatarMoeda(valor) : '-';
+}
+
+function formatarErroImportacao(erro) {
+  if (typeof erro === 'string') return erro;
+  return [
+    `Linha ${erro.linha}`,
+    `Coluna: ${erro.coluna || '-'}`,
+    `Valor lido: "${textoValorOriginal(erro.valorOriginal)}"`,
+    `Valor interpretado: ${formatarValorInterpretado(erro.valorInterpretado)}`,
+    `Descrição: "${erro.descricao || '-'}"`,
+    `Problema: ${erro.erro}`,
+    `Sugestão: ${erro.sugestao || 'Revise a linha na planilha e tente novamente.'}`,
+  ].join('\n');
 }
 
 function validarExcelImportacao(dados) {
@@ -488,29 +608,97 @@ function validarExcelImportacao(dados) {
   const transacoes = [];
 
   dados.forEach((linha, index) => {
-    const numeroLinha = index + 2;
+    const numeroLinha = linha._linha || index + 2;
     const data = normalizarDataLinha(linha.data);
     const descricao = String(linha.descricao || '').trim();
     const categoria = String(linha.categoria || '').trim();
     const categoriaMacro = String(linha.categoria_macro || categoria || '').trim() || 'Outros';
     const categoriaDetalhada = String(linha.categoria_detalhada || '').trim();
-    const valor = normalizarValorLinha(linha.valor);
+    const conta = String(linha.conta || '').trim();
+    const valorParse = parseValorMonetario(linha.valor);
+    const valor = valorParse.valor;
     const tipoTexto = normalizarTextoColuna(linha.tipo);
 
-    if (!data) erros.push(`Linha ${numeroLinha}: Data inválida.`);
-    if (!descricao) erros.push(`Linha ${numeroLinha}: Descrição obrigatória.`);
-    if (!Number.isFinite(valor) || valor <= 0) erros.push(`Linha ${numeroLinha}: Valor inválido.`);
-    if (Number.isFinite(valor) && Math.abs(valor) >= 10000000000) erros.push(`Linha ${numeroLinha}: Valor excede o limite suportado de 9.999.999.999,99.`);
-    if (!['debito', 'credito'].includes(tipoTexto)) erros.push(`Linha ${numeroLinha}: Tipo deve ser Débito ou Crédito.`);
+    if (!data) {
+      erros.push(criarErroImportacaoLinha({
+        linha: numeroLinha,
+        coluna: 'Data',
+        valorOriginal: linha.data,
+        descricao,
+        erro: 'A data não foi reconhecida pelo app.',
+        sugestao: 'Use uma data válida, como 10/06/2026 ou 2026-06-10.',
+      }));
+    }
+    if (!descricao) {
+      erros.push(criarErroImportacaoLinha({
+        linha: numeroLinha,
+        coluna: 'Descrição',
+        valorOriginal: linha.descricao,
+        descricao,
+        erro: 'A descrição da transação está vazia.',
+        sugestao: 'Preencha a descrição para identificar a transação no extrato.',
+      }));
+    }
+    if (!conta) {
+      erros.push(criarErroImportacaoLinha({
+        linha: numeroLinha,
+        coluna: 'Conta',
+        valorOriginal: linha.conta,
+        descricao,
+        erro: 'A coluna Conta está vazia nesta linha.',
+        sugestao: 'Informe a conta dessa transação na planilha.',
+      }));
+    }
+    if (valorParse.erro) {
+      erros.push(criarErroImportacaoLinha({
+        linha: numeroLinha,
+        coluna: 'Valor',
+        valorOriginal: valorParse.valorOriginal,
+        valorInterpretado: valorParse.interpretadoComo,
+        descricao,
+        erro: valorParse.erro,
+        sugestao: 'Informe o valor em formato brasileiro (1.234,56), americano (1,234.56) ou como número do Excel (1234.56).',
+      }));
+    } else if (!Number.isFinite(valor) || Math.abs(valor) <= 0) {
+      erros.push(criarErroImportacaoLinha({
+        linha: numeroLinha,
+        coluna: 'Valor',
+        valorOriginal: valorParse.valorOriginal,
+        valorInterpretado: valorParse.interpretadoComo,
+        descricao,
+        erro: 'O valor precisa ser maior que zero após a interpretação.',
+        sugestao: 'Confira se a célula não está vazia, zerada ou com sinal/formato incorreto.',
+      }));
+    } else if (Math.abs(valor) > LIMITE_VALOR_TRANSACAO) {
+      erros.push(criarErroImportacaoLinha({
+        linha: numeroLinha,
+        coluna: 'Valor',
+        valorOriginal: valorParse.valorOriginal,
+        valorInterpretado: valorParse.interpretadoComo,
+        descricao,
+        erro: `O valor interpretado (${formatarMoeda(valor)}) excede o limite permitido de ${formatarMoeda(LIMITE_VALOR_TRANSACAO)}.`,
+        sugestao: 'Confira se o separador de milhar e o separador decimal estão corretos na planilha.',
+      }));
+    }
+    if (!['debito', 'credito'].includes(tipoTexto)) {
+      erros.push(criarErroImportacaoLinha({
+        linha: numeroLinha,
+        coluna: 'Tipo',
+        valorOriginal: linha.tipo,
+        descricao,
+        erro: 'O tipo precisa indicar se a transação é débito ou crédito.',
+        sugestao: 'Use exatamente Débito ou Crédito na coluna Tipo.',
+      }));
+    }
 
-    if (data && descricao && Number.isFinite(valor) && valor > 0 && ['debito', 'credito'].includes(tipoTexto)) {
+    if (data && descricao && conta && Number.isFinite(valor) && Math.abs(valor) > 0 && Math.abs(valor) <= LIMITE_VALOR_TRANSACAO && ['debito', 'credito'].includes(tipoTexto)) {
       transacoes.push({
         data,
         descricao,
         categoria,
         categoria_macro: categoriaMacro,
         categoria_detalhada: categoriaDetalhada,
-        conta: String(linha.conta || '').trim() || null,
+        conta,
         transacao_id: String(linha.transacao_id || '').trim() || null,
         valor: Math.abs(valor),
         tipo: tipoTexto === 'credito' ? 'CREDITO' : 'DEBITO',
@@ -581,11 +769,13 @@ function NotificacoesBell({ token }) {
 
 function ImportarExcel({ contas, token, onConcluida }) {
   const [arquivo, setArquivo] = useState(null);
-  const [contaId, setContaId] = useState(contas[0]?.id || '');
-  const [novaConta, setNovaConta] = useState('Importação XLSX');
   const [validacao, setValidacao] = useState(null);
   const [preview, setPreview] = useState(null);
   const [mapeamentoCategorias, setMapeamentoCategorias] = useState([]);
+  const [mapeamentoContas, setMapeamentoContas] = useState([]);
+  const [conciliacoesSelecionadas, setConciliacoesSelecionadas] = useState([]);
+  const [conciliacoesIgnoradas, setConciliacoesIgnoradas] = useState([]);
+  const [modalErrosAberto, setModalErrosAberto] = useState(false);
   const [carregando, setCarregando] = useState(false);
 
   const authHeaders = { Authorization: `Bearer ${token}` };
@@ -595,12 +785,26 @@ function ImportarExcel({ contas, token, onConcluida }) {
     setValidacao(null);
     setPreview(null);
     setMapeamentoCategorias([]);
+    setMapeamentoContas([]);
+    setConciliacoesSelecionadas([]);
+    setConciliacoesIgnoradas([]);
+    setModalErrosAberto(false);
     setCarregando(true);
     try {
       const dados = await lerXlsxPadrao(file);
       setValidacao(validarExcelImportacao(dados));
     } catch (error) {
-      setValidacao({ valido: false, erros: [error.message], transacoes: [] });
+      setValidacao({
+        valido: false,
+        erros: [criarErroImportacaoLinha({
+          linha: '-',
+          coluna: 'Arquivo',
+          valorOriginal: file.name,
+          erro: error.message,
+          sugestao: 'Verifique se o arquivo é um XLSX válido com cabeçalho e colunas obrigatórias.',
+        })],
+        transacoes: [],
+      });
     } finally {
       setCarregando(false);
     }
@@ -611,13 +815,19 @@ function ImportarExcel({ contas, token, onConcluida }) {
     setCarregando(true);
     try {
       const response = await axios.post(`${API_URL}/importacoes/xlsx/preview`, {
-        conta_id: contaId || undefined,
-        conta_nome: contaId ? undefined : novaConta,
         transacoes: validacao.transacoes,
         nome_arquivo: arquivo.name,
         arquivo_base64: await arquivoParaBase64(arquivo),
       }, { headers: authHeaders });
       setPreview(response.data);
+      setConciliacoesSelecionadas([]);
+      setConciliacoesIgnoradas([]);
+      setMapeamentoContas((response.data.contasImportacao || []).map((conta) => ({
+        nomePlanilha: conta.nomePlanilha,
+        acao: conta.status === 'CONFIRMADA' ? 'USAR_EXISTENTE' : '',
+        contaExistenteId: conta.contaEncontradaId || '',
+        nomeCorrigido: conta.nomePlanilha,
+      })));
       setMapeamentoCategorias((response.data.categoriasPendentes || []).map((pendencia) => ({
         tipo: pendencia.tipo,
         nomePlanilha: pendencia.nomePlanilha,
@@ -640,7 +850,10 @@ function ImportarExcel({ contas, token, onConcluida }) {
       const response = await axios.post(`${API_URL}/importacoes/xlsx/confirmar`, {
         tokenPreview: preview.tokenPreview,
         acao,
+        mapeamentoContas,
         mapeamentoCategorias,
+        conciliacoesConfirmadas: conciliacoesSelecionadas,
+        conciliacoesIgnoradas,
       }, { headers: authHeaders });
       alert(response.data.mensagem || 'Importação concluída.');
       onConcluida();
@@ -656,6 +869,10 @@ function ImportarExcel({ contas, token, onConcluida }) {
     setValidacao(null);
     setPreview(null);
     setMapeamentoCategorias([]);
+    setMapeamentoContas([]);
+    setConciliacoesSelecionadas([]);
+    setConciliacoesIgnoradas([]);
+    setModalErrosAberto(false);
   };
 
   const atualizarMapeamentoCategoria = (chave, atualizacao) => {
@@ -665,6 +882,64 @@ function ImportarExcel({ contas, token, onConcluida }) {
     }));
   };
 
+  const atualizarMapeamentoConta = (nomePlanilha, atualizacao) => {
+    setMapeamentoContas((atuais) => atuais.map((item) => (
+      item.nomePlanilha === nomePlanilha ? { ...item, ...atualizacao } : item
+    )));
+  };
+
+  const alternarConciliacaoSelecionada = (sugestao) => {
+    const chave = `${sugestao.provisaoId}|${sugestao.transacaoTempId || sugestao.transacaoId}`;
+    setConciliacoesIgnoradas((atuais) => atuais.filter((item) => `${item.provisaoId}|${item.transacaoTempId || item.transacaoId}` !== chave));
+    setConciliacoesSelecionadas((atuais) => atuais.some((item) => `${item.provisaoId}|${item.transacaoTempId || item.transacaoId}` === chave)
+      ? atuais.filter((item) => `${item.provisaoId}|${item.transacaoTempId || item.transacaoId}` !== chave)
+      : [...atuais, sugestao]);
+  };
+
+  const ignorarConciliacaoPreview = (sugestao) => {
+    const chave = `${sugestao.provisaoId}|${sugestao.transacaoTempId || sugestao.transacaoId}`;
+    setConciliacoesSelecionadas((atuais) => atuais.filter((item) => `${item.provisaoId}|${item.transacaoTempId || item.transacaoId}` !== chave));
+    setConciliacoesIgnoradas((atuais) => atuais.some((item) => `${item.provisaoId}|${item.transacaoTempId || item.transacaoId}` === chave) ? atuais : [...atuais, sugestao]);
+  };
+
+  const copiarErrosImportacao = async (erros = []) => {
+    const texto = erros.map(formatarErroImportacao).join('\n\n---\n\n');
+    try {
+      await navigator.clipboard.writeText(texto);
+      alert('Detalhes dos erros copiados para a área de transferência.');
+    } catch (error) {
+      console.error('Erro ao copiar detalhes:', error);
+      alert('Não foi possível copiar automaticamente. Selecione e copie os detalhes exibidos no modal.');
+    }
+  };
+
+  const renderErroImportacao = (erro, index = 0) => {
+    const item = typeof erro === 'string'
+      ? criarErroImportacaoLinha({ linha: '-', coluna: '-', valorOriginal: '', erro, sugestao: 'Revise a planilha e tente novamente.' })
+      : erro;
+
+    return (
+      <div key={`${item.linha || 'linha'}-${item.coluna || 'coluna'}-${item.erro || index}-${index}`} style={{ background: 'white', border: '1px solid #fecaca', borderRadius: '10px', padding: '12px' }}>
+        <strong>Linha {item.linha || '-'} · Coluna {item.coluna || '-'}</strong>
+        <div style={{ display: 'grid', gap: '4px', marginTop: '8px', color: '#7f1d1d', fontSize: '13px' }}>
+          <span><strong>Valor lido:</strong> "{textoValorOriginal(item.valorOriginal)}"</span>
+          <span><strong>Interpretado como:</strong> {formatarValorInterpretado(item.valorInterpretado)}</span>
+          <span><strong>Descrição:</strong> {item.descricao || '-'}</span>
+          <span><strong>Problema:</strong> {item.erro || String(item)}</span>
+          <span><strong>Como corrigir:</strong> {item.sugestao || 'Revise a linha na planilha e tente novamente.'}</span>
+        </div>
+      </div>
+    );
+  };
+
+  const contasImportacao = preview?.contasImportacao || [];
+  const contasResolvidas = contasImportacao.every((conta) => {
+    const decisao = mapeamentoContas.find((item) => item.nomePlanilha === conta.nomePlanilha);
+    if (!decisao?.acao) return false;
+    if (decisao.acao === 'USAR_EXISTENTE') return Boolean(decisao.contaExistenteId);
+    if (decisao.acao === 'CRIAR_NOVA' || decisao.acao === 'CORRIGIR_NOME') return Boolean(decisao.nomeCorrigido?.trim());
+    return false;
+  });
   const categoriasPendentes = preview?.categoriasPendentes || [];
   const mapeamentosResolvidos = categoriasPendentes.every((pendencia) => {
     const chavePendencia = `${pendencia.tipo}|${pendencia.categoriaMacroPlanilha || ''}|${pendencia.nomePlanilha}`;
@@ -674,7 +949,7 @@ function ImportarExcel({ contas, token, onConcluida }) {
     if (decisao.acao === 'CORRIGIR_NOME') return Boolean(decisao.nomeCorrigido?.trim());
     return true;
   });
-  const confirmacaoBloqueada = carregando || (categoriasPendentes.length > 0 && !mapeamentosResolvidos);
+  const confirmacaoBloqueada = carregando || !contasResolvidas || (categoriasPendentes.length > 0 && !mapeamentosResolvidos);
   const resumo = preview?.resumo || {};
 
   return (
@@ -689,29 +964,21 @@ function ImportarExcel({ contas, token, onConcluida }) {
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '12px' }}>
           <div style={{ background: 'white', border: '1px solid #e5e7eb', borderRadius: '10px', padding: '12px' }}>
             <strong>Colunas obrigatórias</strong>
-            <p style={{ color: '#6b7280', marginBottom: 0 }}>Data, Descrição, Valor e Tipo.</p>
+            <p style={{ color: '#6b7280', marginBottom: 0 }}>Data, Conta, Descrição, Valor e Tipo.</p>
           </div>
           <div style={{ background: 'white', border: '1px solid #e5e7eb', borderRadius: '10px', padding: '12px' }}>
             <strong>Colunas opcionais</strong>
-            <p style={{ color: '#6b7280', marginBottom: 0 }}>ID/Transacao_ID, Conta, Categoria Macro, Categoria Detalhada ou Categoria.</p>
+            <p style={{ color: '#6b7280', marginBottom: 0 }}>ID/Transacao_ID, Categoria Macro, Categoria Detalhada ou Categoria.</p>
           </div>
         </div>
       </div>
 
-      <div style={{ margin: '18px 0', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '14px', padding: '16px' }}>
-        <label style={{ display: 'block', fontWeight: 'bold', marginBottom: '8px' }}>Conta de destino</label>
-        <p style={{ color: '#92400e', marginTop: 0 }}>
-          A conta de destino participa da chave de identificação da transação quando a planilha não traz ID interno.
+      <div style={{ margin: '18px 0', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '14px', padding: '16px' }}>
+        <strong style={{ color: '#1d4ed8' }}>Conta definida pela planilha</strong>
+        <p style={{ color: '#1e40af', marginBottom: 0 }}>
+          A conta de cada transação deve estar informada na coluna Conta da planilha. O sistema irá validar as contas encontradas no arquivo antes de importar.
+          Ela será usada para vincular cada transação à conta correta e também participa da identificação de transações já cadastradas.
         </p>
-        {contas.length > 0 && (
-          <select value={contaId} onChange={(event) => { setContaId(event.target.value); setPreview(null); }} style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db', marginRight: '10px' }}>
-            {contas.map((conta) => <option key={conta.id} value={conta.id}>{conta.nome}</option>)}
-            <option value="">+ Criar nova conta</option>
-          </select>
-        )}
-        {(!contaId || contas.length === 0) && (
-          <input value={novaConta} onChange={(event) => { setNovaConta(event.target.value); setPreview(null); }} placeholder="Nome da nova conta" style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} />
-        )}
       </div>
 
       <label
@@ -731,9 +998,15 @@ function ImportarExcel({ contas, token, onConcluida }) {
 
       {validacao?.erros?.length > 0 && (
         <div style={{ background: '#fef2f2', color: '#991b1b', borderRadius: '10px', padding: '14px', marginTop: '16px' }}>
-          <strong>❌ Erros encontrados:</strong>
-          <ul>{validacao.erros.slice(0, 10).map((erro) => <li key={erro}>{erro}</li>)}</ul>
-          {validacao.erros.length > 10 && <p>...e mais {validacao.erros.length - 10} erros.</p>}
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
+            <strong>❌ Erros encontrados: {validacao.erros.length}</strong>
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+              <button onClick={() => setModalErrosAberto(true)} style={{ background: 'white', color: '#991b1b', border: '1px solid #fecaca', padding: '8px 10px', borderRadius: '8px', cursor: 'pointer' }}>Ver todos os erros</button>
+              <button onClick={() => copiarErrosImportacao(validacao.erros)} style={{ background: '#991b1b', color: 'white', border: 'none', padding: '8px 10px', borderRadius: '8px', cursor: 'pointer' }}>Copiar detalhes dos erros</button>
+            </div>
+          </div>
+          <p style={{ marginBottom: '10px' }}>Mostrando os 10 primeiros erros com contexto para correção da planilha.</p>
+          <div style={{ display: 'grid', gap: '10px' }}>{validacao.erros.slice(0, 10).map(renderErroImportacao)}</div>
         </div>
       )}
 
@@ -752,6 +1025,68 @@ function ImportarExcel({ contas, token, onConcluida }) {
             <KpiCard titulo="Com alteração" valor={resumo.comAlteracao || 0} detalhe="Dependem de confirmação" cor="#d97706" fundo="#fffbeb" />
             <KpiCard titulo="Com erro" valor={resumo.comErro || 0} detalhe="Não serão aplicadas" cor="#dc2626" fundo="#fef2f2" />
           </div>
+
+          {contasImportacao.length > 0 && (
+            <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '10px', padding: '14px', marginBottom: '14px' }}>
+              <h3 style={{ marginTop: 0 }}>Confirmar contas da importação</h3>
+              <p style={{ color: '#1e40af' }}>
+                Encontramos contas na planilha. Revise abaixo para quais contas as transações serão importadas antes de continuar.
+              </p>
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px', background: 'white' }}>
+                  <thead>
+                    <tr>
+                      <th style={{ textAlign: 'left', padding: '8px' }}>Conta na planilha</th>
+                      <th style={{ textAlign: 'left', padding: '8px' }}>Conta no sistema</th>
+                      <th style={{ textAlign: 'right', padding: '8px' }}>Transações</th>
+                      <th style={{ textAlign: 'left', padding: '8px' }}>Status</th>
+                      <th style={{ textAlign: 'left', padding: '8px' }}>Ação</th>
+                    </tr>
+                  </thead>
+                  <tbody>{contasImportacao.map((contaPlanilha) => {
+                    const decisao = mapeamentoContas.find((item) => item.nomePlanilha === contaPlanilha.nomePlanilha) || {};
+                    const contaSelecionada = contas.find((conta) => conta.id === decisao.contaExistenteId);
+                    const status = decisao.acao === 'USAR_EXISTENTE' && decisao.contaExistenteId
+                      ? (contaPlanilha.status === 'POSSIVEL_CORRESPONDENCIA' ? 'Possível correspondência confirmada' : 'Confirmada')
+                      : decisao.acao === 'CRIAR_NOVA'
+                        ? 'Criar nova conta'
+                        : decisao.acao === 'CORRIGIR_NOME'
+                          ? 'Nome corrigido'
+                          : (contaPlanilha.status === 'NAO_ENCONTRADA' ? 'Pendente' : contaPlanilha.statusLabel || 'Pendente');
+
+                    return (
+                      <tr key={contaPlanilha.nomePlanilha} style={{ borderTop: '1px solid #dbeafe' }}>
+                        <td style={{ padding: '8px', fontWeight: 'bold' }}>{contaPlanilha.nomePlanilha}</td>
+                        <td style={{ padding: '8px' }}>{contaSelecionada?.nome || contaPlanilha.contaEncontradaNome || 'Não encontrada'}</td>
+                        <td style={{ padding: '8px', textAlign: 'right' }}>{contaPlanilha.quantidade}</td>
+                        <td style={{ padding: '8px' }}>{status}</td>
+                        <td style={{ padding: '8px' }}>
+                          <div style={{ display: 'grid', gap: '6px', minWidth: '220px' }}>
+                            <select value={decisao.acao || ''} onChange={(event) => atualizarMapeamentoConta(contaPlanilha.nomePlanilha, { acao: event.target.value })} style={{ padding: '8px', borderRadius: '8px', border: '1px solid #93c5fd' }}>
+                              <option value="">Escolha uma ação</option>
+                              <option value="USAR_EXISTENTE">Usar conta existente</option>
+                              <option value="CRIAR_NOVA">Criar nova conta</option>
+                              <option value="CORRIGIR_NOME">Corrigir nome manualmente</option>
+                            </select>
+                            {decisao.acao === 'USAR_EXISTENTE' && (
+                              <select value={decisao.contaExistenteId || ''} onChange={(event) => atualizarMapeamentoConta(contaPlanilha.nomePlanilha, { contaExistenteId: event.target.value })} style={{ padding: '8px', borderRadius: '8px', border: '1px solid #93c5fd' }}>
+                                <option value="">Selecione a conta</option>
+                                {contas.map((conta) => <option key={conta.id} value={conta.id}>{conta.nome}</option>)}
+                              </select>
+                            )}
+                            {(decisao.acao === 'CRIAR_NOVA' || decisao.acao === 'CORRIGIR_NOME') && (
+                              <input value={decisao.nomeCorrigido || ''} onChange={(event) => atualizarMapeamentoConta(contaPlanilha.nomePlanilha, { nomeCorrigido: event.target.value })} placeholder="Nome da conta" style={{ padding: '8px', borderRadius: '8px', border: '1px solid #93c5fd' }} />
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}</tbody>
+                </table>
+              </div>
+              {!contasResolvidas && <p style={{ color: '#b45309', fontWeight: 'bold', marginBottom: 0 }}>Resolva todas as contas da planilha antes de concluir a importação.</p>}
+            </div>
+          )}
 
           {(preview.categoriasNovas || []).length > 0 && (
             <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '10px', padding: '12px', marginBottom: '14px' }}>
@@ -819,6 +1154,46 @@ function ImportarExcel({ contas, token, onConcluida }) {
             </div>
           )}
 
+          {(preview.sugestoesConciliacao || []).length > 0 && (
+            <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '10px', padding: '14px', marginBottom: '14px' }}>
+              <h3 style={{ marginTop: 0 }}>Possíveis conciliações encontradas</h3>
+              <p style={{ color: '#1d4ed8' }}>Encontramos provisões que parecem corresponder às transações importadas. Revise antes de confirmar: nada será conciliado automaticamente.</p>
+              <div style={{ display: 'grid', gap: '12px' }}>
+                {(preview.sugestoesConciliacao || []).map((sugestao) => {
+                  const chave = `${sugestao.provisaoId}|${sugestao.transacaoTempId || sugestao.transacaoId}`;
+                  const selecionada = conciliacoesSelecionadas.some((item) => `${item.provisaoId}|${item.transacaoTempId || item.transacaoId}` === chave);
+                  const ignorada = conciliacoesIgnoradas.some((item) => `${item.provisaoId}|${item.transacaoTempId || item.transacaoId}` === chave);
+                  return (
+                    <div key={chave} style={{ background: 'white', border: selecionada ? '2px solid #2563eb' : '1px solid #bfdbfe', borderRadius: '10px', padding: '12px', opacity: ignorada ? 0.55 : 1 }}>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(230px, 1fr))', gap: '12px' }}>
+                        <div>
+                          <strong>Provisão</strong>
+                          <p style={{ margin: '6px 0' }}>{sugestao.provisao?.descricao}</p>
+                          <small>{formatarData(sugestao.provisao?.data_prevista)} • {formatarMoeda(sugestao.provisao?.valor_previsto)} • {sugestao.provisao?.tipo}</small>
+                        </div>
+                        <div>
+                          <strong>Transação real</strong>
+                          <p style={{ margin: '6px 0' }}>{sugestao.transacao?.descricao}</p>
+                          <small>{formatarData(sugestao.transacao?.data)} • {formatarMoeda(sugestao.transacao?.valor)} • {sugestao.transacao?.tipo}</small>
+                        </div>
+                        <div>
+                          <strong>Análise</strong>
+                          <p style={{ margin: '6px 0' }}><span style={{ background: '#dbeafe', color: '#1d4ed8', padding: '3px 7px', borderRadius: '999px', fontSize: '12px', fontWeight: 'bold' }}>{sugestao.confianca}</span> score {Number(sugestao.score || 0).toFixed(2)}</p>
+                          <small>{(sugestao.motivos || []).join(' • ')}</small>
+                        </div>
+                      </div>
+                      <div style={{ display: 'flex', gap: '8px', marginTop: '10px', flexWrap: 'wrap' }}>
+                        <button onClick={() => alternarConciliacaoSelecionada(sugestao)} style={{ background: selecionada ? '#1d4ed8' : 'white', color: selecionada ? 'white' : '#1d4ed8', border: '1px solid #1d4ed8', padding: '8px 10px', borderRadius: '8px', cursor: 'pointer' }}>{selecionada ? 'Selecionada para confirmar' : 'Confirmar conciliação'}</button>
+                        <button onClick={() => ignorarConciliacaoPreview(sugestao)} style={{ background: ignorada ? '#6b7280' : 'white', color: ignorada ? 'white' : '#6b7280', border: '1px solid #6b7280', padding: '8px 10px', borderRadius: '8px', cursor: 'pointer' }}>Ignorar sugestão</button>
+                        <button onClick={() => setConciliacoesSelecionadas((atuais) => atuais.filter((item) => `${item.provisaoId}|${item.transacaoTempId || item.transacaoId}` !== chave))} style={{ background: 'white', color: '#92400e', border: '1px solid #f59e0b', padding: '8px 10px', borderRadius: '8px', cursor: 'pointer' }}>Manter pendente</button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           {(preview.comAlteracao || []).length > 0 && (
             <div style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '10px', padding: '12px', marginBottom: '14px' }}>
               <strong>Encontramos transações que já existem no sistema, mas possuem alterações na planilha. Deseja atualizar os registros existentes com os novos dados?</strong>
@@ -839,8 +1214,11 @@ function ImportarExcel({ contas, token, onConcluida }) {
 
           {(preview.erros || []).length > 0 && (
             <div style={{ background: '#fef2f2', color: '#991b1b', borderRadius: '10px', padding: '12px', marginBottom: '14px' }}>
-              <strong>Linhas com erro</strong>
-              <ul>{preview.erros.slice(0, 8).map((erro) => <li key={`${erro.linha}-${erro.erro}`}>Linha {erro.linha}: {erro.erro}</li>)}</ul>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
+                <strong>Linhas com erro no preview: {preview.erros.length}</strong>
+                <button onClick={() => copiarErrosImportacao(preview.erros)} style={{ background: '#991b1b', color: 'white', border: 'none', padding: '8px 10px', borderRadius: '8px', cursor: 'pointer' }}>Copiar detalhes dos erros</button>
+              </div>
+              <div style={{ display: 'grid', gap: '10px', marginTop: '10px' }}>{preview.erros.slice(0, 8).map(renderErroImportacao)}</div>
             </div>
           )}
         </div>
@@ -859,6 +1237,21 @@ function ImportarExcel({ contas, token, onConcluida }) {
         )}
         <button onClick={limpar} style={{ background: '#e5e7eb', border: 'none', padding: '12px 18px', borderRadius: '8px', cursor: 'pointer' }}>LIMPAR</button>
       </div>
+
+      {modalErrosAberto && validacao?.erros?.length > 0 && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <div style={{ background: '#fef2f2', borderRadius: '14px', padding: '20px', width: '92%', maxWidth: '880px', maxHeight: '85vh', overflowY: 'auto', color: '#991b1b' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '12px' }}>
+              <h3 style={{ margin: 0 }}>Todos os erros de importação ({validacao.erros.length})</h3>
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                <button onClick={() => copiarErrosImportacao(validacao.erros)} style={{ background: '#991b1b', color: 'white', border: 'none', padding: '8px 10px', borderRadius: '8px', cursor: 'pointer' }}>Copiar detalhes dos erros</button>
+                <button onClick={() => setModalErrosAberto(false)} style={{ background: 'white', color: '#991b1b', border: '1px solid #fecaca', padding: '8px 10px', borderRadius: '8px', cursor: 'pointer' }}>Fechar</button>
+              </div>
+            </div>
+            <div style={{ display: 'grid', gap: '10px' }}>{validacao.erros.map(renderErroImportacao)}</div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1170,6 +1563,14 @@ function Dashboard({ usuario, token, onLogout }) {
     }
   };
 
+  if (modo === 'conferencia-saldos') {
+    return <TelaConferenciaSaldos contas={contas} token={token} onVoltar={() => setModo('home')} onAtualizarContas={carregarContas} />;
+  }
+
+  if (modo === 'provisoes') {
+    return <TelaProvisoes contas={contas} token={token} onVoltar={() => setModo('home')} />;
+  }
+
   if (modo === 'transacoes' && (contaSelecionada || contas.length > 0)) {
     return (
       <TelaTransacoes
@@ -1177,6 +1578,7 @@ function Dashboard({ usuario, token, onLogout }) {
         contas={contas}
         token={token}
         onVoltar={() => setModo('home')}
+        onAtualizarContas={carregarContas}
       />
     );
   }
@@ -1185,6 +1587,13 @@ function Dashboard({ usuario, token, onLogout }) {
   const seriesDashboard = resumoDashboard?.series || {};
   const insightsDashboard = resumoDashboard?.insights || {};
   const saldoLiquido = Number(kpisDashboard.saldoLiquido || 0);
+  const provisoesDashboard = kpisDashboard.provisoes || {};
+  const contasSemConferenciaRecente = contas.filter((conta) => {
+    const data = conta.ultima_conferencia?.data_referencia;
+    if (!data) return true;
+    const dias = Math.floor((Date.now() - new Date(data).getTime()) / (1000 * 60 * 60 * 24));
+    return dias > 30;
+  });
 
   return (
     <div style={{ minHeight: '100vh', background: '#f5f5f5' }}>
@@ -1283,6 +1692,18 @@ function Dashboard({ usuario, token, onLogout }) {
                         Ver transações consolidadas
                       </button>
                       <button
+                        onClick={() => setModo('provisoes')}
+                        style={{ background: '#0f766e', color: 'white', border: 'none', padding: '10px 16px', borderRadius: '8px', cursor: 'pointer' }}
+                      >
+                        📌 Provisões
+                      </button>
+                      <button
+                        onClick={() => setModo('conferencia-saldos')}
+                        style={{ background: '#1d4ed8', color: 'white', border: 'none', padding: '10px 16px', borderRadius: '8px', cursor: 'pointer' }}
+                      >
+                        🏦 Conferir saldos
+                      </button>
+                      <button
                         onClick={() => setModo('importar')}
                         style={{ background: '#667eea', color: 'white', border: 'none', padding: '10px 16px', borderRadius: '8px', cursor: 'pointer' }}
                       >
@@ -1290,6 +1711,13 @@ function Dashboard({ usuario, token, onLogout }) {
                       </button>
                     </div>
                   </div>
+
+                  {contasSemConferenciaRecente.length > 0 && (
+                    <div style={{ background: '#fffbeb', border: '1px solid #fde68a', color: '#92400e', borderRadius: '10px', padding: '12px', marginBottom: '14px', display: 'flex', justifyContent: 'space-between', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
+                      <span>{contasSemConferenciaRecente[0].nome} {contasSemConferenciaRecente[0].ultima_conferencia ? 'não é conferida há mais de 30 dias.' : 'ainda não possui conferência de saldo.'}</span>
+                      <button onClick={() => setModo('conferencia-saldos')} style={{ background: '#1d4ed8', color: 'white', border: 'none', padding: '8px 12px', borderRadius: '8px', cursor: 'pointer' }}>Conferir saldos</button>
+                    </div>
+                  )}
 
                   <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '14px' }}>
                     {[
@@ -1339,6 +1767,18 @@ function Dashboard({ usuario, token, onLogout }) {
                   <KpiCard titulo="Ticket médio despesa" valor={formatarMoeda(kpisDashboard.ticketMedioDespesa)} detalhe="Média dos débitos" cor="#7c3aed" />
                   <KpiCard titulo="Categorizado" valor={formatarPercentual(kpisDashboard.percentualCategorizado)} detalhe="Transações com categoria" cor="#0f766e" />
                   <KpiCard titulo="Transferências internas" valor={Number(kpisDashboard.transferenciasInternas || 0)} detalhe="Não entram nos KPIs financeiros" cor="#0f766e" />
+                </div>
+
+                <div style={{ background: 'white', borderRadius: '14px', padding: '16px', marginBottom: '20px' }}>
+                  <h3 style={{ marginTop: 0 }}>Provisões no período</h3>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '12px' }}>
+                    <KpiCard titulo="Provisionado a pagar" valor={formatarMoeda(provisoesDashboard.totalProvisionadoPagar)} detalhe="Débitos previstos" cor="#dc2626" fundo="#fef2f2" />
+                    <KpiCard titulo="Provisionado a receber" valor={formatarMoeda(provisoesDashboard.totalProvisionadoReceber)} detalhe="Créditos previstos" cor="#059669" fundo="#ecfdf5" />
+                    <KpiCard titulo="Realizado conciliado" valor={formatarMoeda(provisoesDashboard.totalRealizadoConciliado)} detalhe="Transações vinculadas" cor="#2563eb" fundo="#eff6ff" />
+                    <KpiCard titulo="Provisões pendentes" valor={Number(provisoesDashboard.pendentes || 0)} detalhe="Aguardando conciliação" cor="#d97706" fundo="#fffbeb" />
+                    <KpiCard titulo="Provisões conciliadas" valor={Number(provisoesDashboard.conciliadas || 0)} detalhe={`${formatarPercentual(provisoesDashboard.percentualConciliado)} do total`} cor="#0f766e" fundo="#f0fdfa" />
+                    <KpiCard titulo="Provisões atrasadas" valor={Number(provisoesDashboard.atrasadas || 0)} detalhe="Status atrasada" cor="#b91c1c" fundo="#fef2f2" />
+                  </div>
                 </div>
 
                 {carregandoDashboard ? (
@@ -1458,6 +1898,7 @@ function Dashboard({ usuario, token, onLogout }) {
                           <span>Período: {resumoConta ? `${resumoConta.quantidadeTransacoes} transação(ões)` : 'sem movimentação'}</span>
                           <span>Receitas: {formatarMoeda(resumoConta?.receitas || 0)}</span>
                           <span>Despesas: {formatarMoeda(resumoConta?.despesas || 0)}</span>
+                          <span>Última conferência: {conta.ultima_conferencia ? `${formatarData(conta.ultima_conferencia.data_referencia)} • ${conta.ultima_conferencia.status}` : 'não realizada'}</span>
                         </div>
 
                         <p style={{ color: '#999', fontSize: '12px' }}>
@@ -1530,11 +1971,554 @@ function Dashboard({ usuario, token, onLogout }) {
   );
 }
 
+
+// ============================================================================
+// TELA DE PROVISÕES
+// ============================================================================
+
+
+function badgeStatusConferencia(status) {
+  const mapa = {
+    CONCILIADO: ['#dcfce7', '#166534'],
+    DIVERGENTE: ['#fee2e2', '#991b1b'],
+    PENDENTE: ['#fef3c7', '#92400e'],
+    EM_ANALISE: ['#dbeafe', '#1d4ed8'],
+  };
+  return mapa[status] || ['#e5e7eb', '#374151'];
+}
+
+function TelaConferenciaSaldos({ contas = [], token, onVoltar, onAtualizarContas }) {
+  const contaInicial = contas[0]?.id || '';
+  const [contaId, setContaId] = useState(contaInicial);
+  const [dataReferencia, setDataReferencia] = useState(dataLocalISO(new Date()));
+  const [periodoInicial, setPeriodoInicial] = useState('');
+  const [periodoFinal, setPeriodoFinal] = useState(dataLocalISO(new Date()));
+  const [tolerancia, setTolerancia] = useState('0,01');
+  const [saldoReal, setSaldoReal] = useState('');
+  const [observacao, setObservacao] = useState('');
+  const [saldoInicial, setSaldoInicial] = useState('0,00');
+  const [dataSaldoInicial, setDataSaldoInicial] = useState(dataLocalISO(new Date()));
+  const [calculo, setCalculo] = useState(null);
+  const [conferencia, setConferencia] = useState(null);
+  const [diagnostico, setDiagnostico] = useState(null);
+  const [historico, setHistorico] = useState([]);
+  const [carregando, setCarregando] = useState(false);
+
+  const authHeaders = { Authorization: `Bearer ${token}` };
+  const contaSelecionada = contas.find((conta) => conta.id === contaId);
+
+  useEffect(() => {
+    if (contaSelecionada) {
+      setSaldoInicial(String(contaSelecionada.saldo_inicial ?? contaSelecionada.saldoInicial ?? 0).replace('.', ','));
+      setDataSaldoInicial((contaSelecionada.data_saldo_inicial || contaSelecionada.dataSaldoInicial || dataLocalISO(new Date())).slice(0, 10));
+      setPeriodoInicial((contaSelecionada.data_saldo_inicial || contaSelecionada.dataSaldoInicial || '').slice(0, 10));
+    }
+  }, [contaId, contas.length]);
+
+  useEffect(() => {
+    carregarHistorico();
+  }, [contaId]);
+
+  const numeroFormulario = (valor, fallback = 0) => {
+    const parse = parseValorMonetario(valor);
+    return Number.isFinite(parse.valor) ? parse.valor : fallback;
+  };
+
+  const salvarSaldoInicial = async () => {
+    if (!contaId) return alert('Selecione uma conta.');
+    if (!dataSaldoInicial) return alert('Informe a data do saldo inicial.');
+    setCarregando(true);
+    try {
+      await axios.patch(`${API_URL}/contas/${contaId}/saldo-inicial`, {
+        saldoInicial: numeroFormulario(saldoInicial, 0),
+        dataSaldoInicial,
+      }, { headers: authHeaders });
+      alert('Saldo inicial salvo.');
+      await onAtualizarContas?.();
+      await calcularSaldo();
+    } catch (error) {
+      alert(error.response?.data?.detalhes || error.response?.data?.erro || error.message);
+    } finally {
+      setCarregando(false);
+    }
+  };
+
+  const calcularSaldo = async () => {
+    if (!contaId) return alert('Selecione uma conta.');
+    if (!dataReferencia) return alert('Informe a data de referência.');
+    setCarregando(true);
+    setDiagnostico(null);
+    try {
+      const response = await axios.get(`${API_URL}/conferencia-saldos/calcular`, {
+        headers: authHeaders,
+        params: { contaId, dataReferencia },
+      });
+      setCalculo(response.data);
+      setPeriodoInicial(response.data.dataSaldoInicial || periodoInicial);
+      setPeriodoFinal(response.data.dataReferencia || dataReferencia);
+    } catch (error) {
+      alert(error.response?.data?.detalhes || error.response?.data?.erro || error.message);
+    } finally {
+      setCarregando(false);
+    }
+  };
+
+  const salvarConferencia = async () => {
+    if (!calculo?.saldoInicialConfigurado) return alert('Cadastre o saldo inicial antes de salvar a conferência.');
+    const saldoRealNumero = numeroFormulario(saldoReal, NaN);
+    if (!Number.isFinite(saldoRealNumero)) return alert('Informe um saldo real válido.');
+    setCarregando(true);
+    try {
+      const response = await axios.post(`${API_URL}/conferencia-saldos`, {
+        contaId,
+        dataReferencia,
+        saldoReal: saldoRealNumero,
+        observacao,
+        tolerancia: Math.abs(numeroFormulario(tolerancia, 0.01)),
+      }, { headers: authHeaders });
+      setConferencia(response.data);
+      await carregarHistorico();
+      if (response.data.status === 'DIVERGENTE') {
+        await analisarDivergencia(response.data);
+      } else {
+        setDiagnostico(null);
+      }
+    } catch (error) {
+      alert(error.response?.data?.detalhes || error.response?.data?.erro || error.message);
+    } finally {
+      setCarregando(false);
+    }
+  };
+
+  const analisarDivergencia = async (base = conferencia) => {
+    const saldoCalculado = Number(base?.saldo_calculado ?? base?.saldoCalculado ?? calculo?.saldoCalculado ?? 0);
+    const saldoRealNumero = Number(base?.saldo_real ?? base?.saldoReal ?? numeroFormulario(saldoReal, 0));
+    const diferenca = Number(base?.diferenca ?? (saldoRealNumero - saldoCalculado));
+    setCarregando(true);
+    try {
+      const response = await axios.post(`${API_URL}/conferencia-saldos/analisar`, {
+        contaId,
+        dataReferencia,
+        saldoReal: saldoRealNumero,
+        saldoCalculado,
+        diferenca,
+      }, { headers: authHeaders });
+      setDiagnostico(response.data);
+    } catch (error) {
+      alert(error.response?.data?.detalhes || error.response?.data?.erro || error.message);
+    } finally {
+      setCarregando(false);
+    }
+  };
+
+  const carregarHistorico = async () => {
+    if (!contaId) return;
+    try {
+      const response = await axios.get(`${API_URL}/conferencia-saldos/historico`, {
+        headers: authHeaders,
+        params: { contaId },
+      });
+      setHistorico(response.data.conferencias || []);
+    } catch (error) {
+      console.error('Erro ao carregar histórico de conferências:', error);
+    }
+  };
+
+  const resultadoAtual = conferencia || (calculo && Number.isFinite(numeroFormulario(saldoReal, NaN)) ? {
+    saldo_real: numeroFormulario(saldoReal, 0),
+    saldo_calculado: calculo.saldoCalculado,
+    diferenca: Number.isFinite(Number(calculo.saldoCalculado)) ? numeroFormulario(saldoReal, 0) - Number(calculo.saldoCalculado) : null,
+    status: Math.abs((numeroFormulario(saldoReal, 0) - Number(calculo.saldoCalculado || 0))) <= Math.abs(numeroFormulario(tolerancia, 0.01)) ? 'CONCILIADO' : 'DIVERGENTE',
+  } : null);
+
+  return (
+    <div style={{ minHeight: '100vh', background: '#f8fafc', padding: '20px' }}>
+      <button onClick={onVoltar} style={{ background: '#e5e7eb', border: 'none', padding: '8px 12px', borderRadius: '6px', cursor: 'pointer' }}>← Voltar</button>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'center', flexWrap: 'wrap' }}>
+        <div>
+          <h1 style={{ margin: '14px 0 4px' }}>🏦 Conferência de Saldos Bancários</h1>
+          <p style={{ color: '#64748b', marginTop: 0 }}>Compare o saldo calculado pelo app com o saldo real do banco e veja diagnósticos automáticos de divergência.</p>
+        </div>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '14px', marginBottom: '16px' }}>
+        <div style={{ background: 'white', border: '1px solid #e5e7eb', borderRadius: '12px', padding: '14px' }}>
+          <h3 style={{ marginTop: 0 }}>Filtros da conferência</h3>
+          <div style={{ display: 'grid', gap: '10px' }}>
+            <label>Conta<select value={contaId} onChange={(e) => { setContaId(e.target.value); setCalculo(null); setConferencia(null); setDiagnostico(null); }} style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }}>{contas.map((c) => <option key={c.id} value={c.id}>{c.nome}</option>)}</select></label>
+            <label>Data de referência<input type="date" value={dataReferencia} onChange={(e) => { setDataReferencia(e.target.value); setConferencia(null); setDiagnostico(null); }} style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }} /></label>
+            <label>Período inicial<input type="date" value={periodoInicial} onChange={(e) => setPeriodoInicial(e.target.value)} disabled style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px', background: '#f8fafc' }} /></label>
+            <label>Período final<input type="date" value={periodoFinal} onChange={(e) => setPeriodoFinal(e.target.value)} disabled style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px', background: '#f8fafc' }} /></label>
+            <label>Tolerância de diferença<input value={tolerancia} onChange={(e) => setTolerancia(e.target.value)} placeholder="0,01" style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }} /></label>
+            <button onClick={calcularSaldo} disabled={carregando || !contaId} style={{ background: '#2563eb', color: 'white', border: 'none', padding: '10px 14px', borderRadius: '8px', cursor: 'pointer' }}>Calcular saldo</button>
+          </div>
+        </div>
+
+        <div style={{ background: 'white', border: '1px solid #e5e7eb', borderRadius: '12px', padding: '14px' }}>
+          <h3 style={{ marginTop: 0 }}>Saldo inicial da conta</h3>
+          {!contaSelecionada?.data_saldo_inicial && !contaSelecionada?.dataSaldoInicial && (
+            <p style={{ background: '#fffbeb', color: '#92400e', padding: '10px', borderRadius: '8px' }}>Esta conta ainda não possui saldo inicial configurado. Cadastre um saldo inicial para permitir a conferência.</p>
+          )}
+          <div style={{ display: 'grid', gap: '10px' }}>
+            <label>Saldo inicial<input value={saldoInicial} onChange={(e) => setSaldoInicial(e.target.value)} placeholder="0,00" style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }} /></label>
+            <label>Data saldo inicial<input type="date" value={dataSaldoInicial} onChange={(e) => setDataSaldoInicial(e.target.value)} style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }} /></label>
+            <button onClick={salvarSaldoInicial} disabled={carregando || !contaId} style={{ background: '#0f766e', color: 'white', border: 'none', padding: '10px 14px', borderRadius: '8px', cursor: 'pointer' }}>Salvar saldo inicial</button>
+          </div>
+        </div>
+
+        <div style={{ background: 'white', border: '1px solid #e5e7eb', borderRadius: '12px', padding: '14px' }}>
+          <h3 style={{ marginTop: 0 }}>Saldo real do banco</h3>
+          <div style={{ display: 'grid', gap: '10px' }}>
+            <label>Saldo real informado<input value={saldoReal} onChange={(e) => { setSaldoReal(e.target.value); setConferencia(null); }} placeholder="-516,87" style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }} /></label>
+            <label>Observação<textarea value={observacao} onChange={(e) => setObservacao(e.target.value)} placeholder="Saldo conferido no extrato" rows={3} style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }} /></label>
+            <button onClick={salvarConferencia} disabled={carregando || !calculo?.saldoInicialConfigurado} style={{ background: '#7c3aed', color: 'white', border: 'none', padding: '10px 14px', borderRadius: '8px', cursor: 'pointer', opacity: calculo?.saldoInicialConfigurado ? 1 : 0.6 }}>Salvar conferência</button>
+          </div>
+        </div>
+      </div>
+
+      {carregando && <p>Processando...</p>}
+
+      {calculo && !calculo.saldoInicialConfigurado && (
+        <div style={{ background: '#fffbeb', border: '1px solid #fde68a', color: '#92400e', borderRadius: '12px', padding: '14px', marginBottom: '16px' }}>{calculo.mensagem}</div>
+      )}
+
+      {calculo?.saldoInicialConfigurado && (
+        <div style={{ background: 'white', border: '1px solid #e5e7eb', borderRadius: '12px', padding: '14px', marginBottom: '16px' }}>
+          <h3 style={{ marginTop: 0 }}>Resultado da conferência</h3>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '10px' }}>
+            <KpiCard titulo="Saldo inicial" valor={formatarMoeda(calculo.saldoInicial)} detalhe={formatarData(calculo.dataSaldoInicial)} cor="#475569" fundo="#f8fafc" />
+            <KpiCard titulo="Créditos no período" valor={formatarMoeda(calculo.totalCreditos)} detalhe={`${calculo.quantidadeTransacoes || 0} transação(ões)`} cor="#059669" fundo="#ecfdf5" />
+            <KpiCard titulo="Débitos no período" valor={formatarMoeda(calculo.totalDebitos)} detalhe="Débitos importados" cor="#dc2626" fundo="#fef2f2" />
+            <KpiCard titulo="Saldo calculado" valor={formatarMoeda(calculo.saldoCalculado)} detalhe="Saldo do app" cor="#2563eb" fundo="#eff6ff" />
+            {resultadoAtual && <KpiCard titulo="Saldo real" valor={formatarMoeda(resultadoAtual.saldo_real)} detalhe="Informado pelo usuário" cor="#7c3aed" fundo="#f5f3ff" />}
+            {resultadoAtual && <KpiCard titulo="Diferença" valor={formatarMoeda(resultadoAtual.diferenca)} detalhe="Real - calculado" cor={Math.abs(Number(resultadoAtual.diferenca || 0)) <= numeroFormulario(tolerancia, 0.01) ? '#059669' : '#dc2626'} fundo={Math.abs(Number(resultadoAtual.diferenca || 0)) <= numeroFormulario(tolerancia, 0.01) ? '#ecfdf5' : '#fef2f2'} />}
+          </div>
+
+          {resultadoAtual && (
+            <div style={{ marginTop: '14px', display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+              {(() => { const [bg, cor] = badgeStatusConferencia(resultadoAtual.status); return <span style={{ background: bg, color: cor, padding: '6px 10px', borderRadius: '999px', fontWeight: 'bold' }}>{resultadoAtual.status}</span>; })()}
+              {resultadoAtual.status === 'CONCILIADO' ? <strong style={{ color: '#166534' }}>Saldo conciliado com sucesso.</strong> : <strong style={{ color: '#991b1b' }}>Saldo divergente: revise a diferença e execute a análise inteligente.</strong>}
+              {resultadoAtual.status === 'DIVERGENTE' && <button onClick={() => analisarDivergencia(resultadoAtual)} style={{ background: '#1d4ed8', color: 'white', border: 'none', padding: '9px 12px', borderRadius: '8px', cursor: 'pointer' }}>Analisar divergência</button>}
+            </div>
+          )}
+        </div>
+      )}
+
+      {diagnostico && (
+        <div style={{ background: '#eef2ff', border: '1px solid #c7d2fe', borderRadius: '12px', padding: '14px', marginBottom: '16px' }}>
+          <h3 style={{ marginTop: 0 }}>Análise inteligente</h3>
+          <p style={{ color: '#3730a3' }}>{diagnostico.resumoIA}</p>
+          <div style={{ display: 'grid', gap: '10px' }}>
+            {(diagnostico.diagnosticos || []).map((item, index) => (
+              <div key={`${item.tipo}-${index}`} style={{ background: 'white', border: '1px solid #c7d2fe', borderRadius: '10px', padding: '12px' }}>
+                <strong>{index + 1}. {item.tipo} · {item.severidade}</strong>
+                <p style={{ margin: '6px 0', color: '#334155' }}>{item.descricao}</p>
+                {(item.acoesSugeridas || []).length > 0 && <p style={{ margin: '6px 0', color: '#475569' }}><strong>Ação sugerida:</strong> {item.acoesSugeridas.join(' ')}</p>}
+                {(item.transacoesRelacionadas || []).length > 0 && (
+                  <div style={{ overflowX: 'auto', marginTop: '8px' }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
+                      <thead><tr><th style={{ textAlign: 'left', padding: '6px' }}>Data</th><th style={{ textAlign: 'left', padding: '6px' }}>Conta</th><th style={{ textAlign: 'left', padding: '6px' }}>Descrição</th><th style={{ textAlign: 'right', padding: '6px' }}>Valor</th><th style={{ textAlign: 'left', padding: '6px' }}>Tipo</th></tr></thead>
+                      <tbody>{item.transacoesRelacionadas.map((tx, idx) => <tr key={`${tx.id || idx}-${idx}`} style={{ borderTop: '1px solid #e0e7ff' }}><td style={{ padding: '6px' }}>{formatarData(tx.data)}</td><td style={{ padding: '6px' }}>{tx.contaNome || '-'}</td><td style={{ padding: '6px' }}>{tx.descricao}</td><td style={{ padding: '6px', textAlign: 'right' }}>{formatarMoeda(tx.valor)}</td><td style={{ padding: '6px' }}>{tx.tipo}</td></tr>)}</tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div style={{ background: 'white', border: '1px solid #e5e7eb', borderRadius: '12px', padding: '14px' }}>
+        <h3 style={{ marginTop: 0 }}>Histórico de conferências</h3>
+        {historico.length === 0 ? <p style={{ color: '#64748b' }}>Nenhuma conferência salva para esta conta.</p> : (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+              <thead><tr><th style={{ textAlign: 'left', padding: '8px' }}>Data referência</th><th style={{ textAlign: 'left', padding: '8px' }}>Conta</th><th style={{ textAlign: 'right', padding: '8px' }}>Saldo real</th><th style={{ textAlign: 'right', padding: '8px' }}>Saldo calculado</th><th style={{ textAlign: 'right', padding: '8px' }}>Diferença</th><th style={{ textAlign: 'left', padding: '8px' }}>Status</th><th style={{ textAlign: 'left', padding: '8px' }}>Criado em</th></tr></thead>
+              <tbody>{historico.map((item) => { const [bg, cor] = badgeStatusConferencia(item.status); return <tr key={item.id} style={{ borderTop: '1px solid #e5e7eb' }}><td style={{ padding: '8px' }}>{formatarData(item.data_referencia)}</td><td style={{ padding: '8px' }}>{item.conta_nome}</td><td style={{ padding: '8px', textAlign: 'right' }}>{formatarMoeda(item.saldo_real)}</td><td style={{ padding: '8px', textAlign: 'right' }}>{formatarMoeda(item.saldo_calculado)}</td><td style={{ padding: '8px', textAlign: 'right' }}>{formatarMoeda(item.diferenca)}</td><td style={{ padding: '8px' }}><span style={{ background: bg, color: cor, padding: '4px 8px', borderRadius: '999px', fontWeight: 'bold' }}>{item.status}</span></td><td style={{ padding: '8px' }}>{formatarData(item.criado_em)}</td></tr>; })}</tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TelaProvisoes({ contas = [], token, onVoltar }) {
+  const [provisoes, setProvisoes] = useState([]);
+  const [categorias, setCategorias] = useState([]);
+  const [transacoes, setTransacoes] = useState([]);
+  const [filtros, setFiltros] = useState({ dataInicial: '', dataFinal: '', status: 'todos', tipo: 'todos', contaId: 'todas', categoriaMacroId: 'todas', categoriaDetalhadaId: 'todas', busca: '' });
+  const [modalAberto, setModalAberto] = useState(false);
+  const [editando, setEditando] = useState(null);
+  const [form, setForm] = useState({ descricao: '', valorPrevisto: '', tipo: 'DEBITO', dataPrevista: dataLocalISO(new Date()), dataVencimento: '', contaId: '', categoriaMacroId: '', categoriaDetalhadaId: '', observacao: '', recorrente: false, periodicidade: '' });
+  const [sugestoes, setSugestoes] = useState([]);
+  const [provisaoConciliando, setProvisaoConciliando] = useState(null);
+  const [carregando, setCarregando] = useState(false);
+  const authHeaders = { Authorization: `Bearer ${token}` };
+
+  const categoriasMacro = categorias.filter((cat) => (cat.nivel || (cat.categoria_pai_id ? 'DETALHADA' : 'MACRO')) === 'MACRO');
+  const categoriasDetalhadas = categorias.filter((cat) => (cat.nivel || (cat.categoria_pai_id ? 'DETALHADA' : 'MACRO')) === 'DETALHADA' && (!form.categoriaMacroId || cat.categoria_pai_id === form.categoriaMacroId));
+  const categoriasDetalhadasFiltro = categorias.filter((cat) => (cat.nivel || (cat.categoria_pai_id ? 'DETALHADA' : 'MACRO')) === 'DETALHADA' && (filtros.categoriaMacroId === 'todas' || cat.categoria_pai_id === filtros.categoriaMacroId));
+
+  const carregarDados = async () => {
+    setCarregando(true);
+    try {
+      const params = new URLSearchParams();
+      Object.entries(filtros).forEach(([chave, valor]) => { if (valor && valor !== 'todos' && valor !== 'todas') params.set(chave, valor); });
+      const [provisoesResponse, categoriasResponse, transacoesResponse] = await Promise.all([
+        axios.get(`${API_URL}/provisoes?${params.toString()}`, { headers: authHeaders }),
+        axios.get(`${API_URL}/categorias`, { headers: authHeaders }),
+        axios.get(`${API_URL}/transacoes`, { headers: authHeaders }),
+      ]);
+      setProvisoes(provisoesResponse.data.provisoes || []);
+      setCategorias(categoriasResponse.data.categorias || []);
+      setTransacoes(transacoesResponse.data.transacoes || []);
+    } catch (error) {
+      alert(error.response?.data?.erro || error.message);
+    } finally {
+      setCarregando(false);
+    }
+  };
+
+  useEffect(() => { carregarDados(); }, []);
+
+  const abrirNova = () => {
+    setEditando(null);
+    setForm({ descricao: '', valorPrevisto: '', tipo: 'DEBITO', dataPrevista: dataLocalISO(new Date()), dataVencimento: '', contaId: '', categoriaMacroId: '', categoriaDetalhadaId: '', observacao: '', recorrente: false, periodicidade: '' });
+    setModalAberto(true);
+  };
+
+  const abrirEdicao = (provisao) => {
+    setEditando(provisao);
+    setForm({
+      descricao: provisao.descricao || '',
+      valorPrevisto: provisao.valor_previsto || '',
+      tipo: provisao.tipo || 'DEBITO',
+      dataPrevista: normalizarDataFiltro(provisao.data_prevista),
+      dataVencimento: normalizarDataFiltro(provisao.data_vencimento),
+      contaId: provisao.conta_id || '',
+      categoriaMacroId: provisao.categoria_macro_id || '',
+      categoriaDetalhadaId: provisao.categoria_detalhada_id || '',
+      observacao: provisao.observacao || '',
+      recorrente: Boolean(provisao.recorrente),
+      periodicidade: provisao.periodicidade || '',
+    });
+    setModalAberto(true);
+  };
+
+  const salvarProvisao = async () => {
+    try {
+      const payload = { ...form, valorPrevisto: Number(form.valorPrevisto), contaId: form.contaId || null, categoriaMacroId: form.categoriaMacroId || null, categoriaDetalhadaId: form.categoriaDetalhadaId || null, dataVencimento: form.dataVencimento || null };
+      if (editando) await axios.patch(`${API_URL}/provisoes/${editando.id}`, payload, { headers: authHeaders });
+      else await axios.post(`${API_URL}/provisoes`, payload, { headers: authHeaders });
+      setModalAberto(false);
+      await carregarDados();
+    } catch (error) {
+      alert(error.response?.data?.erro || error.message);
+    }
+  };
+
+  const excluirProvisao = async (provisao) => {
+    if (!window.confirm(`Excluir provisão "${provisao.descricao}"?`)) return;
+    try {
+      await axios.delete(`${API_URL}/provisoes/${provisao.id}${provisao.status === 'CONCILIADA' ? '?confirmar=true' : ''}`, { headers: authHeaders });
+      await carregarDados();
+    } catch (error) {
+      alert(error.response?.data?.erro || error.message);
+    }
+  };
+
+  const atualizarStatus = async (provisao, status) => {
+    try {
+      await axios.patch(`${API_URL}/provisoes/${provisao.id}`, { status }, { headers: authHeaders });
+      await carregarDados();
+    } catch (error) {
+      alert(error.response?.data?.erro || error.message);
+    }
+  };
+
+  const duplicarProvisao = async (provisao) => {
+    try {
+      await axios.post(`${API_URL}/provisoes/${provisao.id}/duplicar`, {}, { headers: authHeaders });
+      await carregarDados();
+    } catch (error) {
+      alert(error.response?.data?.erro || error.message);
+    }
+  };
+
+  const abrirConciliacao = async (provisao) => {
+    setProvisaoConciliando(provisao);
+    setSugestoes([]);
+    try {
+      const dataPrevista = normalizarDataFiltro(provisao.data_prevista);
+      const base = new Date(`${dataPrevista}T00:00:00Z`);
+      const dataInicial = new Date(base); dataInicial.setUTCDate(base.getUTCDate() - 3);
+      const dataFinal = new Date(base); dataFinal.setUTCDate(base.getUTCDate() + 3);
+      const response = await axios.post(`${API_URL}/conciliacoes/sugerir`, { provisaoId: provisao.id, dataInicial: dataInicial.toISOString().slice(0, 10), dataFinal: dataFinal.toISOString().slice(0, 10) }, { headers: authHeaders });
+      setSugestoes(response.data.sugestoes || []);
+    } catch (error) {
+      alert(error.response?.data?.erro || error.message);
+    }
+  };
+
+  const confirmarConciliacao = async (sugestao) => {
+    try {
+      await axios.post(`${API_URL}/conciliacoes/confirmar`, { provisaoId: sugestao.provisaoId, transacaoId: sugestao.transacaoId }, { headers: authHeaders });
+      setProvisaoConciliando(null);
+      await carregarDados();
+    } catch (error) {
+      alert(error.response?.data?.erro || error.message);
+    }
+  };
+
+  const ignorarSugestao = async (sugestao) => {
+    try {
+      await axios.post(`${API_URL}/conciliacoes/ignorar`, { provisaoId: sugestao.provisaoId, transacaoId: sugestao.transacaoId, confianca: sugestao.confianca, score: sugestao.score, motivos: sugestao.motivos }, { headers: authHeaders });
+      setSugestoes((atuais) => atuais.filter((item) => item.transacaoId !== sugestao.transacaoId));
+    } catch (error) {
+      alert(error.response?.data?.erro || error.message);
+    }
+  };
+
+  const desfazerConciliacao = async (provisao) => {
+    if (!provisao.conciliacao_id || !window.confirm('Desfazer conciliação desta provisão?')) return;
+    try {
+      await axios.post(`${API_URL}/conciliacoes/desfazer`, { conciliacaoId: provisao.conciliacao_id }, { headers: authHeaders });
+      await carregarDados();
+    } catch (error) {
+      alert(error.response?.data?.erro || error.message);
+    }
+  };
+
+  const aplicarFiltros = () => carregarDados();
+
+  return (
+    <div style={{ minHeight: '100vh', background: '#f5f5f5' }}>
+      <div style={{ background: '#1f2937', color: 'white', padding: '20px' }}>
+        <button onClick={onVoltar} style={{ background: 'rgba(255,255,255,0.2)', color: 'white', border: '1px solid rgba(255,255,255,0.3)', padding: '8px 12px', borderRadius: '6px', cursor: 'pointer' }}>← Voltar</button>
+        <h1 style={{ margin: '14px 0 4px' }}>📌 Provisões</h1>
+        <p style={{ margin: 0, opacity: 0.8 }}>Cadastre valores previstos e confirme conciliações com transações reais.</p>
+      </div>
+
+      <div style={{ padding: '20px', maxWidth: '1280px', margin: '0 auto' }}>
+        <div style={{ background: 'white', borderRadius: '14px', padding: '16px', marginBottom: '16px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap', marginBottom: '12px' }}>
+            <h2 style={{ margin: 0 }}>Contas provisionadas</h2>
+            <button onClick={abrirNova} style={{ background: '#2563eb', color: 'white', border: 'none', padding: '10px 14px', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold' }}>+ Nova provisão</button>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '10px' }}>
+            <input type="date" value={filtros.dataInicial} onChange={(e) => setFiltros({ ...filtros, dataInicial: e.target.value })} style={{ padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }} />
+            <input type="date" value={filtros.dataFinal} onChange={(e) => setFiltros({ ...filtros, dataFinal: e.target.value })} style={{ padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }} />
+            <select value={filtros.status} onChange={(e) => setFiltros({ ...filtros, status: e.target.value })} style={{ padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }}><option value="todos">Todos status</option>{STATUS_PROVISAO_OPCOES.map((s) => <option key={s} value={s}>{s}</option>)}</select>
+            <select value={filtros.tipo} onChange={(e) => setFiltros({ ...filtros, tipo: e.target.value })} style={{ padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }}><option value="todos">Todos tipos</option><option value="CREDITO">Crédito</option><option value="DEBITO">Débito</option></select>
+            <select value={filtros.contaId} onChange={(e) => setFiltros({ ...filtros, contaId: e.target.value })} style={{ padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }}><option value="todas">Todas contas</option>{contas.map((c) => <option key={c.id} value={c.id}>{c.nome}</option>)}</select>
+            <select value={filtros.categoriaMacroId} onChange={(e) => setFiltros({ ...filtros, categoriaMacroId: e.target.value, categoriaDetalhadaId: 'todas' })} style={{ padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }}><option value="todas">Todas macros</option>{categoriasMacro.map((c) => <option key={c.id} value={c.id}>{c.nome}</option>)}</select>
+            <select value={filtros.categoriaDetalhadaId} onChange={(e) => setFiltros({ ...filtros, categoriaDetalhadaId: e.target.value })} style={{ padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }}><option value="todas">Todas detalhadas</option>{categoriasDetalhadasFiltro.map((c) => <option key={c.id} value={c.id}>{c.nome}</option>)}</select>
+            <input value={filtros.busca} onChange={(e) => setFiltros({ ...filtros, busca: e.target.value })} placeholder="Buscar descrição" style={{ padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }} />
+            <button onClick={aplicarFiltros} style={{ background: '#111827', color: 'white', border: 'none', padding: '10px', borderRadius: '8px', cursor: 'pointer' }}>Filtrar</button>
+          </div>
+        </div>
+
+        <div style={{ background: 'white', borderRadius: '14px', overflowX: 'auto' }}>
+          {carregando ? <p style={{ padding: '20px' }}>Carregando provisões...</p> : (
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '14px' }}>
+              <thead style={{ background: '#f8fafc' }}><tr>{['Data prevista','Vencimento','Descrição','Conta','Valor previsto','Tipo','Categoria','Status','Transação conciliada','Ações'].map((h) => <th key={h} style={{ padding: '12px', textAlign: 'left' }}>{h}</th>)}</tr></thead>
+              <tbody>
+                {provisoes.map((p) => {
+                  const [bg, cor] = badgeStatusProvisao(p.status);
+                  return (
+                    <tr key={p.id} style={{ borderTop: '1px solid #e5e7eb' }}>
+                      <td style={{ padding: '12px' }}>{formatarData(p.data_prevista)}</td>
+                      <td style={{ padding: '12px' }}>{p.data_vencimento ? formatarData(p.data_vencimento) : '-'}</td>
+                      <td style={{ padding: '12px' }}>{p.descricao}</td>
+                      <td style={{ padding: '12px' }}>{p.conta_nome || '-'}</td>
+                      <td style={{ padding: '12px', fontWeight: 'bold', color: p.tipo === 'CREDITO' ? '#059669' : '#dc2626' }}>{formatarMoeda(p.valor_previsto)}</td>
+                      <td style={{ padding: '12px' }}>{p.tipo}</td>
+                      <td style={{ padding: '12px' }}>{p.categoria_macro_nome || 'Sem categoria'}{p.categoria_detalhada_nome ? ` › ${p.categoria_detalhada_nome}` : ''}</td>
+                      <td style={{ padding: '12px' }}><span style={{ background: bg, color: cor, padding: '4px 8px', borderRadius: '999px', fontSize: '12px', fontWeight: 'bold' }}>{p.status}</span></td>
+                      <td style={{ padding: '12px' }}>{p.transacao_conciliada_id ? `${p.transacao_conciliada_descricao || 'Transação'} (${formatarData(p.transacao_conciliada_data)})` : '-'}</td>
+                      <td style={{ padding: '12px' }}>
+                        <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                          <button onClick={() => abrirEdicao(p)} style={{ padding: '5px 8px', borderRadius: '6px', border: '1px solid #d1d5db', background: 'white', cursor: 'pointer' }}>Editar</button>
+                          <button onClick={() => excluirProvisao(p)} style={{ padding: '5px 8px', borderRadius: '6px', border: '1px solid #dc2626', color: '#dc2626', background: 'white', cursor: 'pointer' }}>Excluir</button>
+                          <button onClick={() => abrirConciliacao(p)} disabled={!['PENDENTE','ATRASADA'].includes(p.status)} style={{ padding: '5px 8px', borderRadius: '6px', border: '1px solid #2563eb', color: '#2563eb', background: 'white', cursor: ['PENDENTE','ATRASADA'].includes(p.status) ? 'pointer' : 'not-allowed' }}>Conciliar</button>
+                          <button onClick={() => duplicarProvisao(p)} style={{ padding: '5px 8px', borderRadius: '6px', border: '1px solid #6b7280', background: 'white', cursor: 'pointer' }}>Duplicar</button>
+                          {p.status !== 'CANCELADA' && <button onClick={() => atualizarStatus(p, 'CANCELADA')} style={{ padding: '5px 8px', borderRadius: '6px', border: '1px solid #6b7280', background: 'white', cursor: 'pointer' }}>Cancelar</button>}
+                          {p.status !== 'IGNORADA' && <button onClick={() => atualizarStatus(p, 'IGNORADA')} style={{ padding: '5px 8px', borderRadius: '6px', border: '1px solid #7c3aed', color: '#7c3aed', background: 'white', cursor: 'pointer' }}>Ignorar</button>}
+                          {p.conciliacao_id && <button onClick={() => desfazerConciliacao(p)} style={{ padding: '5px 8px', borderRadius: '6px', border: '1px solid #f59e0b', color: '#92400e', background: 'white', cursor: 'pointer' }}>Desfazer</button>}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+                {provisoes.length === 0 && <tr><td colSpan="10" style={{ padding: '24px', textAlign: 'center', color: '#6b7280' }}>Nenhuma provisão encontrada.</td></tr>}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </div>
+
+      {modalAberto && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <div style={{ background: 'white', borderRadius: '14px', padding: '24px', width: '92%', maxWidth: '680px', maxHeight: '90vh', overflowY: 'auto' }}>
+            <h2 style={{ marginTop: 0 }}>{editando ? 'Editar provisão' : 'Nova provisão'}</h2>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '12px' }}>
+              <label>Descrição<input value={form.descricao} onChange={(e) => setForm({ ...form, descricao: e.target.value })} style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px', boxSizing: 'border-box' }} /></label>
+              <label>Valor previsto<input type="number" min="0" step="0.01" value={form.valorPrevisto} onChange={(e) => setForm({ ...form, valorPrevisto: e.target.value })} style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px', boxSizing: 'border-box' }} /></label>
+              <label>Tipo<select value={form.tipo} onChange={(e) => setForm({ ...form, tipo: e.target.value })} style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }}>{TIPOS_PROVISAO_OPCOES.map((t) => <option key={t} value={t}>{t}</option>)}</select></label>
+              <label>Data prevista<input type="date" value={form.dataPrevista} onChange={(e) => setForm({ ...form, dataPrevista: e.target.value })} style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px', boxSizing: 'border-box' }} /></label>
+              <label>Data de vencimento<input type="date" value={form.dataVencimento} onChange={(e) => setForm({ ...form, dataVencimento: e.target.value })} style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px', boxSizing: 'border-box' }} /></label>
+              <label>Conta esperada<select value={form.contaId} onChange={(e) => setForm({ ...form, contaId: e.target.value })} style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }}><option value="">Sem conta</option>{contas.map((c) => <option key={c.id} value={c.id}>{c.nome}</option>)}</select></label>
+              <label>Categoria macro<select value={form.categoriaMacroId} onChange={(e) => setForm({ ...form, categoriaMacroId: e.target.value, categoriaDetalhadaId: '' })} style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }}><option value="">Sem macro</option>{categoriasMacro.map((c) => <option key={c.id} value={c.id}>{c.nome}</option>)}</select></label>
+              <label>Categoria detalhada<select value={form.categoriaDetalhadaId} onChange={(e) => setForm({ ...form, categoriaDetalhadaId: e.target.value })} style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }}><option value="">Sem detalhamento</option>{categoriasDetalhadas.map((c) => <option key={c.id} value={c.id}>{c.nome}</option>)}</select></label>
+            </div>
+            <label style={{ display: 'block', marginTop: '12px' }}>Observação<textarea value={form.observacao} onChange={(e) => setForm({ ...form, observacao: e.target.value })} rows="3" style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px', boxSizing: 'border-box' }} /></label>
+            <label style={{ display: 'flex', gap: '8px', marginTop: '12px', alignItems: 'center' }}><input type="checkbox" checked={form.recorrente} onChange={(e) => setForm({ ...form, recorrente: e.target.checked })} /> Recorrente</label>
+            {form.recorrente && <select value={form.periodicidade} onChange={(e) => setForm({ ...form, periodicidade: e.target.value })} style={{ marginTop: '8px', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }}><option value="">Periodicidade</option><option value="SEMANAL">Semanal</option><option value="MENSAL">Mensal</option><option value="ANUAL">Anual</option></select>}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '18px' }}>
+              <button onClick={() => setModalAberto(false)} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', background: '#e5e7eb', cursor: 'pointer' }}>Cancelar</button>
+              <button onClick={salvarProvisao} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', background: '#2563eb', color: 'white', cursor: 'pointer' }}>Salvar</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {provisaoConciliando && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <div style={{ background: 'white', borderRadius: '14px', padding: '24px', width: '92%', maxWidth: '900px', maxHeight: '90vh', overflowY: 'auto' }}>
+            <h2 style={{ marginTop: 0 }}>Conciliar: {provisaoConciliando.descricao}</h2>
+            <p style={{ color: '#6b7280' }}>Escolha uma transação candidata. A conciliação só será aplicada após confirmação.</p>
+            <div style={{ display: 'grid', gap: '10px' }}>
+              {sugestoes.map((s) => (
+                <div key={s.transacaoId} style={{ border: '1px solid #d1d5db', borderRadius: '10px', padding: '12px' }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '10px' }}>
+                    <strong>{s.transacao.descricao}</strong>
+                    <span>{formatarData(s.transacao.data)} • {formatarMoeda(s.transacao.valor)}</span>
+                    <span>{s.transacao.conta_nome || 'Conta'} • {s.transacao.categoria_macro_nome || 'Sem categoria'}</span>
+                    <span>{s.confianca} ({Number(s.score || 0).toFixed(2)})</span>
+                  </div>
+                  <small style={{ color: '#6b7280' }}>{(s.motivos || []).join(' • ')}</small>
+                  <div style={{ display: 'flex', gap: '8px', marginTop: '10px' }}>
+                    <button onClick={() => confirmarConciliacao(s)} style={{ background: '#16a34a', color: 'white', border: 'none', padding: '8px 10px', borderRadius: '8px', cursor: 'pointer' }}>Confirmar conciliação</button>
+                    <button onClick={() => ignorarSugestao(s)} style={{ background: 'white', color: '#6b7280', border: '1px solid #6b7280', padding: '8px 10px', borderRadius: '8px', cursor: 'pointer' }}>Ignorar sugestão</button>
+                  </div>
+                </div>
+              ))}
+              {sugestoes.length === 0 && <p style={{ color: '#6b7280' }}>Nenhuma transação candidata encontrada pelos critérios iniciais.</p>}
+            </div>
+            <button onClick={() => setProvisaoConciliando(null)} style={{ marginTop: '14px', padding: '10px 14px', borderRadius: '8px', border: 'none', background: '#e5e7eb', cursor: 'pointer' }}>Fechar</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ============================================================================
 // TELA DE TRANSAÇÕES
 // ============================================================================
 
-function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
+function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualizarContas }) {
   const [transacoes, setTransacoes] = useState([]);
   const [categorias, setCategorias] = useState([]);
   const [carregando, setCarregando] = useState(true);
@@ -1556,6 +2540,14 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
   const [sugestoesTransferencia, setSugestoesTransferencia] = useState([]);
   const [carregandoSugestoes, setCarregandoSugestoes] = useState(false);
   const [marcandoTransferencia, setMarcandoTransferencia] = useState(null);
+  const [sortField, setSortField] = useState('data');
+  const [sortDirection, setSortDirection] = useState('desc');
+  const [sortIsDefault, setSortIsDefault] = useState(true);
+  const [modalSaldoInicialAberto, setModalSaldoInicialAberto] = useState(false);
+  const [formSaldoInicial, setFormSaldoInicial] = useState({ dataSaldoInicial: '', saldoInicial: '', observacao: '' });
+  const [salvandoSaldoInicial, setSalvandoSaldoInicial] = useState(false);
+  const [destacarInicioBase, setDestacarInicioBase] = useState(false);
+  const tabelaRef = useRef(null);
 
   useEffect(() => {
     carregarDados();
@@ -1620,6 +2612,156 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
   const categoriasMacro = categorias.filter((cat) => (cat.nivel || (cat.categoria_pai_id ? 'DETALHADA' : 'MACRO')) === 'MACRO');
   const categoriasDetalhadasModal = categorias.filter((cat) => (cat.nivel || (cat.categoria_pai_id ? 'DETALHADA' : 'MACRO')) === 'DETALHADA' && cat.categoria_pai_id === categoriaMacroEscolhida);
   const categoriasDetalhadasFiltro = categorias.filter((cat) => (cat.nivel || (cat.categoria_pai_id ? 'DETALHADA' : 'MACRO')) === 'DETALHADA' && (filtros.categoriaMacro === 'todas' || cat.categoria_pai_id === filtros.categoriaMacro));
+  const nomeCategoriaMacro = (tx) => tx.categoria_macro_nome || (!tx.categoria_detalhada_id ? tx.categoria_nome : '') || 'Sem categoria';
+  const nomeCategoriaDetalhada = (tx) => tx.categoria_detalhada_nome || (tx.categoria_detalhada_id ? tx.categoria_nome : '') || '-';
+  const textoStatusFlags = (tx) => [
+    tx.eh_transferencia_interna ? 'Transferência interna' : '',
+    tx.conciliacao_id ? 'Conciliada' : '',
+  ].filter(Boolean).join(' ') || '-';
+  const contaSelecionadaFiltro = filtros.conta !== 'todas' ? contas.find((conta) => conta.id === filtros.conta) : null;
+  const dataAnteriorISO = (data) => {
+    if (!data) return dataLocalISO(new Date());
+    const d = new Date(`${normalizarDataFiltro(data)}T00:00:00`);
+    if (Number.isNaN(d.getTime())) return dataLocalISO(new Date());
+    d.setDate(d.getDate() - 1);
+    return dataLocalISO(d);
+  };
+  const estiloBadgeCategoria = (origem) => ({
+    background: origem === 'AUTO' ? '#dbeafe' : '#e5e7eb',
+    color: origem === 'AUTO' ? '#1d4ed8' : '#374151',
+    padding: '4px 8px',
+    borderRadius: '4px',
+    fontSize: '12px',
+    display: 'inline-block',
+  });
+
+  const valorOrdenacao = (tx, campo) => {
+    if (campo === 'data') return normalizarDataFiltro(tx.data) || '';
+    if (campo === 'conta') return tx.conta_nome || '';
+    if (campo === 'descricao') return tx.descricao || '';
+    if (campo === 'valor') return Number(tx.valor || 0);
+    if (campo === 'tipo') return tx.tipo === 'CREDITO' ? 'Crédito' : 'Débito';
+    if (campo === 'categoriaMacro') return nomeCategoriaMacro(tx);
+    if (campo === 'categoriaDetalhada') return nomeCategoriaDetalhada(tx);
+    if (campo === 'status') return textoStatusFlags(tx);
+    return '';
+  };
+
+  const compararTransacoes = (a, b, campo, direcao) => {
+    const valorA = valorOrdenacao(a, campo);
+    const valorB = valorOrdenacao(b, campo);
+    const vazioA = valorA === null || valorA === undefined || valorA === '' || valorA === '-';
+    const vazioB = valorB === null || valorB === undefined || valorB === '' || valorB === '-';
+    if (vazioA && vazioB) return 0;
+    if (vazioA) return 1;
+    if (vazioB) return -1;
+
+    let comparacao;
+    if (campo === 'valor') comparacao = Number(valorA) - Number(valorB);
+    else comparacao = String(valorA).localeCompare(String(valorB), 'pt-BR', { numeric: true, sensitivity: 'base' });
+
+    return direcao === 'desc' ? -comparacao : comparacao;
+  };
+
+  const transacoesOrdenadas = useMemo(() => {
+    const campo = sortField || 'data';
+    const direcao = sortDirection || 'desc';
+    return [...transacoesFiltradas].sort((a, b) => compararTransacoes(a, b, campo, direcao));
+  }, [transacoesFiltradas, sortField, sortDirection]);
+
+  const resumoBase = useMemo(() => {
+    if (transacoesFiltradas.length === 0) return null;
+    const porDataAsc = [...transacoesFiltradas].sort((a, b) => compararTransacoes(a, b, 'data', 'asc'));
+    const totalCreditos = transacoesFiltradas.filter((tx) => tx.tipo === 'CREDITO').reduce((soma, tx) => soma + Number(tx.valor || 0), 0);
+    const totalDebitos = transacoesFiltradas.filter((tx) => tx.tipo === 'DEBITO').reduce((soma, tx) => soma + Number(tx.valor || 0), 0);
+    const porConta = Array.from(transacoesFiltradas.reduce((mapa, tx) => {
+      const chave = tx.conta_id || 'sem-conta';
+      if (!mapa.has(chave)) mapa.set(chave, { contaId: tx.conta_id, contaNome: tx.conta_nome || 'Conta', transacoes: [] });
+      mapa.get(chave).transacoes.push(tx);
+      return mapa;
+    }, new Map()).values()).map((item) => {
+      const ordenadas = [...item.transacoes].sort((a, b) => compararTransacoes(a, b, 'data', 'asc'));
+      return {
+        ...item,
+        primeira: ordenadas[0],
+        ultima: ordenadas[ordenadas.length - 1],
+        quantidade: item.transacoes.length,
+      };
+    }).sort((a, b) => String(a.contaNome).localeCompare(String(b.contaNome), 'pt-BR'));
+
+    return {
+      primeira: porDataAsc[0],
+      ultima: porDataAsc[porDataAsc.length - 1],
+      quantidade: transacoesFiltradas.length,
+      saldoCalculadoPeriodo: totalCreditos - totalDebitos,
+      porConta,
+    };
+  }, [transacoesFiltradas]);
+
+  const primeiraTransacaoBase = resumoBase?.primeira || null;
+
+  const handleSort = (field) => {
+    setDestacarInicioBase(false);
+    if (sortIsDefault || sortField !== field) {
+      setSortField(field);
+      setSortDirection('asc');
+      setSortIsDefault(false);
+      return;
+    }
+    if (sortDirection === 'asc') {
+      setSortDirection('desc');
+      setSortIsDefault(false);
+      return;
+    }
+    setSortField('data');
+    setSortDirection('desc');
+    setSortIsDefault(true);
+  };
+
+  const rotuloOrdenacao = (label, field) => `${label}${sortField === field ? (sortDirection === 'asc' ? ' ▲' : ' ▼') : ''}`;
+  const estiloCabecalhoOrdenavel = (align = 'left') => ({ padding: '12px', textAlign: align, cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap' });
+
+  const verInicioBase = () => {
+    setSortField('data');
+    setSortDirection('asc');
+    setSortIsDefault(false);
+    setDestacarInicioBase(true);
+    setTimeout(() => tabelaRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0);
+  };
+
+  const abrirModalSaldoInicial = () => {
+    if (!contaSelecionadaFiltro) return alert('Selecione uma conta específica para configurar o saldo inicial.');
+    if (!primeiraTransacaoBase) return alert('Não há transações para sugerir o início da base desta conta.');
+    setFormSaldoInicial({
+      dataSaldoInicial: dataAnteriorISO(primeiraTransacaoBase.data),
+      saldoInicial: String(contaSelecionadaFiltro.saldo_inicial ?? 0).replace('.', ','),
+      observacao: '',
+    });
+    setModalSaldoInicialAberto(true);
+  };
+
+  const salvarSaldoInicialConta = async () => {
+    if (!contaSelecionadaFiltro) return;
+    const parse = parseValorMonetario(formSaldoInicial.saldoInicial);
+    if (!Number.isFinite(parse.valor)) return alert('Informe um saldo inicial válido.');
+    if (!formSaldoInicial.dataSaldoInicial) return alert('Informe a data do saldo inicial.');
+    setSalvandoSaldoInicial(true);
+    try {
+      await axios.patch(`${API_URL}/contas/${contaSelecionadaFiltro.id}/saldo-inicial`, {
+        saldoInicial: parse.valor,
+        dataSaldoInicial: formSaldoInicial.dataSaldoInicial,
+        observacao: formSaldoInicial.observacao,
+      }, { headers: authHeaders });
+      alert('Saldo inicial salvo.');
+      setModalSaldoInicialAberto(false);
+      await onAtualizarContas?.();
+      await carregarDados();
+    } catch (error) {
+      alert(error.response?.data?.detalhes || error.response?.data?.erro || error.message);
+    } finally {
+      setSalvandoSaldoInicial(false);
+    }
+  };
 
   const abrirModalIndividual = (tx) => {
     setTransacaoSelecionada(tx);
@@ -1721,9 +2863,9 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
     tx.descricao || '',
     Number(tx.valor || 0),
     tx.tipo === 'CREDITO' ? 'Crédito' : 'Débito',
-    tx.categoria_macro_nome || tx.categoria_nome || '',
-    tx.categoria_detalhada_nome || '',
-    tx.categoria_nome || tx.categoria_macro_nome || '',
+    nomeCategoriaMacro(tx) === 'Sem categoria' ? '' : nomeCategoriaMacro(tx),
+    nomeCategoriaDetalhada(tx) === '-' ? '' : nomeCategoriaDetalhada(tx),
+    tx.categoria_nome || nomeCategoriaMacro(tx),
     tx.eh_transferencia_interna ? 'Sim' : 'Não',
     tx.transferencia_grupo_id || '',
     tx.categoria_origem || '',
@@ -1732,8 +2874,8 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
   const exportarExcel = (apenasSelecionadas = false) => {
     const selecionadasSet = new Set(selecionadas);
     const baseExportacao = apenasSelecionadas
-      ? transacoesFiltradas.filter((tx) => selecionadasSet.has(tx.id))
-      : transacoesFiltradas;
+      ? transacoesOrdenadas.filter((tx) => selecionadasSet.has(tx.id))
+      : transacoesOrdenadas;
 
     if (baseExportacao.length === 0) {
       alert('Não há transações para exportar com os filtros atuais.');
@@ -1908,13 +3050,13 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
               <input type="date" value={dataFinal} onChange={(event) => setDataFinal(event.target.value)} style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} />
             </label>
             <button onClick={limparFiltros} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', cursor: 'pointer', background: '#e5e7eb' }}>Limpar filtros</button>
-            <button onClick={alternarTodasFiltradas} disabled={transacoesFiltradas.length === 0} style={{ padding: '10px 14px', borderRadius: '8px', border: '1px solid #d1d5db', background: 'white', cursor: transacoesFiltradas.length === 0 ? 'not-allowed' : 'pointer' }}>
+            <button onClick={alternarTodasFiltradas} disabled={transacoesOrdenadas.length === 0} style={{ padding: '10px 14px', borderRadius: '8px', border: '1px solid #d1d5db', background: 'white', cursor: transacoesOrdenadas.length === 0 ? 'not-allowed' : 'pointer' }}>
               {todasFiltradasSelecionadas ? 'Limpar seleção filtrada' : 'Selecionar todos filtrados'}
             </button>
             <button onClick={abrirModalLote} disabled={selecionadas.length === 0} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', background: selecionadas.length ? '#667eea' : '#c7d2fe', color: 'white', cursor: selecionadas.length ? 'pointer' : 'not-allowed' }}>
               Categorizar selecionadas
             </button>
-            <button onClick={() => exportarExcel(false)} disabled={transacoesFiltradas.length === 0} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', background: transacoesFiltradas.length ? '#16a34a' : '#bbf7d0', color: 'white', cursor: transacoesFiltradas.length ? 'pointer' : 'not-allowed' }}>
+            <button onClick={() => exportarExcel(false)} disabled={transacoesOrdenadas.length === 0} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', background: transacoesOrdenadas.length ? '#16a34a' : '#bbf7d0', color: 'white', cursor: transacoesOrdenadas.length ? 'pointer' : 'not-allowed' }}>
               📊 Exportar Excel
             </button>
             <button onClick={() => exportarExcel(true)} disabled={selecionadas.length === 0} style={{ padding: '10px 14px', borderRadius: '8px', border: '1px solid #16a34a', background: selecionadas.length ? 'white' : '#f0fdf4', color: '#15803d', cursor: selecionadas.length ? 'pointer' : 'not-allowed' }}>
@@ -1923,12 +3065,47 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
             <button onClick={verificarTransferenciasInternas} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', background: '#0f766e', color: 'white', cursor: 'pointer' }}>
               Verificar transferências entre contas
             </button>
+            <button onClick={verInicioBase} disabled={!resumoBase} style={{ padding: '10px 14px', borderRadius: '8px', border: '1px solid #1d4ed8', background: resumoBase ? 'white' : '#eff6ff', color: '#1d4ed8', cursor: resumoBase ? 'pointer' : 'not-allowed' }}>
+              Ver início da base
+            </button>
+            <button onClick={abrirModalSaldoInicial} disabled={!contaSelecionadaFiltro || !primeiraTransacaoBase} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', background: contaSelecionadaFiltro && primeiraTransacaoBase ? '#7c3aed' : '#ddd6fe', color: 'white', cursor: contaSelecionadaFiltro && primeiraTransacaoBase ? 'pointer' : 'not-allowed' }}>
+              Configurar saldo inicial desta conta
+            </button>
           </div>
 
           <div style={{ marginTop: '14px' }}>
-            <span style={{ color: '#4b5563', fontSize: '14px' }}>{transacoesFiltradas.length} transação(ões) filtrada(s) • {selecionadas.length} selecionada(s)</span>
+            <span style={{ color: '#4b5563', fontSize: '14px' }}>{transacoesOrdenadas.length} transação(ões) filtrada(s) • {selecionadas.length} selecionada(s)</span>
           </div>
         </div>
+
+        {resumoBase && (
+          <div style={{ background: 'white', border: '1px solid #dbeafe', borderRadius: '12px', padding: '16px', marginBottom: '16px', boxShadow: '0 2px 8px rgba(0,0,0,0.06)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap', alignItems: 'flex-start' }}>
+              <div>
+                <h3 style={{ margin: '0 0 8px' }}>{contaSelecionadaFiltro ? `Conta: ${contaSelecionadaFiltro.nome}` : 'Todas as contas'}</h3>
+                <p style={{ margin: '4px 0', color: '#475569' }}>Primeira transação importada: <strong>{formatarData(resumoBase.primeira.data)}</strong></p>
+                <p style={{ margin: '4px 0', color: '#475569' }}>Última transação importada: <strong>{formatarData(resumoBase.ultima.data)}</strong></p>
+                <p style={{ margin: '4px 0', color: '#475569' }}>Quantidade de transações: <strong>{resumoBase.quantidade}</strong></p>
+                <p style={{ margin: '4px 0', color: '#475569' }}>Saldo calculado no período exibido: <strong>{formatarMoeda(resumoBase.saldoCalculadoPeriodo)}</strong></p>
+              </div>
+              {contaSelecionadaFiltro && !contaSelecionadaFiltro.data_saldo_inicial && (
+                <div style={{ background: '#fffbeb', color: '#92400e', border: '1px solid #fde68a', borderRadius: '10px', padding: '12px', maxWidth: '420px' }}>
+                  <strong>Saldo inicial ausente</strong>
+                  <p style={{ margin: '6px 0' }}>Esta conta ainda não possui saldo inicial configurado. Para conferir o saldo bancário, informe o saldo da conta no dia anterior à primeira transação importada.</p>
+                  <button onClick={abrirModalSaldoInicial} style={{ background: '#7c3aed', color: 'white', border: 'none', borderRadius: '8px', padding: '8px 10px', cursor: 'pointer' }}>Configurar saldo inicial</button>
+                </div>
+              )}
+            </div>
+            {!contaSelecionadaFiltro && resumoBase.porConta.length > 1 && (
+              <div style={{ marginTop: '14px', overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+                  <thead><tr style={{ background: '#f8fafc' }}><th style={{ textAlign: 'left', padding: '8px' }}>Conta</th><th style={{ textAlign: 'left', padding: '8px' }}>Primeira</th><th style={{ textAlign: 'left', padding: '8px' }}>Última</th><th style={{ textAlign: 'right', padding: '8px' }}>Transações</th></tr></thead>
+                  <tbody>{resumoBase.porConta.map((item) => <tr key={item.contaId || item.contaNome} style={{ borderTop: '1px solid #e5e7eb' }}><td style={{ padding: '8px' }}>{item.contaNome}</td><td style={{ padding: '8px' }}>{formatarData(item.primeira.data)}</td><td style={{ padding: '8px' }}>{formatarData(item.ultima.data)}</td><td style={{ padding: '8px', textAlign: 'right' }}>{item.quantidade}</td></tr>)}</tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
 
         {carregando ? (
           <p>Carregando transações...</p>
@@ -1937,46 +3114,57 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
             <h2>Nenhuma transação encontrada</h2>
           </div>
         ) : (
-          <div style={{ background: 'white', borderRadius: '12px', overflow: 'hidden', boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <div ref={tabelaRef} style={{ background: 'white', borderRadius: '12px', overflowX: 'auto', boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }}>
+            <table style={{ width: '100%', minWidth: '1120px', borderCollapse: 'collapse' }}>
               <thead>
                 <tr style={{ background: '#f9fafb' }}>
                   <th style={{ padding: '12px', textAlign: 'center' }}>
                     <input type="checkbox" checked={todasFiltradasSelecionadas} onChange={alternarTodasFiltradas} />
                   </th>
-                  <th style={{ padding: '12px', textAlign: 'left' }}>Data</th>
-                  <th style={{ padding: '12px', textAlign: 'left' }}>Conta</th>
-                  <th style={{ padding: '12px', textAlign: 'left' }}>Descrição</th>
-                  <th style={{ padding: '12px', textAlign: 'right' }}>Valor</th>
-                  <th style={{ padding: '12px', textAlign: 'left' }}>Tipo</th>
-                  <th style={{ padding: '12px', textAlign: 'left' }}>Categoria</th>
+                  <th onClick={() => handleSort('data')} style={estiloCabecalhoOrdenavel('left')}>{rotuloOrdenacao('Data', 'data')}</th>
+                  <th onClick={() => handleSort('conta')} style={estiloCabecalhoOrdenavel('left')}>{rotuloOrdenacao('Conta', 'conta')}</th>
+                  <th onClick={() => handleSort('descricao')} style={estiloCabecalhoOrdenavel('left')}>{rotuloOrdenacao('Descrição', 'descricao')}</th>
+                  <th onClick={() => handleSort('valor')} style={estiloCabecalhoOrdenavel('right')}>{rotuloOrdenacao('Valor', 'valor')}</th>
+                  <th onClick={() => handleSort('tipo')} style={estiloCabecalhoOrdenavel('left')}>{rotuloOrdenacao('Tipo', 'tipo')}</th>
+                  <th onClick={() => handleSort('categoriaMacro')} style={estiloCabecalhoOrdenavel('left')}>{rotuloOrdenacao('Categoria macro', 'categoriaMacro')}</th>
+                  <th onClick={() => handleSort('categoriaDetalhada')} style={estiloCabecalhoOrdenavel('left')}>{rotuloOrdenacao('Categoria detalhada', 'categoriaDetalhada')}</th>
+                  <th onClick={() => handleSort('status')} style={estiloCabecalhoOrdenavel('left')}>{rotuloOrdenacao('Status/flags', 'status')}</th>
                   <th style={{ padding: '12px', textAlign: 'center' }}>Ações</th>
                 </tr>
               </thead>
               <tbody>
-                {transacoesFiltradas.map((tx) => (
-                  <tr key={tx.id} style={{ borderTop: '1px solid #e5e7eb' }}>
+                {transacoesOrdenadas.map((tx) => (
+                  <tr key={tx.id} style={{ borderTop: '1px solid #e5e7eb', background: destacarInicioBase && primeiraTransacaoBase?.id === tx.id ? '#fef3c7' : 'white' }}>
                     <td style={{ padding: '12px', textAlign: 'center' }}>
                       <input type="checkbox" checked={selecionadas.includes(tx.id)} onChange={() => alternarSelecionada(tx.id)} />
                     </td>
                     <td style={{ padding: '12px' }}>{formatarData(tx.data)}</td>
                     <td style={{ padding: '12px', color: '#475569', fontSize: '13px' }}>{tx.conta_nome || 'Conta'}</td>
-                    <td style={{ padding: '12px' }}>
-                      {tx.descricao}
-                      {tx.eh_transferencia_interna && (
-                        <span style={{ marginLeft: '8px', background: '#ccfbf1', color: '#0f766e', padding: '3px 7px', borderRadius: '999px', fontSize: '11px', fontWeight: 'bold' }}>
-                          Transferência interna
-                        </span>
-                      )}
-                    </td>
+                    <td style={{ padding: '12px' }}>{tx.descricao}</td>
                     <td style={{ padding: '12px', textAlign: 'right', color: tx.tipo === 'CREDITO' ? '#10b981' : '#ef4444', fontWeight: 'bold' }}>
                       {tx.tipo === 'CREDITO' ? '+' : '-'}{formatarMoeda(tx.valor)}
                     </td>
                     <td style={{ padding: '12px' }}>{tx.tipo === 'CREDITO' ? 'Crédito' : 'Débito'}</td>
                     <td style={{ padding: '12px' }}>
-                      <span style={{ background: tx.categoria_origem === 'AUTO' ? '#dbeafe' : '#e5e7eb', padding: '4px 8px', borderRadius: '4px', fontSize: '12px' }}>
-                        {tx.categoria_macro_nome || tx.categoria_nome || 'Sem categoria'}{tx.categoria_detalhada_nome ? ` › ${tx.categoria_detalhada_nome}` : ''}{tx.categoria_origem === 'AUTO' ? ' • auto' : ''}
-                      </span>
+                      <span style={estiloBadgeCategoria(tx.categoria_origem)}>{nomeCategoriaMacro(tx)}{tx.categoria_origem === 'AUTO' ? ' • auto' : ''}</span>
+                    </td>
+                    <td style={{ padding: '12px' }}>
+                      <span style={estiloBadgeCategoria(tx.categoria_origem)}>{nomeCategoriaDetalhada(tx)}</span>
+                    </td>
+                    <td style={{ padding: '12px' }}>
+                      <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                        {tx.eh_transferencia_interna && (
+                          <span style={{ background: '#ccfbf1', color: '#0f766e', padding: '3px 7px', borderRadius: '999px', fontSize: '11px', fontWeight: 'bold' }}>
+                            Transferência interna
+                          </span>
+                        )}
+                        {tx.conciliacao_id && (
+                          <span title={tx.provisao_conciliada_descricao ? `Provisão: ${tx.provisao_conciliada_descricao}` : 'Vinculada a provisão'} style={{ background: '#dcfce7', color: '#166534', padding: '3px 7px', borderRadius: '999px', fontSize: '11px', fontWeight: 'bold' }}>
+                            Conciliada
+                          </span>
+                        )}
+                        {!tx.eh_transferencia_interna && !tx.conciliacao_id && <span style={{ color: '#9ca3af' }}>-</span>}
+                      </div>
                     </td>
                     <td style={{ padding: '12px', textAlign: 'center' }}>
                       <div style={{ display: 'flex', justifyContent: 'center', gap: '8px', flexWrap: 'wrap' }}>
@@ -1995,14 +3183,48 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar }) {
                     </td>
                   </tr>
                 ))}
-                {transacoesFiltradas.length === 0 && (
-                  <tr><td colSpan="8" style={{ padding: '24px', textAlign: 'center', color: '#6b7280' }}>Nenhuma transação corresponde aos filtros.</td></tr>
+                {transacoesOrdenadas.length === 0 && (
+                  <tr><td colSpan="10" style={{ padding: '24px', textAlign: 'center', color: '#6b7280' }}>Nenhuma transação corresponde aos filtros.</td></tr>
                 )}
               </tbody>
             </table>
           </div>
         )}
       </div>
+
+      {modalSaldoInicialAberto && contaSelecionadaFiltro && primeiraTransacaoBase && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <div style={{ background: 'white', borderRadius: '12px', padding: '24px', maxWidth: '560px', width: '92%' }}>
+            <h3 style={{ marginTop: 0 }}>Configurar saldo inicial desta conta</h3>
+            <p style={{ color: '#475569' }}>
+              Informe o saldo real da conta no dia anterior à primeira transação importada. Assim o app conseguirá calcular o saldo corretamente a partir dos registros importados.
+            </p>
+            <div style={{ display: 'grid', gap: '10px', marginBottom: '14px' }}>
+              <div style={{ background: '#f8fafc', border: '1px solid #e5e7eb', borderRadius: '8px', padding: '10px' }}>
+                <p style={{ margin: '4px 0' }}><strong>Conta:</strong> {contaSelecionadaFiltro.nome}</p>
+                <p style={{ margin: '4px 0' }}><strong>Primeira transação importada:</strong> {formatarData(primeiraTransacaoBase.data)} · {primeiraTransacaoBase.descricao} · {formatarMoeda(primeiraTransacaoBase.valor)}</p>
+                <p style={{ margin: '4px 0' }}><strong>Data sugerida para saldo inicial:</strong> {formatarData(dataAnteriorISO(primeiraTransacaoBase.data))}</p>
+              </div>
+              <label style={{ display: 'grid', gap: '6px', fontSize: '14px' }}>
+                Data do saldo inicial
+                <input type="date" value={formSaldoInicial.dataSaldoInicial} onChange={(event) => setFormSaldoInicial({ ...formSaldoInicial, dataSaldoInicial: event.target.value })} style={{ padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }} />
+              </label>
+              <label style={{ display: 'grid', gap: '6px', fontSize: '14px' }}>
+                Saldo inicial
+                <input value={formSaldoInicial.saldoInicial} onChange={(event) => setFormSaldoInicial({ ...formSaldoInicial, saldoInicial: event.target.value })} placeholder="0,00" style={{ padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }} />
+              </label>
+              <label style={{ display: 'grid', gap: '6px', fontSize: '14px' }}>
+                Observação
+                <textarea value={formSaldoInicial.observacao} onChange={(event) => setFormSaldoInicial({ ...formSaldoInicial, observacao: event.target.value })} placeholder="Ex.: saldo real no extrato antes do início da base" rows={3} style={{ padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }} />
+              </label>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', flexWrap: 'wrap' }}>
+              <button onClick={() => setModalSaldoInicialAberto(false)} disabled={salvandoSaldoInicial} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', background: '#e5e7eb', cursor: 'pointer' }}>Cancelar</button>
+              <button onClick={salvarSaldoInicialConta} disabled={salvandoSaldoInicial} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', background: '#7c3aed', color: 'white', cursor: 'pointer' }}>{salvandoSaldoInicial ? 'Salvando...' : 'Salvar saldo inicial'}</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {categoriaModalAberta && (
         <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
