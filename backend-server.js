@@ -3160,7 +3160,32 @@ async function buscarTransacoesUsuario(usuarioId, filtros = {}) {
             COALESCE(cd.nome, CASE WHEN cat.categoria_pai_id IS NOT NULL THEN cat.nome ELSE NULL END) AS categoria_detalhada_nome,
             ca.id AS conciliacao_id,
             ca.provisao_id AS provisao_conciliada_id,
-            p.descricao AS provisao_conciliada_descricao
+            p.descricao AS provisao_conciliada_descricao,
+            CASE
+              WHEN conta.data_saldo_inicial IS NULL THEN NULL
+              ELSE conta.saldo_inicial + COALESCE((
+                SELECT SUM(CASE WHEN t2.tipo = 'CREDITO' THEN t2.valor ELSE -t2.valor END)
+                FROM transacoes t2
+                WHERE t2.conta_id = t.conta_id
+                  AND t2.deletado_em IS NULL
+                  AND t2.data >= conta.data_saldo_inicial
+                  AND (
+                    t2.data < t.data
+                    OR (
+                      t2.data = t.data
+                      AND (
+                        COALESCE(t2.criado_em, t2.atualizado_em, TIMESTAMP '1970-01-01') < COALESCE(t.criado_em, t.atualizado_em, TIMESTAMP '1970-01-01')
+                        OR (
+                          COALESCE(t2.criado_em, t2.atualizado_em, TIMESTAMP '1970-01-01') = COALESCE(t.criado_em, t.atualizado_em, TIMESTAMP '1970-01-01')
+                          AND t2.id::text <= t.id::text
+                        )
+                      )
+                    )
+                  )
+              ), 0)
+            END AS saldo_acumulado,
+            conta.saldo_inicial AS conta_saldo_inicial,
+            conta.data_saldo_inicial AS conta_data_saldo_inicial
      FROM transacoes t
      JOIN contas conta ON conta.id = t.conta_id
      LEFT JOIN categorias cat ON cat.id = t.categoria_id

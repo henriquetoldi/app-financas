@@ -423,7 +423,7 @@ function criarCelulaXlsx(valor, linha, coluna, estilo = 0) {
 
 function criarXlsxTransacoes(linhas) {
   const cabecalhos = [
-    'Transacao_ID', 'ID', 'Data', 'Conta', 'Descrição', 'Valor', 'Tipo', 'Categoria Macro',
+    'Transacao_ID', 'ID', 'Data', 'Conta', 'Descrição', 'Valor', 'Saldo Acumulado', 'Tipo', 'Categoria Macro',
     'Categoria Detalhada', 'Categoria', 'É Transferência Interna', 'Grupo Transferência', 'Origem Categoria'
   ];
   const todasLinhas = [cabecalhos, ...linhas];
@@ -2451,7 +2451,7 @@ function TelaProvisoes({ contas = [], token, onVoltar }) {
                     </tr>
                   );
                 })}
-                {provisoes.length === 0 && <tr><td colSpan="10" style={{ padding: '24px', textAlign: 'center', color: '#6b7280' }}>Nenhuma provisão encontrada.</td></tr>}
+                {provisoes.length === 0 && <tr><td colSpan="11" style={{ padding: '24px', textAlign: 'center', color: '#6b7280' }}>Nenhuma provisão encontrada.</td></tr>}
               </tbody>
             </table>
           )}
@@ -2546,6 +2546,10 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
   const [modalSaldoInicialAberto, setModalSaldoInicialAberto] = useState(false);
   const [formSaldoInicial, setFormSaldoInicial] = useState({ dataSaldoInicial: '', saldoInicial: '', observacao: '' });
   const [salvandoSaldoInicial, setSalvandoSaldoInicial] = useState(false);
+  const [modalConferenciaRapidaAberto, setModalConferenciaRapidaAberto] = useState(false);
+  const [saldoRealConferencia, setSaldoRealConferencia] = useState('');
+  const [resultadoConferenciaRapida, setResultadoConferenciaRapida] = useState(null);
+  const [salvandoConferenciaRapida, setSalvandoConferenciaRapida] = useState(false);
   const [destacarInicioBase, setDestacarInicioBase] = useState(false);
   const tabelaRef = useRef(null);
 
@@ -2581,10 +2585,74 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
     }
   };
 
+  const compararCronologicoSaldo = (a, b) => {
+    const dataA = normalizarDataFiltro(a.data) || '';
+    const dataB = normalizarDataFiltro(b.data) || '';
+    if (dataA !== dataB) return dataA.localeCompare(dataB);
+    const criadoA = String(a.criado_em || a.atualizado_em || '');
+    const criadoB = String(b.criado_em || b.atualizado_em || '');
+    if (criadoA !== criadoB) return criadoA.localeCompare(criadoB);
+    return String(a.id || '').localeCompare(String(b.id || ''));
+  };
+
+  const calcularSaldoAntesDaData = (contaId, dataCorte) => {
+    const conta = contas.find((item) => item.id === contaId);
+    const dataSaldoInicial = normalizarDataFiltro(conta?.data_saldo_inicial || conta?.dataSaldoInicial);
+    if (!conta || !dataSaldoInicial || !dataCorte) return null;
+    return transacoes
+      .filter((tx) => tx.conta_id === contaId)
+      .sort(compararCronologicoSaldo)
+      .reduce((saldo, tx) => {
+        const dataTx = normalizarDataFiltro(tx.data);
+        if (!dataTx || dataTx < dataSaldoInicial || dataTx >= dataCorte) return saldo;
+        return saldo + (tx.tipo === 'CREDITO' ? Number(tx.valor || 0) : -Number(tx.valor || 0));
+      }, Number(conta.saldo_inicial || 0));
+  };
+
+  const transacoesComSaldo = useMemo(() => {
+    const contasPorId = new Map(contas.map((conta) => [conta.id, conta]));
+    const transacoesPorConta = transacoes.reduce((mapa, tx) => {
+      if (!mapa.has(tx.conta_id)) mapa.set(tx.conta_id, []);
+      mapa.get(tx.conta_id).push(tx);
+      return mapa;
+    }, new Map());
+    const saldosPorTransacao = new Map();
+
+    transacoesPorConta.forEach((items, contaId) => {
+      const conta = contasPorId.get(contaId);
+      const dataSaldoInicial = normalizarDataFiltro(conta?.data_saldo_inicial || conta?.dataSaldoInicial);
+      if (!conta || !dataSaldoInicial) {
+        items.forEach((tx) => saldosPorTransacao.set(tx.id, { configurado: false, saldo: null }));
+        return;
+      }
+
+      let saldo = Number(conta.saldo_inicial || 0);
+      [...items].sort(compararCronologicoSaldo).forEach((tx) => {
+        const dataTx = normalizarDataFiltro(tx.data);
+        if (!dataTx || dataTx < dataSaldoInicial) {
+          saldosPorTransacao.set(tx.id, { configurado: true, saldo: null });
+          return;
+        }
+        saldo += tx.tipo === 'CREDITO' ? Number(tx.valor || 0) : -Number(tx.valor || 0);
+        saldosPorTransacao.set(tx.id, { configurado: true, saldo: Math.round((saldo + Number.EPSILON) * 100) / 100 });
+      });
+    });
+
+    return transacoes.map((tx) => {
+      const saldo = saldosPorTransacao.get(tx.id) || { configurado: false, saldo: null };
+      const saldoBackend = Number(tx.saldo_acumulado);
+      return {
+        ...tx,
+        saldo_acumulado_calculado: Number.isFinite(saldoBackend) ? saldoBackend : saldo.saldo,
+        saldo_acumulado_configurado: saldo.configurado || Number.isFinite(saldoBackend),
+      };
+    });
+  }, [transacoes, contas]);
+
   const transacoesFiltradas = useMemo(() => {
     const buscaNormalizada = normalizarDescricaoCategorizacao(filtros.busca);
 
-    return transacoes.filter((tx) => {
+    return transacoesComSaldo.filter((tx) => {
       const descricao = normalizarDescricaoCategorizacao(tx.descricao);
       const dataTx = normalizarDataFiltro(tx.data);
       const correspondeBusca = !buscaNormalizada || descricao.includes(buscaNormalizada);
@@ -2605,7 +2673,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
 
       return correspondeBusca && correspondeConta && correspondeMacro && correspondeDetalhada && correspondeStatus && correspondeTipo && correspondeDataInicial && correspondeDataFinal;
     });
-  }, [transacoes, filtros, dataInicial, dataFinal]);
+  }, [transacoesComSaldo, filtros, dataInicial, dataFinal]);
 
   const idsFiltrados = transacoesFiltradas.map((tx) => tx.id);
   const todasFiltradasSelecionadas = idsFiltrados.length > 0 && idsFiltrados.every((id) => selecionadas.includes(id));
@@ -2681,22 +2749,38 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
       return mapa;
     }, new Map()).values()).map((item) => {
       const ordenadas = [...item.transacoes].sort((a, b) => compararTransacoes(a, b, 'data', 'asc'));
+      const conta = contas.find((contaItem) => contaItem.id === item.contaId);
+      const dataReferenciaAntes = dataInicial || normalizarDataFiltro(ordenadas[0]?.data);
+      const saldoAntesPeriodo = calcularSaldoAntesDaData(item.contaId, dataReferenciaAntes);
+      const ultimaComSaldo = [...ordenadas].reverse().find((tx) => Number.isFinite(tx.saldo_acumulado_calculado));
       return {
         ...item,
+        conta,
         primeira: ordenadas[0],
         ultima: ordenadas[ordenadas.length - 1],
         quantidade: item.transacoes.length,
+        saldoInicial: conta?.saldo_inicial ?? null,
+        dataSaldoInicial: conta?.data_saldo_inicial || conta?.dataSaldoInicial || null,
+        saldoAntesPeriodo,
+        saldoFinalCalculado: ultimaComSaldo?.saldo_acumulado_calculado ?? saldoAntesPeriodo,
       };
     }).sort((a, b) => String(a.contaNome).localeCompare(String(b.contaNome), 'pt-BR'));
+    const contaResumo = contaSelecionadaFiltro ? porConta.find((item) => item.contaId === contaSelecionadaFiltro.id) : null;
+    const contasComSaldo = porConta.filter((item) => item.dataSaldoInicial);
 
     return {
       primeira: porDataAsc[0],
       ultima: porDataAsc[porDataAsc.length - 1],
       quantidade: transacoesFiltradas.length,
       saldoCalculadoPeriodo: totalCreditos - totalDebitos,
+      saldoInicial: contaResumo?.saldoInicial ?? null,
+      dataSaldoInicial: contaResumo?.dataSaldoInicial ?? null,
+      saldoAntesPeriodo: contaResumo?.saldoAntesPeriodo ?? null,
+      saldoFinalCalculado: contaResumo?.saldoFinalCalculado ?? null,
+      saldoFinalConsolidado: contasComSaldo.reduce((total, item) => total + Number(item.saldoFinalCalculado || 0), 0),
       porConta,
     };
-  }, [transacoesFiltradas]);
+  }, [transacoesFiltradas, contas, dataInicial, contaSelecionadaFiltro]);
 
   const primeiraTransacaoBase = resumoBase?.primeira || null;
 
@@ -2720,6 +2804,10 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
 
   const rotuloOrdenacao = (label, field) => `${label}${sortField === field ? (sortDirection === 'asc' ? ' ▲' : ' ▼') : ''}`;
   const estiloCabecalhoOrdenavel = (align = 'left') => ({ padding: '12px', textAlign: align, cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap' });
+  const textoSaldoAcumulado = (tx) => {
+    if (!tx.saldo_acumulado_configurado) return 'Não configurado';
+    return Number.isFinite(tx.saldo_acumulado_calculado) ? formatarMoeda(tx.saldo_acumulado_calculado) : '-';
+  };
 
   const verInicioBase = () => {
     setSortField('data');
@@ -2760,6 +2848,27 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
       alert(error.response?.data?.detalhes || error.response?.data?.erro || error.message);
     } finally {
       setSalvandoSaldoInicial(false);
+    }
+  };
+
+  const salvarConferenciaRapida = async () => {
+    if (!contaSelecionadaFiltro || !resumoBase) return;
+    const saldoRealParse = parseValorMonetario(saldoRealConferencia);
+    if (!Number.isFinite(saldoRealParse.valor)) return alert('Informe um saldo real válido.');
+    setSalvandoConferenciaRapida(true);
+    try {
+      const response = await axios.post(`${API_URL}/conferencia-saldos`, {
+        contaId: contaSelecionadaFiltro.id,
+        dataReferencia: normalizarDataFiltro(dataFinal || resumoBase.ultima.data),
+        saldoReal: saldoRealParse.valor,
+        observacao: 'Conferência rápida pela tela de transações consolidadas',
+      }, { headers: authHeaders });
+      setResultadoConferenciaRapida(response.data);
+      await onAtualizarContas?.();
+    } catch (error) {
+      alert(error.response?.data?.detalhes || error.response?.data?.erro || error.message);
+    } finally {
+      setSalvandoConferenciaRapida(false);
     }
   };
 
@@ -2862,6 +2971,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
     tx.conta_nome || '',
     tx.descricao || '',
     Number(tx.valor || 0),
+    Number.isFinite(tx.saldo_acumulado_calculado) ? Number(tx.saldo_acumulado_calculado) : '',
     tx.tipo === 'CREDITO' ? 'Crédito' : 'Débito',
     nomeCategoriaMacro(tx) === 'Sem categoria' ? '' : nomeCategoriaMacro(tx),
     nomeCategoriaDetalhada(tx) === '-' ? '' : nomeCategoriaDetalhada(tx),
@@ -3083,10 +3193,18 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
             <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap', alignItems: 'flex-start' }}>
               <div>
                 <h3 style={{ margin: '0 0 8px' }}>{contaSelecionadaFiltro ? `Conta: ${contaSelecionadaFiltro.nome}` : 'Todas as contas'}</h3>
+                {contaSelecionadaFiltro && resumoBase.dataSaldoInicial && <p style={{ margin: '4px 0', color: '#475569' }}>Saldo inicial: <strong>{formatarMoeda(resumoBase.saldoInicial)}</strong> em <strong>{formatarData(resumoBase.dataSaldoInicial)}</strong></p>}
+                {contaSelecionadaFiltro && !resumoBase.dataSaldoInicial && <p style={{ margin: '4px 0', color: '#92400e' }}>Saldo inicial: <strong>não configurado</strong></p>}
                 <p style={{ margin: '4px 0', color: '#475569' }}>Primeira transação importada: <strong>{formatarData(resumoBase.primeira.data)}</strong></p>
                 <p style={{ margin: '4px 0', color: '#475569' }}>Última transação importada: <strong>{formatarData(resumoBase.ultima.data)}</strong></p>
                 <p style={{ margin: '4px 0', color: '#475569' }}>Quantidade de transações: <strong>{resumoBase.quantidade}</strong></p>
                 <p style={{ margin: '4px 0', color: '#475569' }}>Saldo calculado no período exibido: <strong>{formatarMoeda(resumoBase.saldoCalculadoPeriodo)}</strong></p>
+                {contaSelecionadaFiltro && Number.isFinite(resumoBase.saldoAntesPeriodo) && <p style={{ margin: '4px 0', color: '#475569' }}>Saldo antes do período: <strong>{formatarMoeda(resumoBase.saldoAntesPeriodo)}</strong></p>}
+                {contaSelecionadaFiltro && Number.isFinite(resumoBase.saldoFinalCalculado) && <p style={{ margin: '4px 0', color: '#475569' }}>Saldo final calculado: <strong>{formatarMoeda(resumoBase.saldoFinalCalculado)}</strong></p>}
+                {!contaSelecionadaFiltro && <p style={{ margin: '4px 0', color: '#475569' }}>Saldo final calculado (contas configuradas): <strong>{formatarMoeda(resumoBase.saldoFinalConsolidado)}</strong></p>}
+                {contaSelecionadaFiltro && Number.isFinite(resumoBase.saldoFinalCalculado) && (
+                  <button onClick={() => { setResultadoConferenciaRapida(null); setSaldoRealConferencia(''); setModalConferenciaRapidaAberto(true); }} style={{ marginTop: '8px', background: '#1d4ed8', color: 'white', border: 'none', borderRadius: '8px', padding: '8px 10px', cursor: 'pointer' }}>Conferir saldo final</button>
+                )}
               </div>
               {contaSelecionadaFiltro && !contaSelecionadaFiltro.data_saldo_inicial && (
                 <div style={{ background: '#fffbeb', color: '#92400e', border: '1px solid #fde68a', borderRadius: '10px', padding: '12px', maxWidth: '420px' }}>
@@ -3099,8 +3217,8 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
             {!contaSelecionadaFiltro && resumoBase.porConta.length > 1 && (
               <div style={{ marginTop: '14px', overflowX: 'auto' }}>
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
-                  <thead><tr style={{ background: '#f8fafc' }}><th style={{ textAlign: 'left', padding: '8px' }}>Conta</th><th style={{ textAlign: 'left', padding: '8px' }}>Primeira</th><th style={{ textAlign: 'left', padding: '8px' }}>Última</th><th style={{ textAlign: 'right', padding: '8px' }}>Transações</th></tr></thead>
-                  <tbody>{resumoBase.porConta.map((item) => <tr key={item.contaId || item.contaNome} style={{ borderTop: '1px solid #e5e7eb' }}><td style={{ padding: '8px' }}>{item.contaNome}</td><td style={{ padding: '8px' }}>{formatarData(item.primeira.data)}</td><td style={{ padding: '8px' }}>{formatarData(item.ultima.data)}</td><td style={{ padding: '8px', textAlign: 'right' }}>{item.quantidade}</td></tr>)}</tbody>
+                  <thead><tr style={{ background: '#f8fafc' }}><th style={{ textAlign: 'left', padding: '8px' }}>Conta</th><th style={{ textAlign: 'left', padding: '8px' }}>Primeira</th><th style={{ textAlign: 'left', padding: '8px' }}>Última</th><th style={{ textAlign: 'right', padding: '8px' }}>Transações</th><th style={{ textAlign: 'right', padding: '8px' }}>Saldo final</th></tr></thead>
+                  <tbody>{resumoBase.porConta.map((item) => <tr key={item.contaId || item.contaNome} style={{ borderTop: '1px solid #e5e7eb' }}><td style={{ padding: '8px' }}>{item.contaNome}</td><td style={{ padding: '8px' }}>{formatarData(item.primeira.data)}</td><td style={{ padding: '8px' }}>{formatarData(item.ultima.data)}</td><td style={{ padding: '8px', textAlign: 'right' }}>{item.quantidade}</td><td style={{ padding: '8px', textAlign: 'right' }}>{Number.isFinite(item.saldoFinalCalculado) ? formatarMoeda(item.saldoFinalCalculado) : 'Não configurado'}</td></tr>)}</tbody>
                 </table>
               </div>
             )}
@@ -3115,7 +3233,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
           </div>
         ) : (
           <div ref={tabelaRef} style={{ background: 'white', borderRadius: '12px', overflowX: 'auto', boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }}>
-            <table style={{ width: '100%', minWidth: '1120px', borderCollapse: 'collapse' }}>
+            <table style={{ width: '100%', minWidth: '1240px', borderCollapse: 'collapse' }}>
               <thead>
                 <tr style={{ background: '#f9fafb' }}>
                   <th style={{ padding: '12px', textAlign: 'center' }}>
@@ -3125,6 +3243,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
                   <th onClick={() => handleSort('conta')} style={estiloCabecalhoOrdenavel('left')}>{rotuloOrdenacao('Conta', 'conta')}</th>
                   <th onClick={() => handleSort('descricao')} style={estiloCabecalhoOrdenavel('left')}>{rotuloOrdenacao('Descrição', 'descricao')}</th>
                   <th onClick={() => handleSort('valor')} style={estiloCabecalhoOrdenavel('right')}>{rotuloOrdenacao('Valor', 'valor')}</th>
+                  <th style={{ padding: '12px', textAlign: 'right', whiteSpace: 'nowrap' }}>Saldo acumulado</th>
                   <th onClick={() => handleSort('tipo')} style={estiloCabecalhoOrdenavel('left')}>{rotuloOrdenacao('Tipo', 'tipo')}</th>
                   <th onClick={() => handleSort('categoriaMacro')} style={estiloCabecalhoOrdenavel('left')}>{rotuloOrdenacao('Categoria macro', 'categoriaMacro')}</th>
                   <th onClick={() => handleSort('categoriaDetalhada')} style={estiloCabecalhoOrdenavel('left')}>{rotuloOrdenacao('Categoria detalhada', 'categoriaDetalhada')}</th>
@@ -3143,6 +3262,9 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
                     <td style={{ padding: '12px' }}>{tx.descricao}</td>
                     <td style={{ padding: '12px', textAlign: 'right', color: tx.tipo === 'CREDITO' ? '#10b981' : '#ef4444', fontWeight: 'bold' }}>
                       {tx.tipo === 'CREDITO' ? '+' : '-'}{formatarMoeda(tx.valor)}
+                    </td>
+                    <td style={{ padding: '12px', textAlign: 'right', color: Number(tx.saldo_acumulado_calculado || 0) >= 0 ? '#0f766e' : '#dc2626', fontWeight: Number.isFinite(tx.saldo_acumulado_calculado) ? 'bold' : 'normal', fontSize: tx.saldo_acumulado_configurado ? '14px' : '12px' }}>
+                      {textoSaldoAcumulado(tx)}
                     </td>
                     <td style={{ padding: '12px' }}>{tx.tipo === 'CREDITO' ? 'Crédito' : 'Débito'}</td>
                     <td style={{ padding: '12px' }}>
@@ -3184,13 +3306,42 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
                   </tr>
                 ))}
                 {transacoesOrdenadas.length === 0 && (
-                  <tr><td colSpan="10" style={{ padding: '24px', textAlign: 'center', color: '#6b7280' }}>Nenhuma transação corresponde aos filtros.</td></tr>
+                  <tr><td colSpan="11" style={{ padding: '24px', textAlign: 'center', color: '#6b7280' }}>Nenhuma transação corresponde aos filtros.</td></tr>
                 )}
               </tbody>
             </table>
           </div>
         )}
       </div>
+
+      {modalConferenciaRapidaAberto && contaSelecionadaFiltro && resumoBase && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <div style={{ background: 'white', borderRadius: '12px', padding: '24px', maxWidth: '520px', width: '92%' }}>
+            <h3 style={{ marginTop: 0 }}>Conferir saldo final</h3>
+            <p style={{ color: '#475569' }}>Informe o saldo real do banco em {formatarData(dataFinal || resumoBase.ultima.data)} para comparar com o saldo calculado da conta.</p>
+            <div style={{ background: '#f8fafc', border: '1px solid #e5e7eb', borderRadius: '8px', padding: '10px', marginBottom: '12px' }}>
+              <p style={{ margin: '4px 0' }}><strong>Conta:</strong> {contaSelecionadaFiltro.nome}</p>
+              <p style={{ margin: '4px 0' }}><strong>Saldo calculado:</strong> {formatarMoeda(resumoBase.saldoFinalCalculado)}</p>
+            </div>
+            <label style={{ display: 'grid', gap: '6px', fontSize: '14px', marginBottom: '12px' }}>
+              Saldo real no banco
+              <input value={saldoRealConferencia} onChange={(event) => { setSaldoRealConferencia(event.target.value); setResultadoConferenciaRapida(null); }} placeholder="759,76" style={{ padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }} />
+            </label>
+            {resultadoConferenciaRapida && (
+              <div style={{ background: resultadoConferenciaRapida.status === 'CONCILIADO' ? '#ecfdf5' : '#fef2f2', color: resultadoConferenciaRapida.status === 'CONCILIADO' ? '#166534' : '#991b1b', borderRadius: '10px', padding: '12px', marginBottom: '12px' }}>
+                <p style={{ margin: '4px 0' }}><strong>Saldo real:</strong> {formatarMoeda(resultadoConferenciaRapida.saldo_real)}</p>
+                <p style={{ margin: '4px 0' }}><strong>Saldo calculado:</strong> {formatarMoeda(resultadoConferenciaRapida.saldo_calculado)}</p>
+                <p style={{ margin: '4px 0' }}><strong>Diferença:</strong> {formatarMoeda(resultadoConferenciaRapida.diferenca)}</p>
+                <p style={{ margin: '4px 0' }}><strong>Status:</strong> {resultadoConferenciaRapida.status === 'CONCILIADO' ? 'Conciliado' : 'Divergente'}</p>
+              </div>
+            )}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', flexWrap: 'wrap' }}>
+              <button onClick={() => setModalConferenciaRapidaAberto(false)} disabled={salvandoConferenciaRapida} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', background: '#e5e7eb', cursor: 'pointer' }}>Fechar</button>
+              <button onClick={salvarConferenciaRapida} disabled={salvandoConferenciaRapida} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', background: '#1d4ed8', color: 'white', cursor: 'pointer' }}>{salvandoConferenciaRapida ? 'Conferindo...' : 'Conferir'}</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {modalSaldoInicialAberto && contaSelecionadaFiltro && primeiraTransacaoBase && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
