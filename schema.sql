@@ -55,6 +55,7 @@ CREATE TABLE contas (
   -- Status
   ativo BOOLEAN DEFAULT true,
   saldo_inicial DECIMAL(12, 2) DEFAULT 0,
+  data_saldo_inicial DATE,
   saldo_atual DECIMAL(12, 2),
   
   criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -115,6 +116,28 @@ CREATE INDEX idx_transacoes_tipo ON transacoes(tipo);
 CREATE INDEX idx_transacoes_hash ON transacoes(hash_transacao);
 CREATE INDEX idx_transacoes_importacao ON transacoes(importacao_id);
 CREATE INDEX idx_transacoes_conta_data ON transacoes(conta_id, data);
+
+-- ============================================================================
+-- 3.1. TABELA DE CONFERÊNCIAS DE SALDO
+-- ============================================================================
+
+CREATE TABLE conferencias_saldo (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  usuario_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+  conta_id UUID NOT NULL REFERENCES contas(id) ON DELETE CASCADE,
+  data_referencia DATE NOT NULL,
+  saldo_real DECIMAL(12, 2) NOT NULL,
+  saldo_calculado DECIMAL(12, 2) NOT NULL,
+  diferenca DECIMAL(12, 2) NOT NULL,
+  status VARCHAR(20) NOT NULL DEFAULT 'PENDENTE' CHECK (status IN ('CONCILIADO', 'DIVERGENTE', 'PENDENTE', 'EM_ANALISE')),
+  observacao TEXT,
+  criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_conferencias_saldo_usuario ON conferencias_saldo(usuario_id);
+CREATE INDEX idx_conferencias_saldo_conta_data ON conferencias_saldo(conta_id, data_referencia DESC);
+CREATE INDEX idx_conferencias_saldo_status ON conferencias_saldo(status);
 
 -- ============================================================================
 -- 4. TABELAS DE CATEGORIAS
@@ -511,3 +534,50 @@ GROUP BY c.id, c.usuario_id, c.nome, c.banco, c.tipo;
 -- ============================================================================
 -- FIM DO SCHEMA
 -- ============================================================================
+
+-- ============================================================================
+-- PROVISÕES E CONCILIAÇÕES
+-- ============================================================================
+
+CREATE TABLE provisoes (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  usuario_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+  descricao TEXT NOT NULL,
+  valor_previsto DECIMAL(12, 2) NOT NULL CHECK (valor_previsto > 0),
+  tipo VARCHAR(20) NOT NULL CHECK (tipo IN ('CREDITO', 'DEBITO')),
+  data_prevista DATE NOT NULL,
+  data_vencimento DATE,
+  conta_id UUID REFERENCES contas(id) ON DELETE SET NULL,
+  categoria_macro_id UUID REFERENCES categorias(id) ON DELETE SET NULL,
+  categoria_detalhada_id UUID REFERENCES categorias(id) ON DELETE SET NULL,
+  status VARCHAR(20) DEFAULT 'PENDENTE' CHECK (status IN ('PENDENTE', 'CONCILIADA', 'ATRASADA', 'CANCELADA', 'IGNORADA')),
+  observacao TEXT,
+  recorrente BOOLEAN DEFAULT false,
+  periodicidade VARCHAR(20),
+  criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_provisoes_usuario_status ON provisoes(usuario_id, status);
+CREATE INDEX idx_provisoes_datas ON provisoes(data_prevista, data_vencimento);
+CREATE INDEX idx_provisoes_conta ON provisoes(conta_id);
+
+CREATE TABLE conciliacoes (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  usuario_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+  provisao_id UUID NOT NULL REFERENCES provisoes(id) ON DELETE CASCADE,
+  transacao_id UUID NOT NULL REFERENCES transacoes(id) ON DELETE CASCADE,
+  status VARCHAR(20) DEFAULT 'SUGERIDA' CHECK (status IN ('SUGERIDA', 'CONFIRMADA', 'IGNORADA', 'DESFEITA')),
+  confianca VARCHAR(20) CHECK (confianca IN ('ALTA', 'MEDIA', 'BAIXA')),
+  score DECIMAL(5, 2),
+  motivos JSONB DEFAULT '[]'::jsonb,
+  criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  confirmado_em TIMESTAMP,
+  ignorado_em TIMESTAMP
+);
+
+CREATE INDEX idx_conciliacoes_usuario_status ON conciliacoes(usuario_id, status);
+CREATE INDEX idx_conciliacoes_provisao ON conciliacoes(provisao_id);
+CREATE INDEX idx_conciliacoes_transacao ON conciliacoes(transacao_id);
+CREATE UNIQUE INDEX idx_conciliacoes_provisao_ativa ON conciliacoes(provisao_id) WHERE status = 'CONFIRMADA';
+CREATE UNIQUE INDEX idx_conciliacoes_transacao_ativa ON conciliacoes(transacao_id) WHERE status = 'CONFIRMADA';

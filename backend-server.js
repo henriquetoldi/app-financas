@@ -113,6 +113,12 @@ async function inicializarBanco() {
     )
   `);
 
+  await pool.query(`
+    ALTER TABLE contas
+      ADD COLUMN IF NOT EXISTS saldo_inicial DECIMAL(12, 2) DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS data_saldo_inicial DATE
+  `);
+
   await pool.query('CREATE INDEX IF NOT EXISTS idx_contas_usuario ON contas(usuario_id)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_contas_banco_tipo ON contas(banco, tipo)');
 
@@ -343,6 +349,73 @@ async function inicializarBanco() {
     ON regras_categorizacao(usuario_id, categoria_id, termo_normalizado, tipo_match)
   `);
 
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS provisoes (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      usuario_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+      descricao TEXT NOT NULL,
+      valor_previsto DECIMAL(12, 2) NOT NULL,
+      tipo VARCHAR(20) NOT NULL,
+      data_prevista DATE NOT NULL,
+      data_vencimento DATE,
+      conta_id UUID REFERENCES contas(id) ON DELETE SET NULL,
+      categoria_macro_id UUID REFERENCES categorias(id) ON DELETE SET NULL,
+      categoria_detalhada_id UUID REFERENCES categorias(id) ON DELETE SET NULL,
+      status VARCHAR(20) DEFAULT 'PENDENTE',
+      observacao TEXT,
+      recorrente BOOLEAN DEFAULT false,
+      periodicidade VARCHAR(20),
+      criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS conciliacoes (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      usuario_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+      provisao_id UUID NOT NULL REFERENCES provisoes(id) ON DELETE CASCADE,
+      transacao_id UUID NOT NULL REFERENCES transacoes(id) ON DELETE CASCADE,
+      status VARCHAR(20) DEFAULT 'SUGERIDA',
+      confianca VARCHAR(20),
+      score DECIMAL(5, 2),
+      motivos JSONB DEFAULT '[]'::jsonb,
+      criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      confirmado_em TIMESTAMP,
+      ignorado_em TIMESTAMP
+    )
+  `);
+
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_provisoes_usuario_status ON provisoes(usuario_id, status)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_provisoes_datas ON provisoes(data_prevista, data_vencimento)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_provisoes_conta ON provisoes(conta_id)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_conciliacoes_usuario_status ON conciliacoes(usuario_id, status)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_conciliacoes_provisao ON conciliacoes(provisao_id)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_conciliacoes_transacao ON conciliacoes(transacao_id)');
+  await pool.query("CREATE UNIQUE INDEX IF NOT EXISTS idx_conciliacoes_provisao_ativa ON conciliacoes(provisao_id) WHERE status = 'CONFIRMADA'");
+  await pool.query("CREATE UNIQUE INDEX IF NOT EXISTS idx_conciliacoes_transacao_ativa ON conciliacoes(transacao_id) WHERE status = 'CONFIRMADA'");
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS conferencias_saldo (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      usuario_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+      conta_id UUID NOT NULL REFERENCES contas(id) ON DELETE CASCADE,
+      data_referencia DATE NOT NULL,
+      saldo_real DECIMAL(12, 2) NOT NULL,
+      saldo_calculado DECIMAL(12, 2) NOT NULL,
+      diferenca DECIMAL(12, 2) NOT NULL,
+      status VARCHAR(20) NOT NULL DEFAULT 'PENDENTE',
+      observacao TEXT,
+      criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT chk_conferencias_saldo_status CHECK (status IN ('CONCILIADO', 'DIVERGENTE', 'PENDENTE', 'EM_ANALISE'))
+    )
+  `);
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_conferencias_saldo_usuario ON conferencias_saldo(usuario_id)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_conferencias_saldo_conta_data ON conferencias_saldo(conta_id, data_referencia DESC)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_conferencias_saldo_status ON conferencias_saldo(status)');
+
   await pool.query(`
     DO $$
     BEGIN
@@ -538,32 +611,341 @@ function calcularSimilaridadeCategoria(a, b) {
   return Number(Math.max(similaridadeLevenshtein, includes, similaridadePalavras).toFixed(2));
 }
 
+
+const STATUS_PROVISAO = ['PENDENTE', 'CONCILIADA', 'ATRASADA', 'CANCELADA', 'IGNORADA'];
+const TIPOS_PROVISAO = ['CREDITO', 'DEBITO'];
+const STATUS_CONCILIACAO = ['SUGERIDA', 'CONFIRMADA', 'IGNORADA', 'DESFEITA'];
+
+function normalizarTextoConciliacao(texto) {
+  return String(texto || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function similaridadeTextoConciliacao(a, b) {
+  const palavrasA = new Set(normalizarTextoConciliacao(a).split(' ').filter((p) => p.length >= 3));
+  const palavrasB = new Set(normalizarTextoConciliacao(b).split(' ').filter((p) => p.length >= 3));
+  if (palavrasA.size === 0 || palavrasB.size === 0) return 0;
+  const intersecao = [...palavrasA].filter((palavra) => palavrasB.has(palavra)).length;
+  const menor = Math.min(palavrasA.size, palavrasB.size) || 1;
+  return intersecao / menor;
+}
+
+function diasEntreConciliacao(dataA, dataB) {
+  const a = new Date(`${String(dataA).slice(0, 10)}T00:00:00Z`);
+  const b = new Date(`${String(dataB).slice(0, 10)}T00:00:00Z`);
+  if (Number.isNaN(a.getTime()) || Number.isNaN(b.getTime())) return 999;
+  return Math.abs(Math.round((a - b) / 86400000));
+}
+
+function montarProvisao(row = {}) {
+  return {
+    ...row,
+    valor_previsto: Number(row.valor_previsto || 0),
+    recorrente: Boolean(row.recorrente),
+    conciliacao_id: row.conciliacao_id || null,
+    transacao_conciliada_id: row.transacao_conciliada_id || null,
+  };
+}
+
+function montarTransacaoConciliacao(tx = {}) {
+  return {
+    ...tx,
+    valor: Number(tx.valor || 0),
+  };
+}
+
+function calcularSugestaoConciliacao(provisao, transacao) {
+  if (!provisao || !transacao) return null;
+  if (provisao.status && !['PENDENTE', 'ATRASADA'].includes(provisao.status)) return null;
+  if (String(provisao.tipo).toUpperCase() !== String(transacao.tipo).toUpperCase()) return null;
+
+  const valorProvisao = Math.abs(Number(provisao.valor_previsto || 0));
+  const valorTransacao = Math.abs(Number(transacao.valor || 0));
+  const diferencaValor = Math.abs(valorProvisao - valorTransacao);
+  if (diferencaValor > 0.05) return null;
+
+  const diasPrevista = diasEntreConciliacao(provisao.data_prevista, transacao.data);
+  const diasVencimento = provisao.data_vencimento ? diasEntreConciliacao(provisao.data_vencimento, transacao.data) : diasPrevista;
+  const dias = Math.min(diasPrevista, diasVencimento);
+  if (dias > 3) return null;
+
+  const motivos = ['Mesmo valor'];
+  let score = 0.45;
+  if (dias === 0) {
+    motivos.push('Mesma data');
+    score += 0.2;
+  } else {
+    motivos.push(`Data próxima (${dias} dia${dias > 1 ? 's' : ''})`);
+    score += dias <= 1 ? 0.16 : 0.1;
+  }
+
+  if (provisao.conta_id && transacao.conta_id === provisao.conta_id) {
+    motivos.push('Mesma conta');
+    score += 0.18;
+  } else if (provisao.conta_id) {
+    motivos.push('Conta diferente');
+    score -= 0.04;
+  }
+
+  const similaridadeDescricao = similaridadeTextoConciliacao(provisao.descricao, transacao.descricao);
+  if (similaridadeDescricao >= 0.6) {
+    motivos.push('Descrição semelhante');
+    score += 0.15;
+  } else if (similaridadeDescricao >= 0.25) {
+    motivos.push('Descrição parcialmente semelhante');
+    score += 0.08;
+  }
+
+  if (provisao.categoria_macro_id && provisao.categoria_macro_id === transacao.categoria_macro_id) {
+    motivos.push('Mesma categoria macro');
+    score += 0.05;
+  }
+  if (provisao.categoria_detalhada_id && provisao.categoria_detalhada_id === transacao.categoria_detalhada_id) {
+    motivos.push('Mesma categoria detalhada');
+    score += 0.04;
+  }
+
+  score = Math.max(0, Math.min(0.99, Number(score.toFixed(2))));
+  const confianca = score >= 0.85 ? 'ALTA' : score >= 0.65 ? 'MEDIA' : 'BAIXA';
+
+  return { confianca, score, motivos };
+}
+
+async function buscarProvisoesPendentesParaConciliacao(usuarioId, { dataInicial, dataFinal } = {}) {
+  const valores = [usuarioId];
+  const where = ["p.usuario_id = $1", "p.status IN ('PENDENTE', 'ATRASADA')"];
+  if (dataInicial) {
+    valores.push(dataInicial);
+    where.push(`COALESCE(p.data_vencimento, p.data_prevista) >= ($${valores.length}::date - INTERVAL '3 days')`);
+  }
+  if (dataFinal) {
+    valores.push(dataFinal);
+    where.push(`p.data_prevista <= ($${valores.length}::date + INTERVAL '3 days')`);
+  }
+
+  const result = await pool.query(
+    `SELECT p.*, c.nome AS conta_nome, cm.nome AS categoria_macro_nome, cd.nome AS categoria_detalhada_nome
+     FROM provisoes p
+     LEFT JOIN contas c ON c.id = p.conta_id
+     LEFT JOIN categorias cm ON cm.id = p.categoria_macro_id
+     LEFT JOIN categorias cd ON cd.id = p.categoria_detalhada_id
+     WHERE ${where.join(' AND ')}
+       AND NOT EXISTS (SELECT 1 FROM conciliacoes ca WHERE ca.provisao_id = p.id AND ca.status = 'CONFIRMADA')
+     ORDER BY p.data_prevista ASC`,
+    valores
+  );
+  return result.rows.map(montarProvisao);
+}
+
+function montarSugestoesConciliacao(provisoes, transacoes, ignoradas = []) {
+  const ignoradasSet = new Set(ignoradas.map((item) => `${item.provisao_id}|${item.transacao_id || item.transacao_temp_id}`));
+  const sugestoes = [];
+
+  for (const provisao of provisoes) {
+    for (const transacao of transacoes) {
+      const transacaoId = transacao.id || transacao.transacaoId || transacao.hash_transacao;
+      if (!transacaoId || ignoradasSet.has(`${provisao.id}|${transacaoId}`)) continue;
+      const analise = calcularSugestaoConciliacao(provisao, transacao);
+      if (!analise) continue;
+      sugestoes.push({
+        provisaoId: provisao.id,
+        transacaoId: transacao.id || transacao.transacaoId || null,
+        transacaoTempId: transacao.hash_transacao || transacao.id || transacao.transacaoId || null,
+        ...analise,
+        provisao,
+        transacao: montarTransacaoConciliacao(transacao),
+      });
+    }
+  }
+
+  return sugestoes.sort((a, b) => b.score - a.score).slice(0, 50);
+}
+
+async function validarEntidadesConciliacao(usuarioId, provisaoId, transacaoId) {
+  const provisaoResult = await pool.query(
+    `SELECT p.* FROM provisoes p WHERE p.id = $1 AND p.usuario_id = $2`,
+    [provisaoId, usuarioId]
+  );
+  const transacaoResult = await pool.query(
+    `SELECT t.* FROM transacoes t JOIN contas c ON c.id = t.conta_id WHERE t.id = $1 AND c.usuario_id = $2 AND t.deletado_em IS NULL`,
+    [transacaoId, usuarioId]
+  );
+  const provisao = provisaoResult.rows[0];
+  const transacao = transacaoResult.rows[0];
+  if (!provisao || !transacao) throw new Error('Provisão ou transação não encontrada para este usuário.');
+  if (provisao.status === 'CANCELADA') throw new Error('Não é possível conciliar provisão cancelada.');
+  if (provisao.status === 'CONCILIADA') throw new Error('Esta provisão já está conciliada.');
+
+  const jaConciliada = await pool.query(
+    `SELECT id, provisao_id, transacao_id FROM conciliacoes
+     WHERE status = 'CONFIRMADA' AND (provisao_id = $1 OR transacao_id = $2)`,
+    [provisaoId, transacaoId]
+  );
+  if (jaConciliada.rows.length > 0) throw new Error('Provisão ou transação já possui conciliação ativa.');
+  return { provisao, transacao };
+}
+
+async function confirmarConciliacaoUsuario(usuarioId, provisaoId, transacaoId, analiseManual = null) {
+  const { provisao, transacao } = await validarEntidadesConciliacao(usuarioId, provisaoId, transacaoId);
+  const analise = analiseManual || calcularSugestaoConciliacao(provisao, transacao) || { confianca: 'BAIXA', score: 0.5, motivos: ['Conciliação manual confirmada pelo usuário'] };
+  const result = await pool.query(
+    `INSERT INTO conciliacoes (usuario_id, provisao_id, transacao_id, status, confianca, score, motivos, confirmado_em)
+     VALUES ($1, $2, $3, 'CONFIRMADA', $4, $5, $6::jsonb, NOW())
+     ON CONFLICT DO NOTHING
+     RETURNING *`,
+    [usuarioId, provisaoId, transacaoId, analise.confianca, analise.score, JSON.stringify(analise.motivos || [])]
+  );
+  if (result.rows.length === 0) throw new Error('Provisão ou transação já possui conciliação ativa.');
+  await pool.query(`UPDATE provisoes SET status = 'CONCILIADA', atualizado_em = NOW() WHERE id = $1 AND usuario_id = $2`, [provisaoId, usuarioId]);
+  return result.rows[0];
+}
+
+const LIMITE_VALOR_TRANSACAO = 9999999999.99;
+
+function parseValorMonetario(valorOriginal) {
+  if (typeof valorOriginal === 'number') {
+    return {
+      valor: Number.isFinite(valorOriginal) ? valorOriginal : null,
+      erro: Number.isFinite(valorOriginal) ? null : 'A célula contém um número que o app não conseguiu interpretar.',
+      valorOriginal,
+      interpretadoComo: Number.isFinite(valorOriginal) ? valorOriginal : null,
+    };
+  }
+
+  const textoOriginal = String(valorOriginal ?? '').trim();
+  if (!textoOriginal) {
+    return { valor: null, erro: 'A célula de valor está vazia.', valorOriginal, interpretadoComo: null };
+  }
+
+  let texto = textoOriginal.replace(/ /g, ' ').replace(/R\$/gi, '').replace(/\s+/g, '').trim();
+  const negativoPorParenteses = /^\(.+\)$/.test(texto);
+  if (negativoPorParenteses) texto = texto.slice(1, -1);
+  const negativo = negativoPorParenteses || /^-/.test(texto);
+  texto = texto.replace(/^[+-]/, '');
+
+  if (!texto || !/^[0-9.,]+$/.test(texto)) {
+    return {
+      valor: null,
+      erro: 'A célula contém caracteres que não parecem formar um valor monetário.',
+      valorOriginal,
+      interpretadoComo: null,
+    };
+  }
+
+  const ultimaVirgula = texto.lastIndexOf(',');
+  const ultimoPonto = texto.lastIndexOf('.');
+  let decimal = null;
+
+  if (ultimaVirgula >= 0 && ultimoPonto >= 0) {
+    decimal = ultimaVirgula > ultimoPonto ? ',' : '.';
+  } else if (ultimaVirgula >= 0) {
+    const digitosDepois = texto.length - ultimaVirgula - 1;
+    const ocorrencias = (texto.match(/,/g) || []).length;
+    decimal = ocorrencias === 1 && digitosDepois > 0 && digitosDepois <= 2 ? ',' : null;
+  } else if (ultimoPonto >= 0) {
+    const digitosDepois = texto.length - ultimoPonto - 1;
+    const ocorrencias = (texto.match(/\./g) || []).length;
+    decimal = ocorrencias === 1 && digitosDepois > 0 && digitosDepois <= 2 ? '.' : null;
+  }
+
+  const normalizado = decimal === ','
+    ? texto.replace(/\./g, '').replace(',', '.')
+    : decimal === '.'
+      ? texto.replace(/,/g, '')
+      : texto.replace(/[.,]/g, '');
+  const numero = Number(normalizado);
+  const interpretadoComo = Number.isFinite(numero) ? (negativo ? -numero : numero) : null;
+
+  return {
+    valor: interpretadoComo,
+    erro: Number.isFinite(interpretadoComo) ? null : 'Não foi possível converter o conteúdo da célula em número.',
+    valorOriginal,
+    interpretadoComo,
+  };
+}
+
+function criarErroValidacaoImportacao(detalhes) {
+  const erro = new Error(detalhes.erro || 'Erro de validação na importação.');
+  erro.detalhesImportacao = detalhes;
+  return erro;
+}
+
+function formatarValorMoedaErro(valor) {
+  return Number.isFinite(valor) ? valor.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }) : '-';
+}
+
 function validarTransacoesImportacao(transacoes) {
   if (!Array.isArray(transacoes) || transacoes.length === 0) {
     throw new Error('Envie ao menos uma transação para importar.');
   }
 
   return transacoes.map((tx, index) => {
-    const linha = index + 2;
+    const linha = tx._linha || index + 2;
     const data = normalizarDataImportacao(tx.data);
     const descricao = String(tx.descricao || '').trim();
     const categoriaLegada = String(tx.categoria || '').trim();
     const categoriaMacro = String(tx.categoria_macro || tx.categoriaMacro || tx.categoriaMacroNome || categoriaLegada || '').trim() || 'Outros';
     const categoriaDetalhada = String(tx.categoria_detalhada || tx.categoriaDetalhada || tx.categoriaDetalhadaNome || '').trim();
-    const valor = Math.abs(Number(tx.valor));
+    const conta = String(tx.conta || tx.conta_nome || tx.contaNome || '').trim();
+    const valorParse = parseValorMonetario(tx.valor);
+    const valor = Math.abs(Number(valorParse.valor));
     const tipo = normalizarTipoTransacao(tx.tipo);
 
-    if (!data) throw new Error(`Linha ${linha}: data inválida.`);
-    if (!descricao) throw new Error(`Linha ${linha}: descrição obrigatória.`);
-    if (!Number.isFinite(valor) || valor <= 0) throw new Error(`Linha ${linha}: valor inválido.`);
-    if (valor >= 10000000000) {
-      throw new Error(`Linha ${linha}: valor ${valor.toLocaleString('pt-BR')} excede o limite suportado de 9.999.999.999,99.`);
+    if (!data) throw criarErroValidacaoImportacao({
+      linha,
+      coluna: 'Data',
+      valorOriginal: tx.data,
+      descricao,
+      erro: 'A data não foi reconhecida pelo app.',
+      sugestao: 'Use uma data válida, como 10/06/2026 ou 2026-06-10.',
+    });
+    if (!descricao) throw criarErroValidacaoImportacao({
+      linha,
+      coluna: 'Descrição',
+      valorOriginal: tx.descricao,
+      descricao,
+      erro: 'A descrição da transação está vazia.',
+      sugestao: 'Preencha a descrição para identificar a transação no extrato.',
+    });
+    if (!conta) throw criarErroValidacaoImportacao({
+      linha,
+      coluna: 'Conta',
+      valorOriginal: tx.conta || tx.conta_nome || tx.contaNome,
+      descricao,
+      erro: 'A coluna Conta está vazia nesta linha.',
+      sugestao: 'Informe a conta dessa transação na planilha.',
+    });
+    if (valorParse.erro || !Number.isFinite(valor) || valor <= 0) throw criarErroValidacaoImportacao({
+      linha,
+      coluna: 'Valor',
+      valorOriginal: valorParse.valorOriginal,
+      valorInterpretado: valorParse.interpretadoComo,
+      descricao,
+      erro: valorParse.erro || 'O valor precisa ser maior que zero após a interpretação.',
+      sugestao: 'Informe o valor em formato brasileiro (1.234,56), americano (1,234.56) ou como número do Excel (1234.56).',
+    });
+    if (valor > LIMITE_VALOR_TRANSACAO) {
+      throw criarErroValidacaoImportacao({
+        linha,
+        coluna: 'Valor',
+        valorOriginal: valorParse.valorOriginal,
+        valorInterpretado: valorParse.interpretadoComo,
+        descricao,
+        erro: `O valor interpretado (${formatarValorMoedaErro(valor)}) excede o limite permitido de ${formatarValorMoedaErro(LIMITE_VALOR_TRANSACAO)}.`,
+        sugestao: 'Confira se o separador de milhar e o separador decimal estão corretos na planilha.',
+      });
     }
 
     return {
+      _linha: linha,
       id: tx.id || tx.transacao_id || tx.transacaoId || null,
       transacao_id: tx.transacao_id || tx.transacaoId || tx.id || null,
-      conta: tx.conta || tx.conta_nome || tx.contaNome || null,
+      conta,
       data,
       descricao,
       categoria: categoriaLegada || categoriaMacro,
@@ -1006,9 +1388,15 @@ async function montarRespostaTransacoes(rows) {
   if (rows.length === 0) return [];
   const ids = rows.map((row) => row.id);
   const result = await pool.query(
-      `SELECT t.*, cat.nome as categoria_nome, cm.nome AS categoria_macro_nome, cd.nome AS categoria_detalhada_nome
+      `SELECT t.*,
+            COALESCE(t.categoria_macro_id, CASE WHEN cat.categoria_pai_id IS NULL THEN t.categoria_id ELSE cat.categoria_pai_id END) AS categoria_macro_id,
+            COALESCE(t.categoria_detalhada_id, CASE WHEN cat.categoria_pai_id IS NOT NULL THEN t.categoria_id ELSE NULL END) AS categoria_detalhada_id,
+            cat.nome as categoria_nome,
+            COALESCE(cm.nome, cat_macro.nome, CASE WHEN cat.categoria_pai_id IS NULL THEN cat.nome ELSE NULL END) AS categoria_macro_nome,
+            COALESCE(cd.nome, CASE WHEN cat.categoria_pai_id IS NOT NULL THEN cat.nome ELSE NULL END) AS categoria_detalhada_nome
      FROM transacoes t
      LEFT JOIN categorias cat ON t.categoria_id = cat.id
+     LEFT JOIN categorias cat_macro ON cat_macro.id = cat.categoria_pai_id
      LEFT JOIN categorias cm ON t.categoria_macro_id = cm.id
      LEFT JOIN categorias cd ON t.categoria_detalhada_id = cd.id
      WHERE t.id = ANY($1::uuid[])
@@ -1618,6 +2006,106 @@ async function resolverContaConfirmacao(usuarioId, preview) {
   return contaId;
 }
 
+function normalizarNomeConta(texto) {
+  return String(texto || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function similaridadeNomeConta(a, b) {
+  const na = normalizarNomeConta(a);
+  const nb = normalizarNomeConta(b);
+  if (!na || !nb) return 0;
+  if (na === nb) return 1;
+  const palavrasA = new Set(na.split(' ').filter(Boolean));
+  const palavrasB = new Set(nb.split(' ').filter(Boolean));
+  const intersecao = [...palavrasA].filter((p) => palavrasB.has(p)).length;
+  const uniao = new Set([...palavrasA, ...palavrasB]).size || 1;
+  return intersecao / uniao;
+}
+
+async function listarContasUsuario(usuarioId) {
+  const result = await pool.query(
+    'SELECT id, nome FROM contas WHERE usuario_id = $1 AND ativo = true ORDER BY nome',
+    [usuarioId]
+  );
+  return result.rows;
+}
+
+function montarResumoContasImportacao(transacoes, contasUsuario) {
+  const agrupadas = new Map();
+  transacoes.forEach((tx) => {
+    const nome = String(tx.conta || '').trim();
+    if (!agrupadas.has(nome)) agrupadas.set(nome, { nomePlanilha: nome, quantidade: 0 });
+    agrupadas.get(nome).quantidade += 1;
+  });
+
+  return [...agrupadas.values()].map((item) => {
+    const normalizado = normalizarNomeConta(item.nomePlanilha);
+    const exata = contasUsuario.find((conta) => normalizarNomeConta(conta.nome) === normalizado);
+    if (exata) {
+      return { ...item, contaEncontradaId: exata.id, contaEncontradaNome: exata.nome, status: 'CONFIRMADA', statusLabel: 'Confirmada', similaridade: 1 };
+    }
+
+    const possivel = contasUsuario
+      .map((conta) => ({ conta, similaridade: similaridadeNomeConta(item.nomePlanilha, conta.nome) }))
+      .sort((a, b) => b.similaridade - a.similaridade)[0];
+
+    if (possivel && possivel.similaridade >= 0.5) {
+      return {
+        ...item,
+        contaEncontradaId: possivel.conta.id,
+        contaEncontradaNome: possivel.conta.nome,
+        status: 'POSSIVEL_CORRESPONDENCIA',
+        statusLabel: 'Possível correspondência',
+        similaridade: possivel.similaridade,
+      };
+    }
+
+    return { ...item, contaEncontradaId: null, contaEncontradaNome: null, status: 'NAO_ENCONTRADA', statusLabel: 'Pendente', similaridade: 0 };
+  });
+}
+
+async function resolverMapeamentoContasConfirmacao(usuarioId, preview, mapeamentoContas = []) {
+  const pendentes = preview.contasImportacao || [];
+  const mapaEntrada = new Map(mapeamentoContas.map((item) => [String(item.nomePlanilha || '').trim(), item]));
+  const resolvidas = new Map();
+
+  for (const contaPreview of pendentes) {
+    const nomePlanilha = String(contaPreview.nomePlanilha || '').trim();
+    const decisao = mapaEntrada.get(nomePlanilha);
+    if (!decisao?.acao) throw new Error('Resolva todas as contas da planilha antes de concluir a importação.');
+
+    if (decisao.acao === 'USAR_EXISTENTE') {
+      if (!decisao.contaExistenteId) throw new Error(`Selecione a conta existente para "${nomePlanilha}".`);
+      const conta = await pool.query(
+        'SELECT id, nome FROM contas WHERE id = $1 AND usuario_id = $2 AND ativo = true',
+        [decisao.contaExistenteId, usuarioId]
+      );
+      if (!conta.rows[0]) throw new Error(`Conta existente inválida para "${nomePlanilha}".`);
+      resolvidas.set(nomePlanilha, { id: conta.rows[0].id, nome: conta.rows[0].nome });
+      continue;
+    }
+
+    if (decisao.acao === 'CRIAR_NOVA' || decisao.acao === 'CORRIGIR_NOME') {
+      const nomeCorrigido = String(decisao.nomeCorrigido || nomePlanilha).trim();
+      if (!nomeCorrigido) throw new Error(`Informe o nome da conta para "${nomePlanilha}".`);
+      let contaId = await buscarContaNormalizada(usuarioId, nomeCorrigido);
+      if (!contaId) contaId = await criarConta(usuarioId, nomeCorrigido);
+      resolvidas.set(nomePlanilha, { id: contaId, nome: nomeCorrigido });
+      continue;
+    }
+
+    throw new Error(`Ação de conta inválida para "${nomePlanilha}".`);
+  }
+
+  return resolvidas;
+}
+
 function limparPreviewsExpirados() {
   const agora = Date.now();
   for (const [tokenPreview, preview] of previewsImportacao.entries()) {
@@ -1695,13 +2183,13 @@ async function buscarTransacaoExistenteParaImportacao(usuarioId, tx, contaId, ha
 }
 
 async function montarPreviewImportacao(usuarioId, dados) {
-  const conta = await resolverContaImportacao(usuarioId, dados);
   const transacoesValidadas = validarTransacoesImportacao(dados.transacoes);
+  const contasUsuario = await listarContasUsuario(usuarioId);
+  const contasImportacao = montarResumoContasImportacao(transacoesValidadas, contasUsuario);
+  const contaPreviewPorNome = new Map(contasImportacao.map((conta) => [conta.nomePlanilha, conta]));
   const preview = {
     usuarioId,
-    contaId: conta.id,
-    contaNome: conta.nome,
-    contaHashKey: conta.hashKey || conta.id,
+    contasImportacao,
     nomeArquivo: dados.nome_arquivo || `importacao_${new Date().toISOString().slice(0, 10)}.xlsx`,
     arquivoBase64: dados.arquivo_base64,
     criadoEm: Date.now(),
@@ -1711,19 +2199,26 @@ async function montarPreviewImportacao(usuarioId, dados) {
     erros: [],
     categoriasPendentes: [],
     categoriasNovas: [],
+    sugestoesConciliacao: [],
+    transacoesValidadas,
   };
 
   for (const [index, tx] of transacoesValidadas.entries()) {
-    const linha = index + 2;
+    const linha = tx._linha || index + 2;
     try {
       const categorias = await resolverCategoriasPreview(usuarioId, tx, preview);
-      const hash = gerarHashTransacao(tx, conta.hashKey || conta.id);
-      const existente = conta.id ? await buscarTransacaoExistenteParaImportacao(usuarioId, tx, conta.id, hash) : null;
+      const contaPreview = contaPreviewPorNome.get(tx.conta) || { nomePlanilha: tx.conta };
+      const contaIdPreview = contaPreview.contaEncontradaId || null;
+      const contaHashKey = contaIdPreview || `planilha:${normalizarNomeConta(tx.conta)}`;
+      const hash = gerarHashTransacao(tx, contaHashKey);
+      const existente = contaIdPreview ? await buscarTransacaoExistenteParaImportacao(usuarioId, tx, contaIdPreview, hash) : null;
+      tx.hash_transacao = hash;
       const normalizada = {
         ...tx,
         linha,
-        conta_id: conta.id,
-        conta_nome: conta.nome,
+        conta_id: contaIdPreview,
+        conta_nome: contaPreview.contaEncontradaNome || tx.conta,
+        conta_planilha: tx.conta,
         hash_transacao: hash,
         categoria_id: categorias.categoriaId,
         categoria_macro_id: categorias.categoriaMacroId,
@@ -1741,7 +2236,7 @@ async function montarPreviewImportacao(usuarioId, dados) {
         continue;
       }
 
-      const alteracoes = montarAlteracoesTransacao(existente, valoresComparaveis(tx, categorias, conta.id));
+      const alteracoes = montarAlteracoesTransacao(existente, valoresComparaveis(tx, categorias, contaIdPreview));
       if (alteracoes.length === 0) {
         preview.semAlteracao.push({ ...normalizada, transacaoId: existente.id });
       } else {
@@ -1753,9 +2248,29 @@ async function montarPreviewImportacao(usuarioId, dados) {
         });
       }
     } catch (error) {
-      preview.erros.push({ linha, erro: error.message });
+      preview.erros.push(error.detalhesImportacao || {
+        linha,
+        coluna: 'Linha',
+        valorOriginal: '',
+        descricao: tx.descricao || '',
+        erro: error.message,
+        sugestao: 'Revise os dados desta linha na planilha e tente novamente.',
+      });
     }
   }
+
+  const transacoesParaConciliacao = [...preview.novas, ...preview.comAlteracao, ...preview.semAlteracao]
+    .map((tx) => ({ ...tx, id: tx.transacaoId || null, transacaoId: tx.transacaoId || null }));
+  const datas = transacoesParaConciliacao.map((tx) => tx.data).filter(Boolean).sort();
+  const provisoesPendentes = await buscarProvisoesPendentesParaConciliacao(usuarioId, {
+    dataInicial: datas[0],
+    dataFinal: datas[datas.length - 1],
+  });
+  const ignoradasPreview = await pool.query(
+    `SELECT provisao_id, transacao_id FROM conciliacoes WHERE usuario_id = $1 AND status = 'IGNORADA'`,
+    [usuarioId]
+  );
+  preview.sugestoesConciliacao = montarSugestoesConciliacao(provisoesPendentes, transacoesParaConciliacao, ignoradasPreview.rows);
 
   const tokenPreview = crypto.randomUUID();
   previewsImportacao.set(tokenPreview, preview);
@@ -1773,6 +2288,8 @@ async function montarPreviewImportacao(usuarioId, dados) {
     erros: preview.erros,
     categoriasPendentes: preview.categoriasPendentes,
     categoriasNovas: preview.categoriasNovas,
+    contasImportacao: preview.contasImportacao,
+    sugestoesConciliacao: preview.sugestoesConciliacao,
     tokenPreview,
   };
 }
@@ -1813,7 +2330,7 @@ async function inserirTransacaoImportacao(contaId, tx) {
     [contaId, tx.data, tx.descricao, tx.valor, tx.tipo, tx.categoria_id, tx.categoria_macro_id, tx.categoria_detalhada_id, tx.hash_transacao]
   );
 
-  return insert.rows.length > 0;
+  return insert.rows[0]?.id || null;
 }
 
 async function atualizarTransacaoImportacao(usuarioId, tx) {
@@ -1855,7 +2372,7 @@ app.post('/api/importacoes/xlsx/preview', verificarToken, async (req, res) => {
 app.post('/api/importacoes/xlsx/confirmar', verificarToken, async (req, res) => {
   try {
     limparPreviewsExpirados();
-    const { tokenPreview, acao, mapeamentoCategorias = [] } = req.body;
+    const { tokenPreview, acao, mapeamentoContas = [], mapeamentoCategorias = [], conciliacoesConfirmadas = [], conciliacoesIgnoradas = [] } = req.body;
     const preview = previewsImportacao.get(tokenPreview);
 
     if (!preview || preview.usuarioId !== req.usuario.usuario_id) {
@@ -1875,26 +2392,73 @@ app.post('/api/importacoes/xlsx/confirmar', verificarToken, async (req, res) => 
     }
 
     validarMapeamentoCategoriasResolvido(preview, mapeamentoCategorias);
+    const contasResolvidas = await resolverMapeamentoContasConfirmacao(req.usuario.usuario_id, preview, mapeamentoContas);
 
     let inseridas = 0;
     let atualizadas = 0;
-    let ignoradas = preview.semAlteracao.length;
-    const contaIdConfirmada = await resolverContaConfirmacao(req.usuario.usuario_id, preview);
+    let ignoradas = 0;
+    const transacaoPorTempId = new Map();
 
-    if (importarNovas) {
-      for (const tx of preview.novas) {
-        const txConfirmada = await prepararTransacaoConfirmacao(req.usuario.usuario_id, tx, mapeamentoCategorias);
-        const txComConta = { ...txConfirmada, conta_id: contaIdConfirmada, hash_transacao: gerarHashTransacao(txConfirmada, contaIdConfirmada) };
-        if (await inserirTransacaoImportacao(contaIdConfirmada, txComConta)) inseridas++;
+    for (const tx of (preview.transacoesValidadas || [])) {
+      const contaResolvida = contasResolvidas.get(String(tx.conta || '').trim());
+      if (!contaResolvida) throw new Error(`Resolva a conta da planilha "${tx.conta}" antes de concluir a importação.`);
+
+      const txConfirmada = await prepararTransacaoConfirmacao(req.usuario.usuario_id, tx, mapeamentoCategorias);
+      const hash = gerarHashTransacao(txConfirmada, contaResolvida.id);
+      const existente = await buscarTransacaoExistenteParaImportacao(req.usuario.usuario_id, txConfirmada, contaResolvida.id, hash);
+      const txComConta = { ...txConfirmada, conta_id: contaResolvida.id, conta_nome: contaResolvida.nome, hash_transacao: hash };
+
+      if (!existente) {
+        if (importarNovas) {
+          const transacaoInseridaId = await inserirTransacaoImportacao(contaResolvida.id, txComConta);
+          if (transacaoInseridaId) {
+            tx.transacaoIdConfirmada = transacaoInseridaId;
+            inseridas++;
+            transacaoPorTempId.set(tx.hash_transacao || hash, transacaoInseridaId);
+          }
+        } else {
+          ignoradas++;
+        }
+        continue;
+      }
+
+      const categoriasComparacao = {
+        categoriaMacroId: txComConta.categoria_macro_id,
+        categoriaDetalhadaId: txComConta.categoria_detalhada_id,
+      };
+      const alteracoes = montarAlteracoesTransacao(existente, valoresComparaveis(txComConta, categoriasComparacao, contaResolvida.id));
+      tx.transacaoIdConfirmada = existente.id;
+      transacaoPorTempId.set(tx.hash_transacao || hash, existente.id);
+
+      if (alteracoes.length > 0 && atualizarExistentes) {
+        if (await atualizarTransacaoImportacao(req.usuario.usuario_id, { ...txComConta, transacaoId: existente.id })) atualizadas++;
+      } else {
+        ignoradas++;
       }
     }
 
-    if (atualizarExistentes) {
-      for (const tx of preview.comAlteracao) {
-        const txConfirmada = await prepararTransacaoConfirmacao(req.usuario.usuario_id, tx, mapeamentoCategorias);
-        const txComConta = { ...txConfirmada, conta_id: contaIdConfirmada, hash_transacao: gerarHashTransacao(txConfirmada, contaIdConfirmada) };
-        if (await atualizarTransacaoImportacao(req.usuario.usuario_id, txComConta)) atualizadas++;
-      }
+    let conciliacoesAplicadas = 0;
+
+    for (const sugestao of conciliacoesIgnoradas) {
+      const transacaoId = sugestao.transacaoId || transacaoPorTempId.get(sugestao.transacaoTempId);
+      if (!sugestao.provisaoId || !transacaoId) continue;
+      await pool.query(
+        `INSERT INTO conciliacoes (usuario_id, provisao_id, transacao_id, status, confianca, score, motivos, ignorado_em)
+         VALUES ($1, $2, $3, 'IGNORADA', $4, $5, $6::jsonb, NOW())
+         ON CONFLICT DO NOTHING`,
+        [req.usuario.usuario_id, sugestao.provisaoId, transacaoId, sugestao.confianca || 'BAIXA', sugestao.score || 0, JSON.stringify(sugestao.motivos || ['Sugestão ignorada no preview de importação'])]
+      );
+    }
+
+    for (const sugestao of conciliacoesConfirmadas) {
+      const transacaoId = sugestao.transacaoId || transacaoPorTempId.get(sugestao.transacaoTempId);
+      if (!sugestao.provisaoId || !transacaoId) continue;
+      await confirmarConciliacaoUsuario(req.usuario.usuario_id, sugestao.provisaoId, transacaoId, {
+        confianca: sugestao.confianca || 'BAIXA',
+        score: sugestao.score || 0.5,
+        motivos: sugestao.motivos || ['Conciliação confirmada no preview de importação'],
+      });
+      conciliacoesAplicadas++;
     }
 
     previewsImportacao.delete(tokenPreview);
@@ -1903,11 +2467,12 @@ app.post('/api/importacoes/xlsx/confirmar', verificarToken, async (req, res) => 
       inseridas,
       atualizadas,
       ignoradas,
+      conciliacoesAplicadas,
       erros: preview.erros.length,
-      mensagem: `Importação confirmada: ${inseridas} inserida(s), ${atualizadas} atualizada(s) e ${ignoradas} sem alteração.`,
+      mensagem: `Importação confirmada: ${inseridas} inserida(s), ${atualizadas} atualizada(s), ${ignoradas} sem alteração e ${conciliacoesAplicadas} conciliação(ões) aplicada(s).`,
     });
   } catch (error) {
-    const status = /Resolva as categorias pendentes|Selecione|Informe|Categoria/.test(error.message || '') ? 400 : 500;
+    const status = /Resolva|Selecione|Informe|Categoria|Conta/.test(error.message || '') ? 400 : 500;
     res.status(status).json({ erro: 'Erro ao confirmar importação.', detalhes: error.message });
   }
 });
@@ -2114,6 +2679,241 @@ app.get('/api/admin/backups', verificarToken, async (req, res) => {
 });
 
 
+
+// ============================================================================
+// ROTAS: PROVISÕES E CONCILIAÇÕES
+// ============================================================================
+
+function validarPayloadProvisao(body = {}, parcial = false) {
+  const payload = {};
+  if (!parcial || body.descricao !== undefined) {
+    payload.descricao = String(body.descricao || '').trim();
+    if (!payload.descricao) throw new Error('Descrição é obrigatória.');
+  }
+  if (!parcial || body.valorPrevisto !== undefined || body.valor_previsto !== undefined) {
+    payload.valorPrevisto = Number(body.valorPrevisto ?? body.valor_previsto);
+    if (!Number.isFinite(payload.valorPrevisto) || payload.valorPrevisto <= 0) throw new Error('Valor previsto deve ser positivo.');
+  }
+  if (!parcial || body.tipo !== undefined) {
+    payload.tipo = normalizarTipoTransacao(body.tipo);
+    if (!TIPOS_PROVISAO.includes(payload.tipo)) throw new Error('Tipo inválido. Use CREDITO ou DEBITO.');
+  }
+  if (!parcial || body.dataPrevista !== undefined || body.data_prevista !== undefined) {
+    payload.dataPrevista = normalizarDataImportacao(body.dataPrevista ?? body.data_prevista);
+    if (!payload.dataPrevista) throw new Error('Data prevista é obrigatória.');
+  }
+  if (body.dataVencimento !== undefined || body.data_vencimento !== undefined) payload.dataVencimento = normalizarDataImportacao(body.dataVencimento ?? body.data_vencimento);
+  if (body.contaId !== undefined || body.conta_id !== undefined) payload.contaId = body.contaId || body.conta_id || null;
+  if (body.categoriaMacroId !== undefined || body.categoria_macro_id !== undefined) payload.categoriaMacroId = body.categoriaMacroId || body.categoria_macro_id || null;
+  if (body.categoriaDetalhadaId !== undefined || body.categoria_detalhada_id !== undefined) payload.categoriaDetalhadaId = body.categoriaDetalhadaId || body.categoria_detalhada_id || null;
+  if (body.status !== undefined) {
+    payload.status = String(body.status || '').toUpperCase();
+    if (!STATUS_PROVISAO.includes(payload.status)) throw new Error('Status de provisão inválido.');
+  }
+  if (body.observacao !== undefined) payload.observacao = body.observacao || null;
+  if (body.recorrente !== undefined) payload.recorrente = Boolean(body.recorrente);
+  if (body.periodicidade !== undefined) payload.periodicidade = body.periodicidade || null;
+  return payload;
+}
+
+async function validarRelacionamentosProvisao(usuarioId, payload) {
+  if (payload.contaId) {
+    const conta = await pool.query('SELECT id FROM contas WHERE id = $1 AND usuario_id = $2 AND ativo = true', [payload.contaId, usuarioId]);
+    if (conta.rows.length === 0) throw new Error('Conta não encontrada para este usuário.');
+  }
+  for (const [campo, id] of [['categoriaMacroId', payload.categoriaMacroId], ['categoriaDetalhadaId', payload.categoriaDetalhadaId]]) {
+    if (!id) continue;
+    const categoria = await pool.query('SELECT id FROM categorias WHERE id = $1 AND (usuario_id = $2 OR usuario_id IS NULL) AND ativa = true', [id, usuarioId]);
+    if (categoria.rows.length === 0) throw new Error(`${campo} inválida para este usuário.`);
+  }
+}
+
+app.get('/api/provisoes', verificarToken, async (req, res) => {
+  try {
+    const valores = [req.usuario.usuario_id];
+    const where = ['p.usuario_id = $1'];
+    const filtros = req.query;
+    if (filtros.dataInicial) { valores.push(filtros.dataInicial); where.push(`p.data_prevista >= $${valores.length}::date`); }
+    if (filtros.dataFinal) { valores.push(filtros.dataFinal); where.push(`p.data_prevista <= $${valores.length}::date`); }
+    if (filtros.status && filtros.status !== 'todos') { valores.push(String(filtros.status).toUpperCase()); where.push(`p.status = $${valores.length}`); }
+    if (filtros.tipo && filtros.tipo !== 'todos') { valores.push(String(filtros.tipo).toUpperCase()); where.push(`p.tipo = $${valores.length}`); }
+    if (filtros.contaId && filtros.contaId !== 'todas') { valores.push(filtros.contaId); where.push(`p.conta_id = $${valores.length}`); }
+    if (filtros.categoriaMacroId && filtros.categoriaMacroId !== 'todas') { valores.push(filtros.categoriaMacroId); where.push(`p.categoria_macro_id = $${valores.length}`); }
+    if (filtros.categoriaDetalhadaId && filtros.categoriaDetalhadaId !== 'todas') { valores.push(filtros.categoriaDetalhadaId); where.push(`p.categoria_detalhada_id = $${valores.length}`); }
+    if (filtros.busca) { valores.push(`%${String(filtros.busca).trim()}%`); where.push(`p.descricao ILIKE $${valores.length}`); }
+
+    const result = await pool.query(
+      `SELECT p.*, c.nome AS conta_nome, cm.nome AS categoria_macro_nome, cd.nome AS categoria_detalhada_nome,
+              ca.id AS conciliacao_id, ca.transacao_id AS transacao_conciliada_id, ca.confianca AS conciliacao_confianca,
+              t.descricao AS transacao_conciliada_descricao, t.data AS transacao_conciliada_data, t.valor AS transacao_conciliada_valor
+       FROM provisoes p
+       LEFT JOIN contas c ON c.id = p.conta_id
+       LEFT JOIN categorias cm ON cm.id = p.categoria_macro_id
+       LEFT JOIN categorias cd ON cd.id = p.categoria_detalhada_id
+       LEFT JOIN conciliacoes ca ON ca.provisao_id = p.id AND ca.status = 'CONFIRMADA'
+       LEFT JOIN transacoes t ON t.id = ca.transacao_id
+       WHERE ${where.join(' AND ')}
+       ORDER BY p.data_prevista DESC, p.criado_em DESC
+       LIMIT 1000`,
+      valores
+    );
+    res.json({ provisoes: result.rows.map(montarProvisao) });
+  } catch (error) {
+    res.status(500).json({ erro: error.message });
+  }
+});
+
+app.post('/api/provisoes', verificarToken, async (req, res) => {
+  try {
+    const payload = validarPayloadProvisao(req.body);
+    await validarRelacionamentosProvisao(req.usuario.usuario_id, payload);
+    const result = await pool.query(
+      `INSERT INTO provisoes (usuario_id, descricao, valor_previsto, tipo, data_prevista, data_vencimento, conta_id, categoria_macro_id, categoria_detalhada_id, status, observacao, recorrente, periodicidade)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,COALESCE($10,'PENDENTE'),$11,$12,$13)
+       RETURNING *`,
+      [req.usuario.usuario_id, payload.descricao, payload.valorPrevisto, payload.tipo, payload.dataPrevista, payload.dataVencimento || null, payload.contaId || null, payload.categoriaMacroId || null, payload.categoriaDetalhadaId || null, payload.status || 'PENDENTE', payload.observacao || null, payload.recorrente || false, payload.periodicidade || null]
+    );
+    res.status(201).json({ provisao: montarProvisao(result.rows[0]) });
+  } catch (error) {
+    res.status(400).json({ erro: error.message });
+  }
+});
+
+app.patch('/api/provisoes/:id', verificarToken, async (req, res) => {
+  try {
+    const atual = await pool.query('SELECT * FROM provisoes WHERE id = $1 AND usuario_id = $2', [req.params.id, req.usuario.usuario_id]);
+    if (atual.rows.length === 0) return res.status(404).json({ erro: 'Provisão não encontrada.' });
+    const camposCriticos = ['valorPrevisto', 'valor_previsto', 'tipo', 'dataPrevista', 'data_prevista', 'contaId', 'conta_id'];
+    if (atual.rows[0].status === 'CONCILIADA' && camposCriticos.some((campo) => req.body[campo] !== undefined)) {
+      return res.status(400).json({ erro: 'Desfaça a conciliação antes de editar campos críticos da provisão.' });
+    }
+    const payload = validarPayloadProvisao(req.body, true);
+    await validarRelacionamentosProvisao(req.usuario.usuario_id, payload);
+    const result = await pool.query(
+      `UPDATE provisoes SET
+        descricao = COALESCE($1, descricao),
+        valor_previsto = COALESCE($2, valor_previsto),
+        tipo = COALESCE($3, tipo),
+        data_prevista = COALESCE($4, data_prevista),
+        data_vencimento = CASE WHEN $5::text IS NULL THEN data_vencimento ELSE $5::date END,
+        conta_id = CASE WHEN $6::text IS NULL THEN conta_id ELSE $6::uuid END,
+        categoria_macro_id = CASE WHEN $7::text IS NULL THEN categoria_macro_id ELSE $7::uuid END,
+        categoria_detalhada_id = CASE WHEN $8::text IS NULL THEN categoria_detalhada_id ELSE $8::uuid END,
+        status = COALESCE($9, status),
+        observacao = CASE WHEN $10::text IS NULL THEN observacao ELSE $10 END,
+        recorrente = COALESCE($11, recorrente),
+        periodicidade = CASE WHEN $12::text IS NULL THEN periodicidade ELSE $12 END,
+        atualizado_em = NOW()
+       WHERE id = $13 AND usuario_id = $14
+       RETURNING *`,
+      [payload.descricao, payload.valorPrevisto, payload.tipo, payload.dataPrevista, payload.dataVencimento, payload.contaId, payload.categoriaMacroId, payload.categoriaDetalhadaId, payload.status, payload.observacao, payload.recorrente, payload.periodicidade, req.params.id, req.usuario.usuario_id]
+    );
+    res.json({ provisao: montarProvisao(result.rows[0]) });
+  } catch (error) {
+    res.status(400).json({ erro: error.message });
+  }
+});
+
+app.delete('/api/provisoes/:id', verificarToken, async (req, res) => {
+  try {
+    const conciliada = await pool.query(
+      `SELECT p.id, p.status, ca.id AS conciliacao_id FROM provisoes p LEFT JOIN conciliacoes ca ON ca.provisao_id = p.id AND ca.status = 'CONFIRMADA' WHERE p.id = $1 AND p.usuario_id = $2`,
+      [req.params.id, req.usuario.usuario_id]
+    );
+    if (conciliada.rows.length === 0) return res.status(404).json({ erro: 'Provisão não encontrada.' });
+    if (conciliada.rows[0].conciliacao_id && req.query.confirmar !== 'true') {
+      return res.status(409).json({ erro: 'Provisão conciliada. Confirme a exclusão para desfazer/remover o vínculo.' });
+    }
+    await pool.query('DELETE FROM provisoes WHERE id = $1 AND usuario_id = $2', [req.params.id, req.usuario.usuario_id]);
+    res.json({ sucesso: true });
+  } catch (error) {
+    res.status(500).json({ erro: error.message });
+  }
+});
+
+app.post('/api/provisoes/:id/duplicar', verificarToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `INSERT INTO provisoes (usuario_id, descricao, valor_previsto, tipo, data_prevista, data_vencimento, conta_id, categoria_macro_id, categoria_detalhada_id, status, observacao, recorrente, periodicidade)
+       SELECT usuario_id, descricao || ' (cópia)', valor_previsto, tipo, data_prevista, data_vencimento, conta_id, categoria_macro_id, categoria_detalhada_id, 'PENDENTE', observacao, recorrente, periodicidade
+       FROM provisoes WHERE id = $1 AND usuario_id = $2 RETURNING *`,
+      [req.params.id, req.usuario.usuario_id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ erro: 'Provisão não encontrada.' });
+    res.status(201).json({ provisao: montarProvisao(result.rows[0]) });
+  } catch (error) {
+    res.status(500).json({ erro: error.message });
+  }
+});
+
+app.post('/api/conciliacoes/sugerir', verificarToken, async (req, res) => {
+  try {
+    const { transacaoIds = [], dataInicial, dataFinal, provisaoId } = req.body;
+    const provisoes = provisaoId
+      ? (await pool.query(`SELECT p.* FROM provisoes p WHERE p.id = $1 AND p.usuario_id = $2`, [provisaoId, req.usuario.usuario_id])).rows.map(montarProvisao)
+      : await buscarProvisoesPendentesParaConciliacao(req.usuario.usuario_id, { dataInicial, dataFinal });
+
+    const valores = [req.usuario.usuario_id];
+    const where = ['c.usuario_id = $1', 't.deletado_em IS NULL'];
+    if (Array.isArray(transacaoIds) && transacaoIds.length > 0) { valores.push(transacaoIds); where.push(`t.id = ANY($${valores.length}::uuid[])`); }
+    if (dataInicial) { valores.push(dataInicial); where.push(`t.data >= $${valores.length}::date`); }
+    if (dataFinal) { valores.push(dataFinal); where.push(`t.data <= $${valores.length}::date`); }
+    where.push(`NOT EXISTS (SELECT 1 FROM conciliacoes ca WHERE ca.transacao_id = t.id AND ca.status = 'CONFIRMADA')`);
+    const transacoesResult = await pool.query(
+      `SELECT t.*, c.nome AS conta_nome, cm.nome AS categoria_macro_nome, cd.nome AS categoria_detalhada_nome
+       FROM transacoes t
+       JOIN contas c ON c.id = t.conta_id
+       LEFT JOIN categorias cm ON cm.id = t.categoria_macro_id
+       LEFT JOIN categorias cd ON cd.id = t.categoria_detalhada_id
+       WHERE ${where.join(' AND ')}
+       ORDER BY t.data DESC LIMIT 1000`,
+      valores
+    );
+    const ignoradas = await pool.query(`SELECT provisao_id, transacao_id FROM conciliacoes WHERE usuario_id = $1 AND status = 'IGNORADA'`, [req.usuario.usuario_id]);
+    res.json({ sugestoes: montarSugestoesConciliacao(provisoes, transacoesResult.rows, ignoradas.rows) });
+  } catch (error) {
+    res.status(400).json({ erro: error.message });
+  }
+});
+
+app.post('/api/conciliacoes/confirmar', verificarToken, async (req, res) => {
+  try {
+    const conciliacao = await confirmarConciliacaoUsuario(req.usuario.usuario_id, req.body.provisaoId, req.body.transacaoId);
+    res.status(201).json({ conciliacao });
+  } catch (error) {
+    res.status(400).json({ erro: error.message });
+  }
+});
+
+app.post('/api/conciliacoes/ignorar', verificarToken, async (req, res) => {
+  try {
+    const { provisaoId, transacaoId, confianca = 'BAIXA', score = 0, motivos = ['Sugestão ignorada pelo usuário'] } = req.body;
+    await validarEntidadesConciliacao(req.usuario.usuario_id, provisaoId, transacaoId);
+    const result = await pool.query(
+      `INSERT INTO conciliacoes (usuario_id, provisao_id, transacao_id, status, confianca, score, motivos, ignorado_em)
+       VALUES ($1,$2,$3,'IGNORADA',$4,$5,$6::jsonb,NOW()) RETURNING *`,
+      [req.usuario.usuario_id, provisaoId, transacaoId, confianca, score, JSON.stringify(motivos)]
+    );
+    res.status(201).json({ conciliacao: result.rows[0] });
+  } catch (error) {
+    res.status(400).json({ erro: error.message });
+  }
+});
+
+app.post('/api/conciliacoes/desfazer', verificarToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `UPDATE conciliacoes SET status = 'DESFEITA' WHERE id = $1 AND usuario_id = $2 AND status = 'CONFIRMADA' RETURNING provisao_id`,
+      [req.body.conciliacaoId, req.usuario.usuario_id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ erro: 'Conciliação confirmada não encontrada.' });
+    await pool.query(`UPDATE provisoes SET status = 'PENDENTE', atualizado_em = NOW() WHERE id = $1 AND usuario_id = $2`, [result.rows[0].provisao_id, req.usuario.usuario_id]);
+    res.json({ sucesso: true });
+  } catch (error) {
+    res.status(500).json({ erro: error.message });
+  }
+});
+
 // ============================================================================
 // ROTAS: DASHBOARD
 // ============================================================================
@@ -2146,12 +2946,14 @@ app.get('/api/dashboard/resumo', verificarToken, async (req, res) => {
          COALESCE(cm.nome, cat.nome, 'Sem categoria') AS categoria_macro_nome,
          cd.nome AS categoria_detalhada_nome,
          conta.id AS conta_id,
-         conta.nome AS conta_nome
+         conta.nome AS conta_nome,
+         ca.status AS status_conciliacao
        FROM transacoes t
        JOIN contas conta ON conta.id = t.conta_id
        LEFT JOIN categorias cat ON cat.id = t.categoria_id
        LEFT JOIN categorias cm ON cm.id = t.categoria_macro_id
        LEFT JOIN categorias cd ON cd.id = t.categoria_detalhada_id
+       LEFT JOIN conciliacoes ca ON ca.transacao_id = t.id AND ca.status = 'CONFIRMADA'
        WHERE conta.usuario_id = $1
          AND t.deletado_em IS NULL
          AND t.data BETWEEN $2::date AND $3::date`,
@@ -2214,6 +3016,28 @@ app.get('/api/dashboard/resumo', verificarToken, async (req, res) => {
       }
     });
 
+    const provisoesResult = await pool.query(
+      `SELECT status, tipo, COALESCE(SUM(valor_previsto), 0) AS total, COUNT(*) AS quantidade
+       FROM provisoes
+       WHERE usuario_id = $1 AND data_prevista BETWEEN $2::date AND $3::date
+       GROUP BY status, tipo`,
+      [req.usuario.usuario_id, dataInicial, dataFinal]
+    );
+    const provisoesResumo = provisoesResult.rows.reduce((acc, item) => {
+      const total = Number(item.total || 0);
+      const quantidade = Number(item.quantidade || 0);
+      if (item.tipo === 'DEBITO') acc.totalProvisionadoPagar += total;
+      if (item.tipo === 'CREDITO') acc.totalProvisionadoReceber += total;
+      if (item.status === 'PENDENTE') acc.pendentes += quantidade;
+      if (item.status === 'CONCILIADA') acc.conciliadas += quantidade;
+      if (item.status === 'ATRASADA') acc.atrasadas += quantidade;
+      acc.total += quantidade;
+      return acc;
+    }, { totalProvisionadoPagar: 0, totalProvisionadoReceber: 0, pendentes: 0, conciliadas: 0, atrasadas: 0, total: 0 });
+    provisoesResumo.percentualConciliado = provisoesResumo.total ? Number(((provisoesResumo.conciliadas / provisoesResumo.total) * 100).toFixed(1)) : 0;
+    provisoesResumo.totalRealizadoConciliado = transacoes.filter((tx) => tx.status_conciliacao === 'CONFIRMADA').reduce((total, tx) => total + tx.valor, 0);
+    provisoesResumo.diferencaRealizadoProvisionado = provisoesResumo.totalRealizadoConciliado - (provisoesResumo.totalProvisionadoReceber - provisoesResumo.totalProvisionadoPagar);
+
     const movimentacaoPorPeriodo = Array.from(movimentacaoPorPeriodoMap.values())
       .sort((a, b) => a.periodo.localeCompare(b.periodo));
     const despesasPorCategoria = Array.from(despesasPorCategoriaMap.entries())
@@ -2244,6 +3068,7 @@ app.get('/api/dashboard/resumo', verificarToken, async (req, res) => {
         percentualCategorizado: quantidadeTransacoes ? Number(((transacoesCategorizadas / quantidadeTransacoes) * 100).toFixed(1)) : 0,
         transferenciasInternas: transferenciasInternas.length,
         valorTransferenciasInternas: transferenciasInternas.reduce((total, tx) => total + tx.valor, 0),
+        provisoes: provisoesResumo,
       },
       series: {
         movimentacaoPorPeriodo,
@@ -2300,11 +3125,11 @@ async function buscarTransacoesUsuario(usuarioId, filtros = {}) {
   }
   if (filtros.categoriaMacroId) {
     valores.push(filtros.categoriaMacroId);
-    where.push(`t.categoria_macro_id = $${valores.length}`);
+    where.push(`(t.categoria_macro_id = $${valores.length} OR (t.categoria_macro_id IS NULL AND (t.categoria_id = $${valores.length} OR cat.categoria_pai_id = $${valores.length})))`);
   }
   if (filtros.categoriaDetalhadaId) {
     valores.push(filtros.categoriaDetalhadaId);
-    where.push(`t.categoria_detalhada_id = $${valores.length}`);
+    where.push(`(t.categoria_detalhada_id = $${valores.length} OR (t.categoria_detalhada_id IS NULL AND t.categoria_id = $${valores.length} AND cat.categoria_pai_id IS NOT NULL))`);
   }
   if (filtros.status === 'sem') where.push('t.categoria_macro_id IS NULL AND t.categoria_id IS NULL');
   if (filtros.status === 'categorizadas') where.push('(t.categoria_macro_id IS NOT NULL OR t.categoria_id IS NOT NULL)');
@@ -2326,15 +3151,49 @@ async function buscarTransacoesUsuario(usuarioId, filtros = {}) {
   }
 
   const result = await pool.query(
-    `SELECT t.*, conta.nome AS conta_nome,
+    `SELECT t.*,
+            COALESCE(t.categoria_macro_id, CASE WHEN cat.categoria_pai_id IS NULL THEN t.categoria_id ELSE cat.categoria_pai_id END) AS categoria_macro_id,
+            COALESCE(t.categoria_detalhada_id, CASE WHEN cat.categoria_pai_id IS NOT NULL THEN t.categoria_id ELSE NULL END) AS categoria_detalhada_id,
+            conta.nome AS conta_nome,
             cat.nome AS categoria_nome,
-            cm.nome AS categoria_macro_nome,
-            cd.nome AS categoria_detalhada_nome
+            COALESCE(cm.nome, cat_macro.nome, CASE WHEN cat.categoria_pai_id IS NULL THEN cat.nome ELSE NULL END) AS categoria_macro_nome,
+            COALESCE(cd.nome, CASE WHEN cat.categoria_pai_id IS NOT NULL THEN cat.nome ELSE NULL END) AS categoria_detalhada_nome,
+            ca.id AS conciliacao_id,
+            ca.provisao_id AS provisao_conciliada_id,
+            p.descricao AS provisao_conciliada_descricao,
+            CASE
+              WHEN conta.data_saldo_inicial IS NULL THEN NULL
+              ELSE conta.saldo_inicial + COALESCE((
+                SELECT SUM(CASE WHEN t2.tipo = 'CREDITO' THEN t2.valor ELSE -t2.valor END)
+                FROM transacoes t2
+                WHERE t2.conta_id = t.conta_id
+                  AND t2.deletado_em IS NULL
+                  AND t2.data >= conta.data_saldo_inicial
+                  AND (
+                    t2.data < t.data
+                    OR (
+                      t2.data = t.data
+                      AND (
+                        COALESCE(t2.criado_em, t2.atualizado_em, TIMESTAMP '1970-01-01') < COALESCE(t.criado_em, t.atualizado_em, TIMESTAMP '1970-01-01')
+                        OR (
+                          COALESCE(t2.criado_em, t2.atualizado_em, TIMESTAMP '1970-01-01') = COALESCE(t.criado_em, t.atualizado_em, TIMESTAMP '1970-01-01')
+                          AND t2.id::text <= t.id::text
+                        )
+                      )
+                    )
+                  )
+              ), 0)
+            END AS saldo_acumulado,
+            conta.saldo_inicial AS conta_saldo_inicial,
+            conta.data_saldo_inicial AS conta_data_saldo_inicial
      FROM transacoes t
      JOIN contas conta ON conta.id = t.conta_id
      LEFT JOIN categorias cat ON cat.id = t.categoria_id
+     LEFT JOIN categorias cat_macro ON cat_macro.id = cat.categoria_pai_id
      LEFT JOIN categorias cm ON cm.id = t.categoria_macro_id
      LEFT JOIN categorias cd ON cd.id = t.categoria_detalhada_id
+     LEFT JOIN conciliacoes ca ON ca.transacao_id = t.id AND ca.status = 'CONFIRMADA'
+     LEFT JOIN provisoes p ON p.id = ca.provisao_id
      WHERE ${where.join(' AND ')}
      ORDER BY t.data DESC, t.criado_em DESC
      LIMIT 1000`,
@@ -2504,12 +3363,21 @@ app.get('/api/transacoes/:contaId', verificarToken, async (req, res) => {
     await aplicarRegrasAtivasEmTransacoesSemCategoria(req.usuario.usuario_id);
 
     const result = await pool.query(
-      `SELECT t.*, c.nome as categoria_nome, cm.nome AS categoria_macro_nome, cd.nome AS categoria_detalhada_nome
+      `SELECT t.*,
+              COALESCE(t.categoria_macro_id, CASE WHEN c.categoria_pai_id IS NULL THEN t.categoria_id ELSE c.categoria_pai_id END) AS categoria_macro_id,
+              COALESCE(t.categoria_detalhada_id, CASE WHEN c.categoria_pai_id IS NOT NULL THEN t.categoria_id ELSE NULL END) AS categoria_detalhada_id,
+              c.nome as categoria_nome,
+              COALESCE(cm.nome, c_macro.nome, CASE WHEN c.categoria_pai_id IS NULL THEN c.nome ELSE NULL END) AS categoria_macro_nome,
+              COALESCE(cd.nome, CASE WHEN c.categoria_pai_id IS NOT NULL THEN c.nome ELSE NULL END) AS categoria_detalhada_nome,
+              ca.id AS conciliacao_id, ca.provisao_id AS provisao_conciliada_id, p.descricao AS provisao_conciliada_descricao
        FROM transacoes t
        JOIN contas conta ON conta.id = t.conta_id
        LEFT JOIN categorias c ON t.categoria_id = c.id
+       LEFT JOIN categorias c_macro ON c_macro.id = c.categoria_pai_id
        LEFT JOIN categorias cm ON t.categoria_macro_id = cm.id
        LEFT JOIN categorias cd ON t.categoria_detalhada_id = cd.id
+       LEFT JOIN conciliacoes ca ON ca.transacao_id = t.id AND ca.status = 'CONFIRMADA'
+       LEFT JOIN provisoes p ON p.id = ca.provisao_id
        WHERE t.conta_id = $1 AND conta.usuario_id = $2 AND t.deletado_em IS NULL
        ORDER BY t.data DESC
        LIMIT 500`,
@@ -2524,6 +3392,17 @@ app.get('/api/transacoes/:contaId', verificarToken, async (req, res) => {
 
 app.delete('/api/transacoes/:id', verificarToken, async (req, res) => {
   try {
+    const conciliada = await pool.query(
+      `SELECT ca.id FROM conciliacoes ca
+       JOIN transacoes t ON t.id = ca.transacao_id
+       JOIN contas c ON c.id = t.conta_id
+       WHERE ca.transacao_id = $1 AND ca.status = 'CONFIRMADA' AND c.usuario_id = $2`,
+      [req.params.id, req.usuario.usuario_id]
+    );
+    if (conciliada.rows.length > 0 && req.query.confirmar !== 'true') {
+      return res.status(409).json({ erro: 'Transação conciliada. Confirme a exclusão para remover o vínculo.' });
+    }
+
     const result = await pool.query(
       `DELETE FROM transacoes t
        USING contas c
@@ -2702,6 +3581,340 @@ app.patch('/api/regras-categorizacao/:id/desativar', verificarToken, async (req,
   }
 });
 
+
+// ============================================================================
+// ROTAS: CONFERÊNCIA DE SALDOS BANCÁRIOS
+// ============================================================================
+
+function arredondarMoeda(valor) {
+  return Math.round((Number(valor || 0) + Number.EPSILON) * 100) / 100;
+}
+
+function formatarMoedaDiagnostico(valor) {
+  return Number(valor || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+}
+
+function dataISO(data) {
+  if (!data) return null;
+  return data instanceof Date ? data.toISOString().slice(0, 10) : String(data).slice(0, 10);
+}
+
+async function obterContaDoUsuario(usuarioId, contaId) {
+  const result = await pool.query(
+    `SELECT id, nome, saldo_inicial, data_saldo_inicial
+     FROM contas
+     WHERE id = $1 AND usuario_id = $2 AND ativo = true`,
+    [contaId, usuarioId]
+  );
+  return result.rows[0] || null;
+}
+
+async function calcularSaldoContaAteData(usuarioId, contaId, dataReferencia) {
+  if (!contaId || !dataReferencia) throw new Error('Informe contaId e dataReferencia para calcular o saldo.');
+  const conta = await obterContaDoUsuario(usuarioId, contaId);
+  if (!conta) throw new Error('Conta não encontrada para este usuário.');
+
+  const dataSaldoInicial = dataISO(conta.data_saldo_inicial);
+  if (!dataSaldoInicial) {
+    return {
+      contaId: conta.id,
+      contaNome: conta.nome,
+      dataReferencia,
+      saldoInicial: Number(conta.saldo_inicial || 0),
+      dataSaldoInicial: null,
+      saldoInicialConfigurado: false,
+      totalCreditos: 0,
+      totalDebitos: 0,
+      saldoCalculado: null,
+      mensagem: 'Esta conta ainda não possui saldo inicial configurado. Cadastre um saldo inicial para permitir a conferência.',
+    };
+  }
+
+  const totais = await pool.query(
+    `SELECT
+       COALESCE(SUM(CASE WHEN tipo = 'CREDITO' THEN valor ELSE 0 END), 0) AS total_creditos,
+       COALESCE(SUM(CASE WHEN tipo = 'DEBITO' THEN valor ELSE 0 END), 0) AS total_debitos,
+       COUNT(*) AS quantidade_transacoes
+     FROM transacoes
+     WHERE conta_id = $1
+       AND data >= $2
+       AND data <= $3
+       AND deletado_em IS NULL`,
+    [contaId, dataSaldoInicial, dataReferencia]
+  );
+
+  const saldoInicial = Number(conta.saldo_inicial || 0);
+  const totalCreditos = Number(totais.rows[0]?.total_creditos || 0);
+  const totalDebitos = Number(totais.rows[0]?.total_debitos || 0);
+  const saldoCalculado = arredondarMoeda(saldoInicial + totalCreditos - totalDebitos);
+
+  return {
+    contaId: conta.id,
+    contaNome: conta.nome,
+    dataReferencia,
+    saldoInicial,
+    dataSaldoInicial,
+    saldoInicialConfigurado: true,
+    totalCreditos: arredondarMoeda(totalCreditos),
+    totalDebitos: arredondarMoeda(totalDebitos),
+    saldoCalculado,
+    quantidadeTransacoes: Number(totais.rows[0]?.quantidade_transacoes || 0),
+  };
+}
+
+function transacaoResumoDiagnostico(tx) {
+  return {
+    id: tx.id,
+    data: dataISO(tx.data),
+    descricao: tx.descricao,
+    valor: Number(tx.valor || 0),
+    tipo: tx.tipo,
+    contaId: tx.conta_id,
+    contaNome: tx.conta_nome,
+  };
+}
+
+function adicionarDiagnostico(lista, diagnostico) {
+  lista.push({
+    severidade: diagnostico.severidade || 'MEDIA',
+    transacoesRelacionadas: diagnostico.transacoesRelacionadas || [],
+    acoesSugeridas: diagnostico.acoesSugeridas || [],
+    ...diagnostico,
+  });
+}
+
+async function analisarDivergenciaSaldo(usuarioId, { contaId, dataReferencia, saldoReal, saldoCalculado, diferenca }) {
+  const conta = await obterContaDoUsuario(usuarioId, contaId);
+  if (!conta) throw new Error('Conta não encontrada para este usuário.');
+
+  const dataSaldoInicial = dataISO(conta.data_saldo_inicial) || dataReferencia;
+  const diferencaNumerica = arredondarMoeda(Number(diferenca ?? (Number(saldoReal || 0) - Number(saldoCalculado || 0))));
+  const absDiferenca = Math.abs(diferencaNumerica);
+  const toleranciaValor = Math.max(0.05, absDiferenca * 0.02);
+  const diagnosticos = [];
+
+  const transacoesConta = await pool.query(
+    `SELECT t.*, c.nome AS conta_nome
+     FROM transacoes t
+     JOIN contas c ON c.id = t.conta_id
+     WHERE t.conta_id = $1
+       AND t.data >= ($2::date - INTERVAL '3 days')
+       AND t.data <= ($3::date + INTERVAL '3 days')
+       AND t.deletado_em IS NULL
+     ORDER BY t.data, t.valor, t.descricao`,
+    [contaId, dataSaldoInicial, dataReferencia]
+  );
+
+  const dentroPeriodo = transacoesConta.rows.filter((tx) => dataISO(tx.data) >= dataSaldoInicial && dataISO(tx.data) <= dataReferencia);
+
+  for (let i = 0; i < dentroPeriodo.length; i++) {
+    for (let j = i + 1; j < dentroPeriodo.length; j++) {
+      const a = dentroPeriodo[i];
+      const b = dentroPeriodo[j];
+      if (dataISO(a.data) !== dataISO(b.data) || a.tipo !== b.tipo || Math.abs(Number(a.valor) - Number(b.valor)) > 0.01) continue;
+      if (similaridadeTextoConciliacao(a.descricao, b.descricao) < 0.55) continue;
+      adicionarDiagnostico(diagnosticos, {
+        tipo: 'POSSIVEL_DUPLICIDADE',
+        severidade: 'ALTA',
+        descricao: `Encontramos duas transações parecidas em ${dataISO(a.data)} no valor de ${formatarMoedaDiagnostico(a.valor)} que podem estar duplicadas.`,
+        transacoesRelacionadas: [transacaoResumoDiagnostico(a), transacaoResumoDiagnostico(b)],
+        acoesSugeridas: ['Abra as transações relacionadas e confirme se uma delas deve ser excluída ou ignorada.'],
+      });
+      i = dentroPeriodo.length;
+      break;
+    }
+  }
+
+  if (absDiferenca > 0) {
+    const valorProximo = dentroPeriodo.find((tx) => Math.abs(Number(tx.valor) - absDiferenca) <= toleranciaValor);
+    adicionarDiagnostico(diagnosticos, {
+      tipo: 'POSSIVEL_TRANSACAO_AUSENTE',
+      severidade: valorProximo ? 'MEDIA' : 'BAIXA',
+      descricao: valorProximo
+        ? `A diferença é próxima de uma transação já registrada no valor de ${formatarMoedaDiagnostico(valorProximo.valor)}; pode existir lançamento ausente ou duplicado de valor semelhante.`
+        : `A diferença de ${formatarMoedaDiagnostico(absDiferenca)} pode indicar lançamento ausente, taxa, ajuste manual ou item não importado no extrato.`,
+      transacoesRelacionadas: valorProximo ? [transacaoResumoDiagnostico(valorProximo)] : [],
+      acoesSugeridas: ['Compare o extrato bancário com as transações importadas nesse período.'],
+    });
+
+    const sinalInvertido = dentroPeriodo.find((tx) => Math.abs((Number(tx.valor) * 2) - absDiferenca) <= Math.max(0.05, absDiferenca * 0.02));
+    if (sinalInvertido) {
+      adicionarDiagnostico(diagnosticos, {
+        tipo: 'POSSIVEL_ERRO_DE_SINAL',
+        severidade: 'ALTA',
+        descricao: `A diferença é compatível com uma transação de ${formatarMoedaDiagnostico(sinalInvertido.valor)} lançada com tipo invertido entre crédito e débito.`,
+        transacoesRelacionadas: [transacaoResumoDiagnostico(sinalInvertido)],
+        acoesSugeridas: ['Confira se o tipo da transação relacionada está correto.'],
+      });
+    }
+  }
+
+  const foraPeriodo = transacoesConta.rows.filter((tx) => dataISO(tx.data) > dataReferencia || dataISO(tx.data) < dataSaldoInicial).slice(0, 5);
+  if (foraPeriodo.length > 0) {
+    adicionarDiagnostico(diagnosticos, {
+      tipo: 'POSSIVEL_DATA_ERRADA',
+      severidade: 'MEDIA',
+      descricao: 'Há transações próximas ao início/fim do período que podem ter sido lançadas com data diferente do extrato bancário.',
+      transacoesRelacionadas: foraPeriodo.map(transacaoResumoDiagnostico),
+      acoesSugeridas: ['Revise a data das transações próximas à data de referência.'],
+    });
+  }
+
+  const outrasContas = await pool.query(
+    `SELECT t.*, c.nome AS conta_nome
+     FROM transacoes t
+     JOIN contas c ON c.id = t.conta_id
+     WHERE c.usuario_id = $1
+       AND t.conta_id <> $2
+       AND t.data >= $3::date
+       AND t.data <= $4::date
+       AND ABS(t.valor - $5) <= $6
+       AND t.deletado_em IS NULL
+     ORDER BY t.data DESC
+     LIMIT 8`,
+    [usuarioId, contaId, dataSaldoInicial, dataReferencia, absDiferenca, Math.max(1, toleranciaValor)]
+  );
+  if (outrasContas.rows.length > 0) {
+    adicionarDiagnostico(diagnosticos, {
+      tipo: 'POSSIVEL_CONTA_ERRADA',
+      severidade: 'MEDIA',
+      descricao: 'Encontramos transações de valor parecido em outras contas; alguma movimentação pode ter sido importada na conta errada.',
+      transacoesRelacionadas: outrasContas.rows.map(transacaoResumoDiagnostico),
+      acoesSugeridas: ['Confira se as transações relacionadas pertencem à conta correta.'],
+    });
+  }
+
+  const transferencias = await pool.query(
+    `SELECT d.id AS debito_id, d.data AS debito_data, d.descricao AS debito_descricao, d.valor AS debito_valor,
+            cd.nome AS debito_conta_nome, cr.id AS credito_id, cr.data AS credito_data,
+            cr.descricao AS credito_descricao, cr.valor AS credito_valor, cc.nome AS credito_conta_nome
+     FROM transacoes d
+     JOIN contas cd ON cd.id = d.conta_id
+     JOIN transacoes cr ON cr.tipo = 'CREDITO'
+       AND cr.conta_id <> d.conta_id
+       AND ABS(cr.valor - d.valor) <= 0.01
+       AND ABS(cr.data - d.data) <= 3
+       AND cr.deletado_em IS NULL
+       AND COALESCE(cr.eh_transferencia_interna, false) = false
+     JOIN contas cc ON cc.id = cr.conta_id AND cc.usuario_id = cd.usuario_id
+     WHERE cd.usuario_id = $1
+       AND d.conta_id = $2
+       AND d.tipo = 'DEBITO'
+       AND d.data >= $3::date
+       AND d.data <= $4::date
+       AND d.deletado_em IS NULL
+       AND COALESCE(d.eh_transferencia_interna, false) = false
+     LIMIT 5`,
+    [usuarioId, contaId, dataSaldoInicial, dataReferencia]
+  );
+  if (transferencias.rows.length > 0) {
+    const relacionados = transferencias.rows.flatMap((tx) => ([
+      { id: tx.debito_id, data: dataISO(tx.debito_data), descricao: tx.debito_descricao, valor: Number(tx.debito_valor), tipo: 'DEBITO', contaNome: tx.debito_conta_nome },
+      { id: tx.credito_id, data: dataISO(tx.credito_data), descricao: tx.credito_descricao, valor: Number(tx.credito_valor), tipo: 'CREDITO', contaNome: tx.credito_conta_nome },
+    ]));
+    adicionarDiagnostico(diagnosticos, {
+      tipo: 'POSSIVEL_TRANSFERENCIA_INTERNA',
+      severidade: 'BAIXA',
+      descricao: 'Encontramos pares de débito/crédito entre contas que parecem transferências internas ainda não marcadas.',
+      transacoesRelacionadas: relacionados,
+      acoesSugeridas: ['Marque como transferência interna se o par representar movimentação entre suas contas.'],
+    });
+  }
+
+  const resumoIA = diagnosticos.length > 0
+    ? `Encontramos ${diagnosticos.length} hipótese(s) para explicar a diferença de ${formatarMoedaDiagnostico(diferencaNumerica)}. Priorize os itens de severidade alta e compare com o extrato bancário.`
+    : `Não encontramos uma causa provável automática para a diferença de ${formatarMoedaDiagnostico(diferencaNumerica)}. Verifique lançamentos manuais, taxas ou transações não importadas.`;
+
+  return { diferenca: diferencaNumerica, diagnosticos, resumoIA };
+}
+
+app.patch('/api/contas/:id/saldo-inicial', verificarToken, async (req, res) => {
+  try {
+    const { saldoInicial, saldo_inicial, dataSaldoInicial, data_saldo_inicial } = req.body;
+    const saldo = Number(saldoInicial ?? saldo_inicial ?? 0);
+    const data = dataSaldoInicial || data_saldo_inicial;
+    if (!Number.isFinite(saldo)) return res.status(400).json({ erro: 'Saldo inicial inválido.' });
+    if (!data) return res.status(400).json({ erro: 'Informe a data do saldo inicial.' });
+
+    const result = await pool.query(
+      `UPDATE contas
+       SET saldo_inicial = $1, data_saldo_inicial = $2, atualizado_em = NOW()
+       WHERE id = $3 AND usuario_id = $4 AND ativo = true
+       RETURNING id, nome, saldo_inicial, data_saldo_inicial`,
+      [saldo, data, req.params.id, req.usuario.usuario_id]
+    );
+    if (!result.rows[0]) return res.status(404).json({ erro: 'Conta não encontrada para este usuário.' });
+    res.json({ conta: result.rows[0] });
+  } catch (error) {
+    res.status(500).json({ erro: 'Erro ao salvar saldo inicial.', detalhes: error.message });
+  }
+});
+
+app.get('/api/conferencia-saldos/calcular', verificarToken, async (req, res) => {
+  try {
+    const calculo = await calcularSaldoContaAteData(req.usuario.usuario_id, req.query.contaId, req.query.dataReferencia);
+    res.json(calculo);
+  } catch (error) {
+    res.status(/Informe|Conta/.test(error.message || '') ? 400 : 500).json({ erro: 'Erro ao calcular saldo.', detalhes: error.message });
+  }
+});
+
+app.get('/api/conferencia-saldos/historico', verificarToken, async (req, res) => {
+  try {
+    const valores = [req.usuario.usuario_id];
+    const where = ['cs.usuario_id = $1'];
+    if (req.query.contaId && req.query.contaId !== 'todas') {
+      valores.push(req.query.contaId);
+      where.push(`cs.conta_id = $${valores.length}`);
+    }
+    const result = await pool.query(
+      `SELECT cs.*, c.nome AS conta_nome
+       FROM conferencias_saldo cs
+       JOIN contas c ON c.id = cs.conta_id
+       WHERE ${where.join(' AND ')}
+       ORDER BY cs.data_referencia DESC, cs.criado_em DESC
+       LIMIT 100`,
+      valores
+    );
+    res.json({ conferencias: result.rows });
+  } catch (error) {
+    res.status(500).json({ erro: 'Erro ao listar histórico de conferências.', detalhes: error.message });
+  }
+});
+
+app.post('/api/conferencia-saldos', verificarToken, async (req, res) => {
+  try {
+    const { contaId, dataReferencia, saldoReal, observacao, tolerancia = 0.01 } = req.body;
+    const calculo = await calcularSaldoContaAteData(req.usuario.usuario_id, contaId, dataReferencia);
+    if (!calculo.saldoInicialConfigurado) return res.status(400).json({ erro: calculo.mensagem, calculo });
+
+    const saldoRealNumero = Number(saldoReal);
+    if (!Number.isFinite(saldoRealNumero)) return res.status(400).json({ erro: 'Informe um saldo real válido.' });
+
+    const diferenca = arredondarMoeda(saldoRealNumero - Number(calculo.saldoCalculado || 0));
+    const status = Math.abs(diferenca) <= Math.abs(Number(tolerancia || 0.01)) ? 'CONCILIADO' : 'DIVERGENTE';
+    const id = crypto.randomUUID();
+    const result = await pool.query(
+      `INSERT INTO conferencias_saldo (id, usuario_id, conta_id, data_referencia, saldo_real, saldo_calculado, diferenca, status, observacao, criado_em, atualizado_em)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
+       RETURNING *`,
+      [id, req.usuario.usuario_id, contaId, dataReferencia, saldoRealNumero, calculo.saldoCalculado, diferenca, status, observacao || null]
+    );
+    res.json({ ...result.rows[0], calculo });
+  } catch (error) {
+    res.status(/Informe|Conta|Saldo/.test(error.message || '') ? 400 : 500).json({ erro: 'Erro ao salvar conferência de saldo.', detalhes: error.message });
+  }
+});
+
+app.post('/api/conferencia-saldos/analisar', verificarToken, async (req, res) => {
+  try {
+    const resultado = await analisarDivergenciaSaldo(req.usuario.usuario_id, req.body || {});
+    res.json(resultado);
+  } catch (error) {
+    res.status(/Informe|Conta/.test(error.message || '') ? 400 : 500).json({ erro: 'Erro ao analisar divergência.', detalhes: error.message });
+  }
+});
+
 // ============================================================================
 // ROTAS: CONTAS
 // ============================================================================
@@ -2712,6 +3925,12 @@ async function buscarConta(usuarioId, nomePasta) {
     [usuarioId, nomePasta]
   );
   return result.rows[0]?.id;
+}
+
+async function buscarContaNormalizada(usuarioId, nomeConta) {
+  const contas = await listarContasUsuario(usuarioId);
+  const normalizado = normalizarNomeConta(nomeConta);
+  return contas.find((conta) => normalizarNomeConta(conta.nome) === normalizado)?.id || null;
 }
 
 async function criarConta(usuarioId, nomePasta) {
@@ -2743,10 +3962,19 @@ app.get('/api/contas', verificarToken, async (req, res) => {
            WHERE conta_id = $1`,
           [conta.id]
         );
+        const conferenciaResult = await pool.query(
+          `SELECT data_referencia, status, diferenca
+           FROM conferencias_saldo
+           WHERE conta_id = $1 AND usuario_id = $2
+           ORDER BY data_referencia DESC, criado_em DESC
+           LIMIT 1`,
+          [conta.id, req.usuario.usuario_id]
+        );
 
         return {
           ...conta,
-          saldo: parseFloat(saldoResult.rows[0]?.saldo || 0)
+          saldo: parseFloat(saldoResult.rows[0]?.saldo || 0),
+          ultima_conferencia: conferenciaResult.rows[0] || null,
         };
       })
     );
