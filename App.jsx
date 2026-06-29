@@ -1306,7 +1306,7 @@ function Login() {
       minHeight: '100vh',
       background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)'
     }}>
-      <div style={{
+      <div className="login-card" style={{
         background: 'white',
         borderRadius: '12px',
         padding: '40px',
@@ -1416,7 +1416,7 @@ function BarrasHorizontais({ dados, rotulo, valorChave = 'valor', nomeChave = 'c
 
 function CardAnalitico({ titulo, children }) {
   return (
-    <div style={{ background: 'white', borderRadius: '14px', padding: '20px', boxShadow: '0 2px 10px rgba(15,23,42,0.08)', border: '1px solid #eef2f7' }}>
+    <div className="chart-card" style={{ background: 'white', borderRadius: '14px', padding: '20px', boxShadow: '0 2px 10px rgba(15,23,42,0.08)', border: '1px solid #eef2f7' }}>
       <h3 style={{ margin: '0 0 16px', color: '#111827' }}>{titulo}</h3>
       {children}
     </div>
@@ -1597,7 +1597,7 @@ function Dashboard({ usuario, token, onLogout }) {
 
   return (
     <div style={{ minHeight: '100vh', background: '#f5f5f5' }}>
-      <div style={{
+      <div className="app-shell-header" style={{
         background: '#1f2937',
         color: 'white',
         padding: '20px',
@@ -1612,7 +1612,7 @@ function Dashboard({ usuario, token, onLogout }) {
           </p>
         </div>
 
-        <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+        <div className="app-header-actions" style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
           <button
             onClick={() => setModo('backups')}
             style={{
@@ -1643,7 +1643,7 @@ function Dashboard({ usuario, token, onLogout }) {
         </div>
       </div>
 
-      <div style={{ padding: '20px', maxWidth: '1200px', margin: '0 auto' }}>
+      <div className="page-container" style={{ padding: '20px', maxWidth: '1200px', margin: '0 auto' }}>
         {modo === 'home' && (
           <>
             {contas.length === 0 ? (
@@ -1681,7 +1681,7 @@ function Dashboard({ usuario, token, onLogout }) {
                       <h2 style={{ margin: '0 0 6px' }}>Dashboard financeiro</h2>
                       <p style={{ margin: 0, color: '#64748b' }}>Visão executiva entre {formatarData(periodoDashboard.dataInicial)} e {formatarData(periodoDashboard.dataFinal)}.</p>
                     </div>
-                    <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                    <div className="dashboard-actions" style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
                       <button
                         onClick={() => {
                           setContaSelecionada(null);
@@ -1837,7 +1837,7 @@ function Dashboard({ usuario, token, onLogout }) {
                   </>
                 )}
 
-                <div style={{
+                <div className="section-title-row" style={{
                   display: 'flex',
                   justifyContent: 'space-between',
                   alignItems: 'center',
@@ -1914,7 +1914,7 @@ function Dashboard({ usuario, token, onLogout }) {
         )}
 
         {modo === 'importar' && (
-          <div style={{
+          <div className="content-card" style={{
             background: 'white',
             borderRadius: '12px',
             padding: '30px'
@@ -1945,7 +1945,7 @@ function Dashboard({ usuario, token, onLogout }) {
         )}
 
         {modo === 'backups' && (
-          <div style={{
+          <div className="content-card" style={{
             background: 'white',
             borderRadius: '12px',
             padding: '30px'
@@ -3232,7 +3232,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
             <h2>Nenhuma transação encontrada</h2>
           </div>
         ) : (
-          <div ref={tabelaRef} style={{ background: 'white', borderRadius: '12px', overflowX: 'auto', boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }}>
+          <div ref={tabelaRef} className="table-scroll" style={{ background: 'white', borderRadius: '12px', overflowX: 'auto', boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }}>
             <table style={{ width: '100%', minWidth: '1240px', borderCollapse: 'collapse' }}>
               <thead>
                 <tr style={{ background: '#f9fafb' }}>

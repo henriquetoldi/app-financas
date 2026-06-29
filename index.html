@@ -4,6 +4,92 @@
       <meta charset="UTF-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1.0" />
       <title>App Financas</title>
+      <style>
+        *, *::before, *::after { box-sizing: border-box; }
+
+        body {
+          margin: 0;
+          -webkit-font-smoothing: antialiased;
+          text-rendering: optimizeLegibility;
+          background: #f5f5f5;
+        }
+
+        button, input, select, textarea {
+          font: inherit;
+        }
+
+        button, select, input[type="checkbox"] {
+          touch-action: manipulation;
+        }
+
+        @media (max-width: 640px) {
+          body {
+            overflow-x: hidden;
+          }
+
+          button, input, select, textarea {
+            font-size: 16px !important;
+          }
+
+          button, select, input:not([type="checkbox"]), textarea {
+            min-height: 44px;
+          }
+
+          table {
+            font-size: 12px !important;
+          }
+
+          th, td {
+            padding: 8px !important;
+          }
+
+          .app-shell-header {
+            padding: 16px !important;
+            align-items: flex-start !important;
+            flex-direction: column !important;
+            gap: 14px !important;
+          }
+
+          .app-shell-header h1 {
+            font-size: 24px !important;
+            line-height: 1.15 !important;
+          }
+
+          .app-header-actions, .dashboard-actions, .section-title-row {
+            width: 100% !important;
+            display: grid !important;
+            grid-template-columns: 1fr !important;
+          }
+
+          .app-header-actions button, .dashboard-actions button, .section-title-row button {
+            width: 100% !important;
+          }
+
+          .page-container {
+            padding: 12px !important;
+          }
+
+          .content-card, .login-card {
+            padding: 18px !important;
+            border-radius: 14px !important;
+          }
+
+          .login-card {
+            width: calc(100% - 24px) !important;
+          }
+
+          .chart-card {
+            padding: 16px !important;
+          }
+
+          .table-scroll {
+            margin-left: -8px;
+            margin-right: -8px;
+            border-radius: 10px !important;
+            -webkit-overflow-scrolling: touch;
+          }
+        }
+      </style>
     </head>
     <body>
       <div id="root"></div>
