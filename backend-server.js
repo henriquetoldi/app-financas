@@ -393,6 +393,31 @@ async function inicializarBanco() {
   await pool.query('CREATE INDEX IF NOT EXISTS idx_conciliacoes_usuario_status ON conciliacoes(usuario_id, status)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_conciliacoes_provisao ON conciliacoes(provisao_id)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_conciliacoes_transacao ON conciliacoes(transacao_id)');
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS planejamentos_mensais (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      usuario_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+      mes INT NOT NULL,
+      ano INT NOT NULL,
+      descricao TEXT NOT NULL,
+      categoria TEXT,
+      tipo_despesa VARCHAR(20) NOT NULL,
+      valor_previsto DECIMAL(12, 2) NOT NULL,
+      dia_previsto INT,
+      observacao TEXT,
+      criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT chk_planejamentos_mes CHECK (mes BETWEEN 1 AND 12),
+      CONSTRAINT chk_planejamentos_ano CHECK (ano BETWEEN 1900 AND 2100),
+      CONSTRAINT chk_planejamentos_tipo CHECK (tipo_despesa IN ('FIXA', 'VARIAVEL')),
+      CONSTRAINT chk_planejamentos_valor CHECK (valor_previsto > 0),
+      CONSTRAINT chk_planejamentos_dia CHECK (dia_previsto IS NULL OR dia_previsto BETWEEN 1 AND 31)
+    )
+  `);
+
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_planejamentos_usuario_mes_ano ON planejamentos_mensais(usuario_id, ano, mes)');
+
   await pool.query("CREATE UNIQUE INDEX IF NOT EXISTS idx_conciliacoes_provisao_ativa ON conciliacoes(provisao_id) WHERE status = 'CONFIRMADA'");
   await pool.query("CREATE UNIQUE INDEX IF NOT EXISTS idx_conciliacoes_transacao_ativa ON conciliacoes(transacao_id) WHERE status = 'CONFIRMADA'");
 
@@ -2727,6 +2752,107 @@ async function validarRelacionamentosProvisao(usuarioId, payload) {
     if (categoria.rows.length === 0) throw new Error(`${campo} inválida para este usuário.`);
   }
 }
+
+
+function validarMesAnoPlanejamento(mes, ano) {
+  const mesNumero = Number(mes);
+  const anoNumero = Number(ano);
+  if (!Number.isInteger(mesNumero) || mesNumero < 1 || mesNumero > 12) throw new Error('Mês obrigatório deve estar entre 1 e 12.');
+  if (!Number.isInteger(anoNumero) || anoNumero < 1900 || anoNumero > 2100) throw new Error('Ano obrigatório inválido.');
+  return { mes: mesNumero, ano: anoNumero };
+}
+
+function validarPayloadPlanejamento(body = {}, parcial = false) {
+  const payload = {};
+  if (!parcial || body.mes !== undefined || body.ano !== undefined) Object.assign(payload, validarMesAnoPlanejamento(body.mes, body.ano));
+  if (!parcial || body.descricao !== undefined) {
+    payload.descricao = String(body.descricao || '').trim();
+    if (!payload.descricao) throw new Error('Descrição é obrigatória.');
+  }
+  if (!parcial || body.tipo_despesa !== undefined || body.tipoDespesa !== undefined) {
+    payload.tipoDespesa = String(body.tipo_despesa || body.tipoDespesa || '').trim().toUpperCase();
+    if (!['FIXA', 'VARIAVEL'].includes(payload.tipoDespesa)) throw new Error('Tipo da despesa deve ser FIXA ou VARIAVEL.');
+  }
+  if (!parcial || body.valor_previsto !== undefined || body.valorPrevisto !== undefined) {
+    payload.valorPrevisto = Number(body.valor_previsto ?? body.valorPrevisto);
+    if (!Number.isFinite(payload.valorPrevisto) || payload.valorPrevisto <= 0) throw new Error('Valor previsto é obrigatório e deve ser maior que zero.');
+  }
+  if (body.dia_previsto !== undefined || body.diaPrevisto !== undefined) {
+    const valorDia = body.dia_previsto ?? body.diaPrevisto;
+    payload.diaPrevisto = valorDia === '' || valorDia === null ? null : Number(valorDia);
+    if (payload.diaPrevisto !== null && (!Number.isInteger(payload.diaPrevisto) || payload.diaPrevisto < 1 || payload.diaPrevisto > 31)) throw new Error('Dia previsto deve estar entre 1 e 31.');
+  }
+  if (body.categoria !== undefined) payload.categoria = String(body.categoria || '').trim() || null;
+  if (body.observacao !== undefined) payload.observacao = String(body.observacao || '').trim() || null;
+  return payload;
+}
+
+function montarResumoPlanejamento(rows = [], totalRealizado = 0) {
+  const totalFixas = rows.filter((item) => item.tipo_despesa === 'FIXA').reduce((soma, item) => soma + Number(item.valor_previsto || 0), 0);
+  const totalVariaveis = rows.filter((item) => item.tipo_despesa === 'VARIAVEL').reduce((soma, item) => soma + Number(item.valor_previsto || 0), 0);
+  const totalPrevisto = totalFixas + totalVariaveis;
+  return { totalFixas, totalVariaveis, totalPrevisto, quantidade: rows.length, totalRealizado, diferencaPrevistoRealizado: totalPrevisto - totalRealizado };
+}
+
+async function buscarTotalRealizadoMes(usuarioId, mes, ano) {
+  const result = await pool.query(
+    `SELECT COALESCE(SUM(ABS(t.valor)), 0) AS total
+     FROM transacoes t
+     JOIN contas c ON c.id = t.conta_id
+     WHERE c.usuario_id = $1
+       AND t.deletado_em IS NULL
+       AND EXTRACT(MONTH FROM t.data) = $2
+       AND EXTRACT(YEAR FROM t.data) = $3
+       AND UPPER(t.tipo) IN ('DEBITO', 'DESPESA')`,
+    [usuarioId, mes, ano]
+  );
+  return Number(result.rows[0]?.total || 0);
+}
+
+app.get('/api/planejamento', verificarToken, async (req, res) => {
+  try {
+    const { mes, ano } = validarMesAnoPlanejamento(req.query.mes, req.query.ano);
+    const result = await pool.query(
+      `SELECT * FROM planejamentos_mensais WHERE usuario_id = $1 AND mes = $2 AND ano = $3 ORDER BY tipo_despesa, dia_previsto NULLS LAST, criado_em DESC`,
+      [req.usuario.usuario_id, mes, ano]
+    );
+    const totalRealizado = await buscarTotalRealizadoMes(req.usuario.usuario_id, mes, ano);
+    res.json({ planejamentos: result.rows, resumo: montarResumoPlanejamento(result.rows, totalRealizado) });
+  } catch (error) { res.status(400).json({ erro: error.message }); }
+});
+
+app.post('/api/planejamento', verificarToken, async (req, res) => {
+  try {
+    const p = validarPayloadPlanejamento(req.body);
+    const result = await pool.query(
+      `INSERT INTO planejamentos_mensais (usuario_id, mes, ano, descricao, categoria, tipo_despesa, valor_previsto, dia_previsto, observacao)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+      [req.usuario.usuario_id, p.mes, p.ano, p.descricao, p.categoria || null, p.tipoDespesa, p.valorPrevisto, p.diaPrevisto ?? null, p.observacao || null]
+    );
+    res.status(201).json({ planejamento: result.rows[0] });
+  } catch (error) { res.status(400).json({ erro: error.message }); }
+});
+
+app.put('/api/planejamento/:id', verificarToken, async (req, res) => {
+  try {
+    const p = validarPayloadPlanejamento(req.body);
+    const result = await pool.query(
+      `UPDATE planejamentos_mensais SET mes=$1, ano=$2, descricao=$3, categoria=$4, tipo_despesa=$5, valor_previsto=$6, dia_previsto=$7, observacao=$8, atualizado_em=NOW()
+       WHERE id=$9 AND usuario_id=$10 RETURNING *`,
+      [p.mes, p.ano, p.descricao, p.categoria || null, p.tipoDespesa, p.valorPrevisto, p.diaPrevisto ?? null, p.observacao || null, req.params.id, req.usuario.usuario_id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ erro: 'Planejamento não encontrado.' });
+    res.json({ planejamento: result.rows[0] });
+  } catch (error) { res.status(400).json({ erro: error.message }); }
+});
+
+app.delete('/api/planejamento/:id', verificarToken, async (req, res) => {
+  try {
+    const result = await pool.query('DELETE FROM planejamentos_mensais WHERE id = $1 AND usuario_id = $2 RETURNING id', [req.params.id, req.usuario.usuario_id]);
+    if (result.rows.length === 0) return res.status(404).json({ erro: 'Planejamento não encontrado.' });
+    res.json({ sucesso: true });
+  } catch (error) { res.status(400).json({ erro: error.message }); }
+});
 
 app.get('/api/provisoes', verificarToken, async (req, res) => {
   try {
