@@ -44,6 +44,43 @@ function PageHeader({ icone, titulo, descricao, breadcrumb, action }) {
   );
 }
 
+
+const OPCOES_LIMITE_TRANSACOES = [10, 25, 50, 100, 200];
+
+function agruparCategorias(categorias = []) {
+  const ativas = categorias.filter((cat) => cat.ativa !== false);
+  return ativas
+    .filter((cat) => !cat.categoria_pai_id && (cat.nivel || 'MACRO') === 'MACRO')
+    .sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'))
+    .map((macro) => ({
+      ...macro,
+      filhas: ativas
+        .filter((cat) => cat.categoria_pai_id === macro.id)
+        .sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR')),
+    }));
+}
+
+function Paginacao({ pagina, totalPaginas, onMudar }) {
+  if (totalPaginas <= 1) return null;
+  const inicio = Math.max(1, pagina - 2);
+  const fim = Math.min(totalPaginas, pagina + 2);
+  const paginas = [];
+  for (let i = inicio; i <= fim; i += 1) paginas.push(i);
+  return <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '6px', padding: '16px 0' }}>
+    <BtnPagina onClick={() => onMudar(1)} disabled={pagina === 1}>«</BtnPagina>
+    <BtnPagina onClick={() => onMudar(pagina - 1)} disabled={pagina === 1}>‹</BtnPagina>
+    {inicio > 1 && <span style={{ color: '#94a3b8', padding: '0 4px' }}>...</span>}
+    {paginas.map((p) => <BtnPagina key={p} onClick={() => onMudar(p)} ativo={p === pagina}>{p}</BtnPagina>)}
+    {fim < totalPaginas && <span style={{ color: '#94a3b8', padding: '0 4px' }}>...</span>}
+    <BtnPagina onClick={() => onMudar(pagina + 1)} disabled={pagina === totalPaginas}>›</BtnPagina>
+    <BtnPagina onClick={() => onMudar(totalPaginas)} disabled={pagina === totalPaginas}>»</BtnPagina>
+  </div>;
+}
+
+function BtnPagina({ children, onClick, disabled, ativo }) {
+  return <button onClick={onClick} disabled={disabled} style={{ minWidth: '34px', height: '34px', padding: '0 8px', borderRadius: '8px', border: '1px solid', borderColor: ativo ? '#3b82f6' : '#e2e8f0', background: ativo ? '#3b82f6' : 'white', color: ativo ? 'white' : disabled ? '#d1d5db' : '#374151', fontWeight: ativo ? 700 : 400, fontSize: '13px', cursor: disabled ? 'not-allowed' : 'pointer' }}>{children}</button>;
+}
+
 function Spinner({ texto = 'Carregando...' }) {
   return <div className="loading-spinner-wrap"><span className="loading-spinner" />{texto && <span>{texto}</span>}</div>;
 }
@@ -1663,10 +1700,10 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
   const rotuloMesAnoSelecionado = `${nomesMesesCurtos[Number(mes) - 1]}/${ano}`;
   const parcelasPlanejadas = planejamentos.filter((item) => item.recorrencia_tipo === 'PARCELADA');
   const totalParcelasPlanejadas = parcelasPlanejadas.reduce((soma, item) => soma + Number(item.valor_previsto || 0), 0);
-  const categoriasFiltro = Array.from(new Map([
-    ...categorias.map((cat) => [cat.id, { valor: cat.id, label: cat.nome }]),
-    ...planejamentos.filter((item) => !item.categoria_id && item.categoria).map((item) => [item.categoria, { valor: item.categoria, label: item.categoria }]),
-  ]).values()).sort((a, b) => a.label.localeCompare(b.label));
+  const categoriasAgrupadasPlanejamento = agruparCategorias(categorias);
+  const categoriasFiltroLegado = Array.from(new Map(
+    planejamentos.filter((item) => !item.categoria_id && item.categoria).map((item) => [item.categoria, { valor: item.categoria, label: item.categoria }])
+  ).values()).sort((a, b) => a.label.localeCompare(b.label));
   const haDadosResumoMensal = resumoMensal.some((item) => Number(item.total_previsto || 0) > 0);
   const categoriasDaDistribuicao = Array.from(new Set(resumoCategorias.flatMap((item) => (item.categorias || []).map((cat) => cat.categoria || 'Sem categoria'))));
   const maiorTotalCategorias = Math.max(...resumoCategorias.map((item) => Number(item.total_previsto || 0)), 0);
@@ -1688,7 +1725,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '12px', alignItems: 'end' }}>
               <label>Tipo de despesa<select value={filtrosPlanejamento.tipo} onChange={(e) => setFiltrosPlanejamento({ ...filtrosPlanejamento, tipo: e.target.value })} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}><option value="TODOS">Todos</option><option value="FIXA">Fixas</option><option value="VARIAVEL">Variáveis</option></select></label>
               <label>Recorrência<select value={filtrosPlanejamento.recorrencia} onChange={(e) => setFiltrosPlanejamento({ ...filtrosPlanejamento, recorrencia: e.target.value })} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}><option value="TODAS">Todas</option><option value="UNICA">Únicas</option><option value="MENSAL">Mensais recorrentes</option><option value="PARCELADA">Parceladas</option></select></label>
-              <label>Categoria<select value={filtrosPlanejamento.categoria} onChange={(e) => setFiltrosPlanejamento({ ...filtrosPlanejamento, categoria: e.target.value })} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}><option value="">Todas as categorias</option>{categoriasFiltro.map((cat) => <option key={cat.valor} value={cat.valor}>{cat.label || 'Sem categoria'}</option>)}</select></label>
+              <label>Categoria<select value={filtrosPlanejamento.categoria} onChange={(e) => setFiltrosPlanejamento({ ...filtrosPlanejamento, categoria: e.target.value })} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}><option value="">Todas as categorias</option>{categoriasAgrupadasPlanejamento.map((macro) => <optgroup key={macro.id} label={`${macro.emoji || ''} ${macro.nome}`}><option value={macro.id}>{macro.emoji || ''} {macro.nome} (macro)</option>{macro.filhas.map((filha) => <option key={filha.id} value={filha.id}>── {filha.nome}</option>)}</optgroup>)}{categoriasFiltroLegado.map((cat) => <option key={cat.valor} value={cat.valor}>{cat.label || 'Sem categoria'}</option>)}</select></label>
               <label>Período dos gráficos<select value={filtrosPlanejamento.periodo} onChange={(e) => setFiltrosPlanejamento({ ...filtrosPlanejamento, periodo: Number(e.target.value) })} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}>{opcoesPeriodoGraficos.map((qtd) => <option key={qtd} value={qtd}>Próximos {qtd} meses</option>)}</select></label>
               <Btn variant="ghost" size="sm" onClick={limparFiltrosPlanejamento}>Limpar filtros</Btn>
             </div>
@@ -1815,7 +1852,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
               <label>Ano<input type="number" value={ano} onChange={(e) => setAno(Number(e.target.value))} min="1900" max="2100" required style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} /></label>
             </div>
             <label>Descrição<input value={form.descricao} onChange={(e) => setForm({ ...form, descricao: e.target.value })} required placeholder="Ex.: Aluguel" style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} /></label>
-            <label>Categoria<select value={form.categoria_id} onChange={(e) => { const categoria = categorias.find((cat) => cat.id === e.target.value); setForm({ ...form, categoria_id: e.target.value, categoria: categoria?.nome || form.categoria }); }} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}><option value="">Usar texto livre / legado</option>{categorias.map((cat) => <option key={cat.id} value={cat.id}>{cat.categoria_pai_id ? '↳ ' : ''}{cat.nome}</option>)}</select><input value={form.categoria} onChange={(e) => setForm({ ...form, categoria: e.target.value, categoria_id: '' })} placeholder="Texto legado, se não escolher categoria" style={{ width: '100%', marginTop: '8px', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} /><small style={{ color: '#64748b' }}>Prefira uma categoria cadastrada. O texto livre foi mantido para compatibilidade com planejamentos antigos.</small></label>
+            <label>Categoria<select value={form.categoria_id} onChange={(e) => { const categoria = categorias.find((cat) => cat.id === e.target.value); setForm({ ...form, categoria_id: e.target.value, categoria: categoria?.nome || form.categoria }); }} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}><option value="">Usar texto livre / legado</option>{categoriasAgrupadasPlanejamento.map((macro) => <optgroup key={macro.id} label={`${macro.emoji || ''} ${macro.nome}`}><option value={macro.id}>{macro.emoji || ''} {macro.nome} (macro)</option>{macro.filhas.map((filha) => <option key={filha.id} value={filha.id}>── {filha.nome}</option>)}</optgroup>)}</select><input value={form.categoria} onChange={(e) => setForm({ ...form, categoria: e.target.value, categoria_id: '' })} placeholder="Texto legado, se não escolher categoria" style={{ width: '100%', marginTop: '8px', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} /><small style={{ color: '#64748b' }}>Prefira uma categoria cadastrada. O texto livre foi mantido para compatibilidade com planejamentos antigos.</small></label>
             <label>Tipo de despesa<select value={form.tipo_despesa} onChange={(e) => setForm({ ...form, tipo_despesa: e.target.value })} required style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}><option value="FIXA">Fixa</option><option value="VARIAVEL">Variável</option></select></label>
             <label>Recorrência<select value={form.recorrencia_tipo} onChange={(e) => setForm({ ...form, recorrencia_tipo: e.target.value })} required style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}><option value="UNICA">Única</option><option value="MENSAL">Mensal recorrente</option><option value="PARCELADA">Parcelada</option></select></label>
             {form.recorrencia_tipo === 'MENSAL' && (
@@ -1960,6 +1997,87 @@ function HeaderPrincipal({ usuario, token, onLogout }) {
   return <header className="top-header"><div><h1>💰 Finanças Pessoais</h1><p>Olá, {nome}</p></div><div className="top-actions"><NotificacoesBell token={token} /><div className="avatar-menu"><button className="avatar-button" onClick={() => setAberto(!aberto)}><img src={usuario?.foto_url || usuario?.picture || 'https://ui-avatars.com/api/?name=Financas'} alt="Avatar" /><span>{nome.split(' ')[0]}</span><span>▾</span></button>{aberto && <div className="avatar-dropdown"><strong>{nome}</strong><small>{usuario?.email}</small><button onClick={onLogout}>Sair</button></div>}</div></div></header>;
 }
 
+function ModalCategoria({ aberta, categoria, categorias, onFechar, onSalvar }) {
+  const [form, setForm] = useState({ nome: '', tipo: 'DESPESA', nivel: 'MACRO', categoria_pai_id: '', emoji: '', cor: '#999999' });
+  useEffect(() => {
+    if (aberta) setForm({
+      nome: categoria?.nome || '',
+      tipo: categoria?.tipo || 'DESPESA',
+      nivel: categoria?.nivel || (categoria?.categoria_pai_id ? 'DETALHADA' : 'MACRO'),
+      categoria_pai_id: categoria?.categoria_pai_id || '',
+      emoji: categoria?.emoji || '',
+      cor: categoria?.cor || '#999999',
+    });
+  }, [aberta, categoria]);
+  if (!aberta) return null;
+  const macros = categorias.filter((cat) => !cat.categoria_pai_id && (cat.nivel || 'MACRO') === 'MACRO' && cat.ativa !== false);
+  const salvar = () => {
+    if (!form.nome.trim()) return mostrarToast('Informe o nome da categoria.', 'aviso');
+    if (form.nivel === 'DETALHADA' && !form.categoria_pai_id) return mostrarToast('Selecione a categoria macro pai.', 'aviso');
+    onSalvar({ ...form, categoria_pai_id: form.nivel === 'DETALHADA' ? form.categoria_pai_id : null });
+  };
+  return <div className="modal-overlay" onClick={onFechar}><div className="modal-card" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '520px' }}><h3>{categoria?.id ? 'Editar categoria' : 'Nova categoria'}</h3><div className="filter-card" style={{ boxShadow: 'none', marginBottom: 0 }}><label>Nome *<input value={form.nome} onChange={(e) => setForm({ ...form, nome: e.target.value })} placeholder="Ex.: Alimentação" /></label><div className="filter-grid" style={{ marginTop: '12px' }}><label>Tipo *<select value={form.tipo} onChange={(e) => setForm({ ...form, tipo: e.target.value })}><option value="DESPESA">DESPESA</option><option value="RECEITA">RECEITA</option></select></label><label>Nível *<select value={form.nivel} onChange={(e) => setForm({ ...form, nivel: e.target.value, categoria_pai_id: '' })}><option value="MACRO">MACRO</option><option value="DETALHADA">DETALHADA</option></select></label></div>{form.nivel === 'DETALHADA' && <label style={{ marginTop: '12px' }}>Categoria pai *<select value={form.categoria_pai_id} onChange={(e) => setForm({ ...form, categoria_pai_id: e.target.value })}><option value="">Selecionar macro...</option>{macros.map((macro) => <option key={macro.id} value={macro.id}>{macro.emoji || ''} {macro.nome}</option>)}</select></label>}<div className="filter-grid" style={{ marginTop: '12px' }}><label>Emoji<input value={form.emoji} onChange={(e) => setForm({ ...form, emoji: e.target.value })} placeholder="🍔" /></label><label>Cor<input value={form.cor} onChange={(e) => setForm({ ...form, cor: e.target.value })} placeholder="#999999" /></label></div></div><div className="modal-actions" style={{ marginTop: '16px' }}><Btn variant="secondary" onClick={onFechar}>Cancelar</Btn><Btn variant="primary" onClick={salvar}>Salvar categoria</Btn></div></div></div>;
+}
+
+function TelaAdminCategorias({ token }) {
+  const [categorias, setCategorias] = useState([]);
+  const [filtros, setFiltros] = useState({ tipo: 'TODAS', nivel: 'TODOS', origem: 'TODAS', inativas: false });
+  const [modalAberto, setModalAberto] = useState(false);
+  const [categoriaEditando, setCategoriaEditando] = useState(null);
+  const authHeaders = { Authorization: `Bearer ${token}` };
+  const carregarCategorias = async () => {
+    try {
+      const response = await axios.get(`${API_URL}/categorias?incluirInativas=true`, { headers: authHeaders });
+      setCategorias(response.data.categorias || []);
+    } catch (error) {
+      mostrarToast('Erro ao carregar categorias: ' + (error.response?.data?.erro || error.message), 'erro');
+    }
+  };
+  useEffect(() => { carregarCategorias(); }, []);
+  const abrirNova = (nivel) => { setCategoriaEditando({ nivel, tipo: 'DESPESA', categoria_pai_id: '' }); setModalAberto(true); };
+  const salvarCategoria = async (payload) => {
+    try {
+      if (categoriaEditando?.id) await axios.put(`${API_URL}/categorias/${categoriaEditando.id}`, payload, { headers: authHeaders });
+      else await axios.post(`${API_URL}/categorias`, payload, { headers: authHeaders });
+      setModalAberto(false); setCategoriaEditando(null); await carregarCategorias(); mostrarToast('Categoria salva.', 'sucesso');
+    } catch (error) {
+      mostrarToast(error.response?.data?.erro || error.message, 'erro');
+    }
+  };
+  const alternarAtiva = async (categoria) => {
+    try { await axios.patch(`${API_URL}/categorias/${categoria.id}/${categoria.ativa === false ? 'ativar' : 'desativar'}`, {}, { headers: authHeaders }); await carregarCategorias(); }
+    catch (error) { mostrarToast(error.response?.data?.erro || error.message, 'erro'); }
+  };
+  const excluirCategoria = (categoria) => pedirConfirmacao('Excluir categoria', `Excluir "${categoria.nome}"?`, async () => {
+    try { await axios.delete(`${API_URL}/categorias/${categoria.id}`, { headers: authHeaders }); await carregarCategorias(); }
+    catch (error) { mostrarToast(error.response?.data?.erro || error.message, 'erro'); }
+  }, { labelConfirmar: 'Excluir', corConfirmar: '#ef4444' });
+  const categoriasFiltradas = categorias.filter((cat) => {
+    const nivel = cat.nivel || (cat.categoria_pai_id ? 'DETALHADA' : 'MACRO');
+    const origem = cat.usuario_id ? 'PERSONALIZADA' : 'PADRAO';
+    return (filtros.inativas || cat.ativa !== false) && (filtros.tipo === 'TODAS' || cat.tipo === filtros.tipo) && (filtros.nivel === 'TODOS' || nivel === filtros.nivel) && (filtros.origem === 'TODAS' || origem === filtros.origem);
+  });
+  const macrosAdmin = categoriasFiltradas
+    .filter((cat) => !cat.categoria_pai_id && (cat.nivel || 'MACRO') === 'MACRO')
+    .sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+  const linhasAdmin = macrosAdmin.flatMap((macro) => [
+    macro,
+    ...categoriasFiltradas
+      .filter((cat) => cat.categoria_pai_id === macro.id)
+      .sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR')),
+  ]);
+  const detalhadasSemMacroVisivel = categoriasFiltradas.filter((cat) => cat.categoria_pai_id && !macrosAdmin.some((macro) => macro.id === cat.categoria_pai_id));
+  const linhasCategoriasAdmin = [...linhasAdmin, ...detalhadasSemMacroVisivel];
+  const renderLinha = (cat) => {
+    const ehPadrao = !cat.usuario_id;
+    const inativa = cat.ativa === false;
+    const nivel = cat.nivel || (cat.categoria_pai_id ? 'DETALHADA' : 'MACRO');
+    return <tr key={cat.id} style={{ opacity: inativa ? 0.5 : 1 }}><td style={{ padding: '10px', paddingLeft: cat.categoria_pai_id ? '32px' : '12px' }}>{cat.categoria_pai_id ? '── ' : ''}{cat.emoji || ''} {cat.nome}{inativa && <span style={{ marginLeft: '8px', fontSize: '11px', color: '#ef4444' }}>inativa</span>}</td><td style={{ padding: '10px' }}><span style={{ padding: '2px 8px', borderRadius: '999px', fontSize: '11px', fontWeight: 600, background: cat.tipo === 'RECEITA' ? '#dcfce7' : '#fee2e2', color: cat.tipo === 'RECEITA' ? '#166534' : '#991b1b' }}>{cat.tipo}</span></td><td style={{ padding: '10px', color: '#64748b' }}>{nivel === 'MACRO' ? 'Macro' : 'Detalhada'}</td><td style={{ padding: '10px' }}><span style={{ fontSize: '11px', color: ehPadrao ? '#94a3b8' : '#3b82f6' }}>{ehPadrao ? 'Padrão' : 'Personalizada'}</span></td><td style={{ padding: '10px', display: 'flex', gap: '6px', flexWrap: 'wrap' }}>{!ehPadrao && !inativa && <Btn size="sm" variant="secondary" onClick={() => { setCategoriaEditando(cat); setModalAberto(true); }}>✏️ Editar</Btn>}<Btn size="sm" variant="ghost" onClick={() => alternarAtiva(cat)}>{inativa ? '✅ Reativar' : '🚫 Desativar'}</Btn>{!ehPadrao && <Btn size="sm" variant="danger" onClick={() => excluirCategoria(cat)}>🗑️ Excluir</Btn>}</td></tr>;
+  };
+  return <section><div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap', marginBottom: '16px' }}><div><h3 style={{ margin: '0 0 4px' }}>🏷️ Gerenciar Categorias</h3><p style={{ margin: 0, color: '#64748b' }}>Cadastre categorias macro e detalhadas para transações e planejamento.</p></div><div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}><Btn variant="primary" onClick={() => abrirNova('MACRO')}>+ Nova categoria macro</Btn><Btn variant="secondary" onClick={() => abrirNova('DETALHADA')}>+ Nova subcategoria</Btn></div></div><div className="filter-card"><div className="filter-grid"><label>Tipo<select value={filtros.tipo} onChange={(e) => setFiltros({ ...filtros, tipo: e.target.value })}><option value="TODAS">Todas</option><option value="DESPESA">Despesa</option><option value="RECEITA">Receita</option></select></label><label>Nível<select value={filtros.nivel} onChange={(e) => setFiltros({ ...filtros, nivel: e.target.value })}><option value="TODOS">Todas</option><option value="MACRO">Macro</option><option value="DETALHADA">Detalhada</option></select></label><label>Origem<select value={filtros.origem} onChange={(e) => setFiltros({ ...filtros, origem: e.target.value })}><option value="TODAS">Todas</option><option value="PADRAO">Padrão</option><option value="PERSONALIZADA">Personalizadas</option></select></label><label style={{ alignSelf: 'center' }}><span><input type="checkbox" checked={filtros.inativas} onChange={(e) => setFiltros({ ...filtros, inativas: e.target.checked })} /> Mostrar inativas</span></label></div></div><div style={{ overflowX: 'auto' }}><table style={{ width: '100%', borderCollapse: 'collapse' }}><thead><tr><th style={{ padding: '10px', textAlign: 'left' }}>Categoria</th><th style={{ padding: '10px', textAlign: 'left' }}>Tipo</th><th style={{ padding: '10px', textAlign: 'left' }}>Nível</th><th style={{ padding: '10px', textAlign: 'left' }}>Origem</th><th style={{ padding: '10px', textAlign: 'left' }}>Ações</th></tr></thead><tbody>{linhasCategoriasAdmin.map(renderLinha)}</tbody></table></div><ModalCategoria aberta={modalAberto} categoria={categoriaEditando} categorias={categorias} onFechar={() => { setModalAberto(false); setCategoriaEditando(null); }} onSalvar={salvarCategoria} /></section>;
+}
+
+
 function TelaAdmin({ token, usuario, onVoltar }) {
   const [aba, setAba] = useState('backups');
   const [resultadoDrive, setResultadoDrive] = useState(null);
@@ -1973,7 +2091,7 @@ function TelaAdmin({ token, usuario, onVoltar }) {
       mostrarToast('Erro ao testar conexão com Drive: ' + (error.response?.data?.erro || error.message), 'erro');
     }
   };
-  return <div className="content-card admin-screen"><PageHeader icone="⚙️" titulo="Administração" descricao="Backups, Drive e configurações do sistema." breadcrumb={<Breadcrumb atual="Admin" onVoltar={onVoltar} />} /><div className="admin-tabs">{[['backups','💾 Backups'],['drive','☁️ Drive'],['sistema','⚙️ Sistema']].map(([id,label]) => <button key={id} className={aba === id ? 'active' : ''} onClick={() => setAba(id)}>{label}</button>)}</div>{aba === 'backups' && <AdminBackups token={token} />}{aba === 'drive' && <section><h3>Google Drive</h3><p>Status: conectado via backend Railway.</p><p><strong>DRIVE_FINANCAS_FOLDER_ID:</strong> configurado no servidor</p><p><strong>DRIVE_BACKUPS_FOLDER_ID:</strong> configurado no servidor</p><Btn variant="primary" onClick={testarDrive}>Testar conexão</Btn>{resultadoDrive && <pre>{JSON.stringify(resultadoDrive, null, 2)}</pre>}</section>}{aba === 'sistema' && <section><h3>Configurações do Sistema</h3><p>Versão: {import.meta.env.VITE_APP_VERSION || 'frontend-local'}</p><p>Build: {import.meta.env.MODE}</p><p>Usuário: {usuario?.nome || usuario?.email}</p><p>API: {API_URL}</p></section>}</div>;
+  return <div className="content-card admin-screen"><PageHeader icone="⚙️" titulo="Administração" descricao="Backups, Drive e configurações do sistema." breadcrumb={<Breadcrumb atual="Admin" onVoltar={onVoltar} />} /><div className="admin-tabs">{[['backups','💾 Backups'],['drive','☁️ Drive'],['sistema','⚙️ Sistema'],['categorias','🏷️ Categorias']].map(([id,label]) => <button key={id} className={aba === id ? 'active' : ''} onClick={() => setAba(id)}>{label}</button>)}</div>{aba === 'backups' && <AdminBackups token={token} />}{aba === 'drive' && <section><h3>Google Drive</h3><p>Status: conectado via backend Railway.</p><p><strong>DRIVE_FINANCAS_FOLDER_ID:</strong> configurado no servidor</p><p><strong>DRIVE_BACKUPS_FOLDER_ID:</strong> configurado no servidor</p><Btn variant="primary" onClick={testarDrive}>Testar conexão</Btn>{resultadoDrive && <pre>{JSON.stringify(resultadoDrive, null, 2)}</pre>}</section>}{aba === 'categorias' && <TelaAdminCategorias token={token} />}{aba === 'sistema' && <section><h3>Configurações do Sistema</h3><p>Versão: {import.meta.env.VITE_APP_VERSION || 'frontend-local'}</p><p>Build: {import.meta.env.MODE}</p><p>Usuário: {usuario?.nome || usuario?.email}</p><p>API: {API_URL}</p></section>}</div>;
 }
 
 
@@ -2997,11 +3115,14 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
   const [salvandoConferenciaRapida, setSalvandoConferenciaRapida] = useState(false);
   const [destacarInicioBase, setDestacarInicioBase] = useState(false);
   const [maisAcoesAberto, setMaisAcoesAberto] = useState(false);
+  const [pagina, setPagina] = useState(1);
+  const [limite, setLimite] = useState(50);
+  const [paginacao, setPaginacao] = useState({ total: 0, pagina: 1, limite: 50, totalPaginas: 1 });
   const tabelaRef = useRef(null);
 
   useEffect(() => {
     carregarDados();
-  }, []);
+  }, [pagina, limite, filtros, dataInicial, dataFinal]);
 
   const authHeaders = {
     Authorization: `Bearer ${token}`
@@ -3011,12 +3132,24 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
     setCarregando(true);
 
     try {
+      const params = new URLSearchParams();
+      params.set('pagina', String(pagina));
+      params.set('limite', String(limite));
+      if (filtros.busca) params.set('busca', filtros.busca);
+      if (filtros.conta !== 'todas') params.set('contaId', filtros.conta);
+      if (filtros.categoriaMacro !== 'todas' && filtros.categoriaMacro !== 'sem') params.set('categoriaMacroId', filtros.categoriaMacro);
+      if (filtros.categoriaDetalhada !== 'todas' && filtros.categoriaDetalhada !== 'sem') params.set('categoriaDetalhadaId', filtros.categoriaDetalhada);
+      if (filtros.status !== 'todas') params.set('status', filtros.status);
+      if (filtros.tipo !== 'todos') params.set('tipo', filtros.tipo);
+      if (dataInicial) params.set('dataInicial', dataInicial);
+      if (dataFinal) params.set('dataFinal', dataFinal);
       const [transacoesResponse, categoriasResponse] = await Promise.all([
-        axios.get(`${API_URL}/transacoes`, { headers: authHeaders }),
+        axios.get(`${API_URL}/transacoes?${params.toString()}`, { headers: authHeaders }),
         axios.get(`${API_URL}/categorias`, { headers: authHeaders })
       ]);
 
       setTransacoes(transacoesResponse.data.transacoes || []);
+      setPaginacao(transacoesResponse.data.paginacao || { total: transacoesResponse.data.transacoes?.length || 0, pagina, limite, totalPaginas: 1 });
       const categoriasUnicas = Array.from(
         new Map((categoriasResponse.data.categorias || []).map((categoria) => [
           `${categoria.nome}-${categoria.tipo}-${categoria.nivel || (categoria.categoria_pai_id ? 'DETALHADA' : 'MACRO')}-${categoria.categoria_pai_id || 'raiz'}-${categoria.usuario_id || 'padrao'}`,
@@ -3132,7 +3265,13 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
     tx.eh_transferencia_interna ? 'Transferência interna' : '',
     tx.conciliacao_id ? 'Conciliada' : '',
   ].filter(Boolean).join(' ') || '-';
+  const totalTransacoesPaginacao = Number(paginacao.total || transacoesOrdenadas.length || 0);
+  const inicioPaginacao = totalTransacoesPaginacao === 0 ? 0 : ((Number(paginacao.pagina || pagina) - 1) * Number(paginacao.limite || limite)) + 1;
+  const fimPaginacao = totalTransacoesPaginacao === 0 ? 0 : Math.min(totalTransacoesPaginacao, inicioPaginacao + transacoesOrdenadas.length - 1);
   const contaSelecionadaFiltro = filtros.conta !== 'todas' ? contas.find((conta) => conta.id === filtros.conta) : null;
+  const atualizarFiltroTransacoes = (patch) => { setFiltros((atuais) => ({ ...atuais, ...patch })); setPagina(1); };
+  const alterarDataInicialTransacoes = (valor) => { setDataInicial(valor); setPagina(1); };
+  const alterarDataFinalTransacoes = (valor) => { setDataFinal(valor); setPagina(1); };
   const dataAnteriorISO = (data) => {
     if (!data) return dataLocalISO(new Date());
     const d = new Date(`${normalizarDataFiltro(data)}T00:00:00`);
@@ -3408,6 +3547,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
     setFiltros({ busca: '', conta: 'todas', categoriaMacro: 'todas', categoriaDetalhada: 'todas', status: 'todas', tipo: 'todos' });
     setDataInicial('');
     setDataFinal('');
+    setPagina(1);
   };
 
   const montarLinhasExportacao = (items) => items.map((tx) => [
@@ -3544,14 +3684,14 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
         <PageHeader icone="💸" titulo="Transações consolidadas" descricao="Todas as contas em uma única visão" breadcrumb={<Breadcrumb atual="Transações Consolidadas" onVoltar={onVoltar} />} />
         <div className="filter-card">
           <div className="filter-grid">
-            <label>Pesquisar descrição<input value={filtros.busca} onChange={(event) => setFiltros({ ...filtros, busca: event.target.value })} placeholder="Ex.: AUTO POSTO" /></label>
-            <label>Conta<select value={filtros.conta} onChange={(event) => setFiltros({ ...filtros, conta: event.target.value })}><option value="todas">Todas as contas</option>{contas.map((item) => <option key={item.id} value={item.id}>{item.nome}</option>)}</select></label>
-            <label>Categoria macro<select value={filtros.categoriaMacro} onChange={(event) => setFiltros({ ...filtros, categoriaMacro: event.target.value, categoriaDetalhada: 'todas' })}><option value="todas">Todas</option><option value="sem">Sem categoria</option>{categoriasMacro.map((cat) => <option key={cat.id} value={cat.id}>{cat.emoji} {cat.nome}</option>)}</select></label>
-            <label>Categoria detalhada<select value={filtros.categoriaDetalhada} onChange={(event) => setFiltros({ ...filtros, categoriaDetalhada: event.target.value })}><option value="todas">Todas</option><option value="sem">Sem detalhamento</option>{categoriasDetalhadasFiltro.map((cat) => <option key={cat.id} value={cat.id}>{cat.emoji} {cat.nome}</option>)}</select></label>
-            <label>Status<select value={filtros.status} onChange={(event) => setFiltros({ ...filtros, status: event.target.value })}><option value="todas">Todas</option><option value="sem">Sem categoria</option><option value="categorizadas">Categorizadas</option></select></label>
-            <label>Tipo<select value={filtros.tipo} onChange={(event) => setFiltros({ ...filtros, tipo: event.target.value })}><option value="todos">Todos</option><option value="CREDITO">Crédito</option><option value="DEBITO">Débito</option></select></label>
-            <label>Data inicial<input type="date" value={dataInicial} onChange={(event) => setDataInicial(event.target.value)} /></label>
-            <label>Data final<input type="date" value={dataFinal} onChange={(event) => setDataFinal(event.target.value)} /></label>
+            <label>Pesquisar descrição<input value={filtros.busca} onChange={(event) => atualizarFiltroTransacoes({ busca: event.target.value })} placeholder="Ex.: AUTO POSTO" /></label>
+            <label>Conta<select value={filtros.conta} onChange={(event) => atualizarFiltroTransacoes({ conta: event.target.value })}><option value="todas">Todas as contas</option>{contas.map((item) => <option key={item.id} value={item.id}>{item.nome}</option>)}</select></label>
+            <label>Categoria macro<select value={filtros.categoriaMacro} onChange={(event) => atualizarFiltroTransacoes({ categoriaMacro: event.target.value, categoriaDetalhada: 'todas' })}><option value="todas">Todas</option><option value="sem">Sem categoria</option>{categoriasMacro.map((cat) => <option key={cat.id} value={cat.id}>{cat.emoji} {cat.nome}</option>)}</select></label>
+            <label>Categoria detalhada<select value={filtros.categoriaDetalhada} onChange={(event) => atualizarFiltroTransacoes({ categoriaDetalhada: event.target.value })}><option value="todas">Todas</option><option value="sem">Sem detalhamento</option>{categoriasDetalhadasFiltro.map((cat) => <option key={cat.id} value={cat.id}>{cat.emoji} {cat.nome}</option>)}</select></label>
+            <label>Status<select value={filtros.status} onChange={(event) => atualizarFiltroTransacoes({ status: event.target.value })}><option value="todas">Todas</option><option value="sem">Sem categoria</option><option value="categorizadas">Categorizadas</option></select></label>
+            <label>Tipo<select value={filtros.tipo} onChange={(event) => atualizarFiltroTransacoes({ tipo: event.target.value })}><option value="todos">Todos</option><option value="CREDITO">Crédito</option><option value="DEBITO">Débito</option></select></label>
+            <label>Data inicial<input type="date" value={dataInicial} onChange={(event) => alterarDataInicialTransacoes(event.target.value)} /></label>
+            <label>Data final<input type="date" value={dataFinal} onChange={(event) => alterarDataFinalTransacoes(event.target.value)} /></label>
           </div>
 
           <div className="transactions-actions">
@@ -3574,8 +3714,11 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
             </div>
           </div>
 
-          <div style={{ marginTop: '14px' }}>
-            <span style={{ color: '#4b5563', fontSize: '14px' }}>{transacoesOrdenadas.length} transação(ões) filtrada(s) • {selecionadas.length} selecionada(s)</span>
+          <div style={{ marginTop: '14px', display: 'flex', justifyContent: 'space-between', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
+            <span style={{ color: '#4b5563', fontSize: '14px' }}>Mostrando {inicioPaginacao}–{fimPaginacao} de {totalTransacoesPaginacao.toLocaleString('pt-BR')} transações • {selecionadas.length} selecionada(s)</span>
+            <select value={limite} onChange={(e) => { setLimite(Number(e.target.value)); setPagina(1); }} style={{ padding: '6px 10px', borderRadius: '8px', border: '1px solid #d1d5db', fontSize: '13px' }}>
+              {OPCOES_LIMITE_TRANSACOES.map((n) => <option key={n} value={n}>{n} por página</option>)}
+            </select>
           </div>
         </div>
 
@@ -3697,6 +3840,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
             </table>
           </div>
         )}
+        <Paginacao pagina={Number(paginacao.pagina || pagina)} totalPaginas={Number(paginacao.totalPaginas || 1)} onMudar={setPagina} />
       </div>
 
       {modalConferenciaRapidaAberto && contaSelecionadaFiltro && resumoBase && (
