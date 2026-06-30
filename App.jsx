@@ -21,6 +21,29 @@ function pedirConfirmacao(titulo, mensagem, onConfirmar, opcoes = {}) {
   }
 }
 
+
+function Btn({ variant = 'secondary', size = 'md', className = '', style = {}, children, ...props }) {
+  return <button className={`btn btn-${variant} btn-${size} ${className}`.trim()} style={style} {...props}>{children}</button>;
+}
+
+function PageHeader({ icone, titulo, descricao, breadcrumb, action }) {
+  return (
+    <div className="page-header">
+      {breadcrumb && <div className="page-header-breadcrumb">{breadcrumb}</div>}
+      <div className="page-header-main">
+        <div className="page-header-title-row">
+          {icone && <span className="page-header-icon">{icone}</span>}
+          <div>
+            <h1>{titulo}</h1>
+            {descricao && <p>{descricao}</p>}
+          </div>
+        </div>
+        {action && <div className="page-header-action">{action}</div>}
+      </div>
+    </div>
+  );
+}
+
 function Spinner({ texto = 'Carregando...' }) {
   return <div className="loading-spinner-wrap"><span className="loading-spinner" />{texto && <span>{texto}</span>}</div>;
 }
@@ -1280,16 +1303,16 @@ function ImportarExcel({ contas, token, onConcluida }) {
 
       <div style={{ marginTop: '18px', display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
         {!preview ? (
-          <button onClick={gerarPreview} disabled={!validacao?.valido || carregando} style={{ background: '#2563eb', color: 'white', border: 'none', padding: '12px 18px', borderRadius: '8px', cursor: validacao?.valido ? 'pointer' : 'not-allowed', opacity: validacao?.valido ? 1 : 0.6 }}>Gerar preview</button>
+          <Btn variant="primary" onClick={gerarPreview} disabled={!validacao?.valido || carregando}>Gerar preview</Btn>
         ) : (
           <>
-            <button onClick={() => confirmarImportacao('CANCELAR')} disabled={carregando} style={{ background: '#e5e7eb', border: 'none', padding: '12px 18px', borderRadius: '8px', cursor: 'pointer' }}>Cancelar</button>
-            <button onClick={() => confirmarImportacao('IMPORTAR_APENAS_NOVAS')} disabled={confirmacaoBloqueada || !resumo.novas} style={{ background: '#10b981', color: 'white', border: 'none', padding: '12px 18px', borderRadius: '8px', cursor: (!confirmacaoBloqueada && resumo.novas) ? 'pointer' : 'not-allowed', opacity: (!confirmacaoBloqueada && resumo.novas) ? 1 : 0.6 }}>Importar somente novas</button>
-            <button onClick={() => confirmarImportacao('ATUALIZAR_EXISTENTES')} disabled={confirmacaoBloqueada || !resumo.comAlteracao} style={{ background: '#f59e0b', color: 'white', border: 'none', padding: '12px 18px', borderRadius: '8px', cursor: (!confirmacaoBloqueada && resumo.comAlteracao) ? 'pointer' : 'not-allowed', opacity: (!confirmacaoBloqueada && resumo.comAlteracao) ? 1 : 0.6 }}>Atualizar existentes</button>
-            <button onClick={() => confirmarImportacao('IMPORTAR_NOVAS_E_ATUALIZAR_EXISTENTES')} disabled={confirmacaoBloqueada || (!resumo.novas && !resumo.comAlteracao)} style={{ background: '#7c3aed', color: 'white', border: 'none', padding: '12px 18px', borderRadius: '8px', cursor: (!confirmacaoBloqueada && (resumo.novas || resumo.comAlteracao)) ? 'pointer' : 'not-allowed', opacity: (!confirmacaoBloqueada && (resumo.novas || resumo.comAlteracao)) ? 1 : 0.6 }}>Importar novas e atualizar existentes</button>
+            <Btn variant="secondary" onClick={() => confirmarImportacao('CANCELAR')} disabled={carregando}>Cancelar</Btn>
+            <Btn variant="primary" onClick={() => confirmarImportacao('IMPORTAR_APENAS_NOVAS')} disabled={confirmacaoBloqueada || !resumo.novas}>Importar somente novas</Btn>
+            <Btn variant="secondary" onClick={() => confirmarImportacao('ATUALIZAR_EXISTENTES')} disabled={confirmacaoBloqueada || !resumo.comAlteracao}>Atualizar existentes</Btn>
+            <Btn variant="primary" onClick={() => confirmarImportacao('IMPORTAR_NOVAS_E_ATUALIZAR_EXISTENTES')} disabled={confirmacaoBloqueada || (!resumo.novas && !resumo.comAlteracao)}>Importar novas e atualizar existentes</Btn>
           </>
         )}
-        <button onClick={limpar} style={{ background: '#e5e7eb', border: 'none', padding: '12px 18px', borderRadius: '8px', cursor: 'pointer' }}>LIMPAR</button>
+        <Btn variant="ghost" onClick={limpar}>Limpar</Btn>
       </div>
 
       {modalErrosAberto && validacao?.erros?.length > 0 && (
@@ -1411,14 +1434,14 @@ function Login() {
 }
 
 
-function KpiCard({ titulo, valor, detalhe, cor = '#2563eb', fundo = 'white' }) {
-  const icone = titulo.toLowerCase().includes('receita') ? '📈' : titulo.toLowerCase().includes('despesa') ? '📉' : titulo.toLowerCase().includes('saldo') ? '💰' : titulo.toLowerCase().includes('planej') || titulo.toLowerCase().includes('provis') ? '📌' : '📊';
+function KpiCard({ titulo, valor, detalhe, cor = '#0f172a', fundo = 'white', icone }) {
+  const iconeDecorativo = icone || (titulo.toLowerCase().includes('receita') ? '📈' : titulo.toLowerCase().includes('despesa') ? '📉' : titulo.toLowerCase().includes('saldo') ? '💰' : titulo.toLowerCase().includes('planej') || titulo.toLowerCase().includes('provis') ? '📌' : '📊');
   return (
-    <div className="kpi-card" style={{ background: fundo, borderRadius: '14px', padding: '18px', boxShadow: '0 2px 10px rgba(15,23,42,0.08)', border: '1px solid #eef2f7' }}>
-      <span className="kpi-icon">{icone}</span>
-      <p style={{ margin: '0 0 8px', color: '#64748b', fontSize: '13px', fontWeight: 600 }}>{titulo}</p>
-      <p style={{ margin: 0, color: cor, fontSize: '24px', fontWeight: 800 }}>{valor}</p>
-      {detalhe && <p style={{ margin: '8px 0 0', color: '#94a3b8', fontSize: '12px' }}>{detalhe}</p>}
+    <div className="kpi-card" style={{ background: fundo, borderRadius: '12px', padding: '16px 18px', boxShadow: '0 1px 3px rgba(0,0,0,0.07)', border: '1px solid #f1f5f9', position: 'relative', overflow: 'hidden' }}>
+      {iconeDecorativo && <span className="kpi-icon">{iconeDecorativo}</span>}
+      <p style={{ margin: '0 0 6px', paddingRight: '26px', color: '#64748b', fontSize: '12px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px' }}>{titulo}</p>
+      <p style={{ margin: '0 0 4px', color: cor, fontSize: '22px', fontWeight: 700 }}>{valor}</p>
+      {detalhe && <p style={{ margin: 0, color: '#94a3b8', fontSize: '11px' }}>{detalhe}</p>}
     </div>
   );
 }
@@ -1653,10 +1676,8 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
   return (
     <div style={{ minHeight: '100vh', background: '#f5f5f5', padding: '20px' }}>
       <div style={{ maxWidth: '1200px', margin: '0 auto' }}>
-        <Breadcrumb atual="Planejamento Mensal" onVoltar={onVoltar} />
+        <PageHeader icone="🗓️" titulo="Planejamento Mensal" descricao="Planeje seus gastos antes do mês acontecer." breadcrumb={<Breadcrumb atual="Planejamento Mensal" onVoltar={onVoltar} />} />
         <div style={{ background: 'white', borderRadius: '16px', padding: '22px', boxShadow: '0 2px 10px rgba(15,23,42,0.08)', marginBottom: '18px' }}>
-          <h1 style={{ margin: '0 0 8px' }}>🗓️ Planejamento Mensal</h1>
-          <p style={{ color: '#64748b', marginTop: 0 }}>Planeje seus gastos antes do mês acontecer. Cadastre despesas únicas, recorrentes e parceladas para entender seus compromissos financeiros futuros.</p>
           <p style={{ color: '#64748b', marginTop: 0 }}>Esta tela é de orçamento e previsão: planejamento não é conciliação com transações individuais.</p>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '12px', margin: '18px 0' }}>
             <label>Mês<select value={mes} onChange={(e) => setMes(Number(e.target.value))} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}>{Array.from({ length: 12 }, (_, i) => <option key={i + 1} value={i + 1}>{i + 1}</option>)}</select></label>
@@ -1669,7 +1690,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
               <label>Recorrência<select value={filtrosPlanejamento.recorrencia} onChange={(e) => setFiltrosPlanejamento({ ...filtrosPlanejamento, recorrencia: e.target.value })} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}><option value="TODAS">Todas</option><option value="UNICA">Únicas</option><option value="MENSAL">Mensais recorrentes</option><option value="PARCELADA">Parceladas</option></select></label>
               <label>Categoria<select value={filtrosPlanejamento.categoria} onChange={(e) => setFiltrosPlanejamento({ ...filtrosPlanejamento, categoria: e.target.value })} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}><option value="">Todas as categorias</option>{categoriasFiltro.map((cat) => <option key={cat.valor} value={cat.valor}>{cat.label || 'Sem categoria'}</option>)}</select></label>
               <label>Período dos gráficos<select value={filtrosPlanejamento.periodo} onChange={(e) => setFiltrosPlanejamento({ ...filtrosPlanejamento, periodo: Number(e.target.value) })} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}>{opcoesPeriodoGraficos.map((qtd) => <option key={qtd} value={qtd}>Próximos {qtd} meses</option>)}</select></label>
-              <button onClick={limparFiltrosPlanejamento} style={{ background: '#e5e7eb', border: 'none', padding: '11px 14px', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold' }}>Limpar filtros</button>
+              <Btn variant="ghost" size="sm" onClick={limparFiltrosPlanejamento}>Limpar filtros</Btn>
             </div>
           </div>
           <h2 style={{ margin: '18px 0 12px' }}>Resumo planejado de {rotuloMesAnoSelecionado}</h2>
@@ -1783,7 +1804,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
         </div>
 
         <div style={{ marginBottom: '14px' }}>
-          <button onClick={() => setFormularioAberto(true)} style={{ background: '#2563eb', color: 'white', border: 'none', padding: '12px 16px', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold' }}>+ Adicionar despesa planejada</button>
+          <Btn variant="primary" onClick={() => setFormularioAberto(true)}>+ Adicionar despesa planejada</Btn>
         </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: formularioAberto ? 'repeat(auto-fit, minmax(320px, 1fr))' : '1fr', gap: '18px' }}>
@@ -1821,7 +1842,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
               <label>Dia previsto de pagamento<input type="number" min="1" max="31" value={form.dia_previsto} onChange={(e) => setForm({ ...form, dia_previsto: e.target.value })} placeholder="5" style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} /></label>
             </div>
             <label>Observação<textarea value={form.observacao} onChange={(e) => setForm({ ...form, observacao: e.target.value })} rows="3" placeholder="Detalhes opcionais" style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} /></label>
-            <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}><button type="submit" style={{ background: '#2563eb', color: 'white', border: 'none', padding: '10px 14px', borderRadius: '8px', cursor: 'pointer' }}>{editandoId ? 'Salvar alterações' : 'Adicionar despesa'}</button><button type="button" onClick={limparFormulario} style={{ background: '#e5e7eb', border: 'none', padding: '10px 14px', borderRadius: '8px', cursor: 'pointer' }}>Limpar formulário</button></div>
+            <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}><Btn type="submit" variant="primary">{editandoId ? 'Salvar alterações' : 'Adicionar despesa'}</Btn><Btn type="button" variant="secondary" onClick={limparFormulario}>Limpar formulário</Btn></div>
           </form>}
 
           <div style={{ background: 'white', borderRadius: '14px', padding: '18px', overflowX: 'auto' }}>
@@ -1829,7 +1850,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
             {carregando ? <Spinner texto="Carregando..." /> : planejamentos.length === 0 ? <p style={{ color: '#64748b' }}>Nenhuma despesa planejada para este mês.</p> : (
               <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '760px' }}>
                 <thead style={{ background: '#f8fafc' }}><tr>{['Descrição','Categoria','Tipo','Recorrência','Valor previsto','Dia previsto','Observação','Ações'].map((h) => <th key={h} style={{ padding: '10px', textAlign: 'left' }}>{h}</th>)}</tr></thead>
-                <tbody>{planejamentos.map((item) => <tr key={item.id} style={{ borderTop: '1px solid #e5e7eb' }}><td style={{ padding: '10px' }}>{item.descricao}</td><td style={{ padding: '10px' }}>{item.categoria || '-'}</td><td style={{ padding: '10px' }}>{item.tipo_despesa === 'FIXA' ? 'Fixa' : 'Variável'}</td><td style={{ padding: '10px' }}>{rotuloRecorrencia(item)}</td><td style={{ padding: '10px' }}>{formatarMoeda(item.valor_previsto)}</td><td style={{ padding: '10px' }}>{item.dia_previsto || '-'}</td><td style={{ padding: '10px' }}>{item.observacao || '-'}</td><td style={{ padding: '10px', display: 'flex', gap: '6px' }}><button onClick={() => editarPlanejamento(item)} style={{ padding: '6px 8px', borderRadius: '6px', border: '1px solid #2563eb', color: '#2563eb', background: 'white', cursor: 'pointer' }}>Editar</button><button onClick={() => excluirPlanejamento(item)} style={{ padding: '6px 8px', borderRadius: '6px', border: '1px solid #dc2626', color: '#dc2626', background: 'white', cursor: 'pointer' }}>Excluir</button></td></tr>)}</tbody>
+                <tbody>{planejamentos.map((item) => <tr key={item.id} style={{ borderTop: '1px solid #e5e7eb' }}><td style={{ padding: '10px' }}>{item.descricao}</td><td style={{ padding: '10px' }}>{item.categoria || '-'}</td><td style={{ padding: '10px' }}>{item.tipo_despesa === 'FIXA' ? 'Fixa' : 'Variável'}</td><td style={{ padding: '10px' }}>{rotuloRecorrencia(item)}</td><td style={{ padding: '10px' }}>{formatarMoeda(item.valor_previsto)}</td><td style={{ padding: '10px' }}>{item.dia_previsto || '-'}</td><td style={{ padding: '10px' }}>{item.observacao || '-'}</td><td style={{ padding: '10px', display: 'flex', gap: '6px' }}><Btn variant="secondary" size="sm" onClick={() => editarPlanejamento(item)}>Editar</Btn><Btn variant="danger" size="sm" onClick={() => excluirPlanejamento(item)}>Excluir</Btn></td></tr>)}</tbody>
               </table>
             )}
           </div>
@@ -1863,6 +1884,19 @@ function AppStyles() {
     .avatar-menu { position: relative; } .avatar-button { display:flex; align-items:center; gap:8px; border:1px solid #e2e8f0; background:white; border-radius:999px; padding:5px 10px 5px 5px; cursor:pointer; }
     .avatar-dropdown { position:absolute; right:0; top:46px; width:220px; background:white; border:1px solid #e2e8f0; border-radius:12px; box-shadow:0 12px 28px rgba(15,23,42,.16); padding:14px; display:grid; gap:8px; z-index:30; }
     .avatar-dropdown small { color:#64748b; } .avatar-dropdown button { color:#ef4444; background:#fff1f2; border:0; padding:8px; border-radius:8px; cursor:pointer; }
+    .btn { border-radius:8px; font-weight:600; cursor:pointer; transition: background .15s, border-color .15s, color .15s; display:inline-flex; align-items:center; justify-content:center; gap:6px; }
+    .btn:disabled { opacity:.55; cursor:not-allowed; }
+    .btn-sm { padding:6px 12px; font-size:13px; }
+    .btn-md { padding:10px 18px; font-size:14px; }
+    .btn-lg { padding:12px 24px; font-size:15px; }
+    .btn-primary { background:#3b82f6; color:white; border:1px solid #3b82f6; }
+    .btn-primary:hover:not(:disabled) { background:#2563eb; border-color:#2563eb; }
+    .btn-secondary { background:white; color:#374151; border:1px solid #d1d5db; }
+    .btn-secondary:hover:not(:disabled) { background:#f9fafb; }
+    .btn-danger { background:white; color:#ef4444; border:1px solid #ef4444; }
+    .btn-danger:hover:not(:disabled) { background:#fef2f2; }
+    .btn-ghost { background:transparent; color:#6b7280; border:1px solid transparent; }
+    .btn-ghost:hover:not(:disabled) { background:#f8fafc; text-decoration:underline; }
     .primary-button { background:#3b82f6; color:white; border:0; border-radius:8px; padding:10px 16px; cursor:pointer; font-weight:700; }
     .btn-secondary { background:white; border:1px solid #e2e8f0; border-radius:8px; padding:10px 14px; cursor:pointer; }
     .btn-confirm { color:white; border:0; border-radius:8px; padding:10px 14px; cursor:pointer; font-weight:700; }
@@ -1873,10 +1907,24 @@ function AppStyles() {
     .modal-overlay { position: fixed; inset:0; background:rgba(0,0,0,.6); display:flex; align-items:center; justify-content:center; z-index:90; padding:20px; }
     .modal-card { background:white; border-radius:12px; max-width:420px; width:100%; padding:22px; box-shadow:0 22px 60px rgba(0,0,0,.28); } .modal-card p { color:#64748b; white-space:pre-line; } .modal-actions { display:flex; justify-content:flex-end; gap:10px; }
     .breadcrumb { display:flex; gap:8px; align-items:center; font-size:13px; color:#64748b; margin-bottom:16px; } .breadcrumb button { border:0; background:transparent; padding:0; color:#3b82f6; cursor:pointer; } .breadcrumb strong { color:#0f172a; }
-    .admin-tabs { display:flex; gap:16px; border-bottom:1px solid #e2e8f0; margin-bottom:18px; } .admin-tabs button { border:0; background:transparent; padding:12px 4px; cursor:pointer; color:#64748b; } .admin-tabs button.active { color:#0f172a; border-bottom:3px solid #3b82f6; font-weight:700; }
+    .admin-tabs { display:flex; gap:16px; border-bottom:1px solid #e2e8f0; margin-bottom:18px; }
+    .admin-tabs button { border:0; border-bottom:2px solid transparent; background:transparent; padding:12px 4px; cursor:pointer; color:#64748b; font-weight:400; }
+    .admin-tabs button:hover { color:#374151; border-bottom-color:#e2e8f0; }
+    .admin-tabs button.active { color:#0f172a; border-bottom-color:#3b82f6; font-weight:700; }
     .loading-spinner-wrap { display:flex; align-items:center; gap:10px; color:#64748b; padding:12px; } .loading-spinner { width:18px; height:18px; border:3px solid #e2e8f0; border-top-color:#3b82f6; border-radius:50%; animation: spin .8s linear infinite; } @keyframes spin { to { transform: rotate(360deg); } }
     tbody tr:hover { background:#f8fafc; }
-    .kpi-card { position: relative; overflow: hidden; } .kpi-icon { position:absolute; right:14px; top:12px; opacity:.8; }
+    .page-header { background:#1e293b; border-radius:12px; padding:24px 28px; margin-bottom:24px; }
+    .page-header-breadcrumb { font-size:12px; color:#94a3b8; margin-bottom:12px; } .page-header-breadcrumb .breadcrumb { margin:0; color:#94a3b8; } .page-header-breadcrumb .breadcrumb strong { color:#f8fafc; }
+    .page-header-main { display:flex; justify-content:space-between; gap:16px; align-items:center; flex-wrap:wrap; } .page-header-title-row { display:flex; align-items:center; gap:12px; } .page-header-icon { font-size:28px; }
+    .page-header h1 { margin:0; font-size:22px; font-weight:700; color:#f8fafc; } .page-header p { margin:4px 0 0; font-size:13px; color:#94a3b8; }
+    .filter-card { background:white; border-radius:12px; padding:20px; margin-bottom:20px; border:1px solid #e2e8f0; box-shadow:0 1px 3px rgba(0,0,0,.05); }
+    .filter-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:14px; align-items:end; }
+    .filter-card label { font-size:12px; font-weight:600; color:#64748b; display:grid; gap:6px; }
+    .filter-card input, .filter-card select, .filter-card textarea { width:100%; box-sizing:border-box; padding:10px 12px; border:1px solid #d1d5db; border-radius:8px; font-size:14px; color:#0f172a; background:white; }
+    .filter-card input:focus, .filter-card select:focus, .filter-card textarea:focus { outline:2px solid #3b82f6; outline-offset:0; border-color:#3b82f6; }
+    .transactions-actions { display:flex; justify-content:space-between; gap:12px; align-items:center; flex-wrap:wrap; margin-top:14px; }
+    .more-actions { position:relative; display:inline-flex; } .more-actions-menu { position:absolute; right:0; top:38px; background:white; border:1px solid #e2e8f0; border-radius:10px; box-shadow:0 12px 28px rgba(15,23,42,.16); padding:8px; display:grid; gap:4px; min-width:240px; z-index:10; }
+    .kpi-card { position: relative; overflow: hidden; } .kpi-icon { position:absolute; right:14px; top:14px; font-size:18px; opacity:.5; user-select:none; }
     @media (max-width: 767px) { .sidebar { width:60px; } .sidebar-label, .sidebar-brand strong { display:none; } .app-content { margin-left:60px; width:calc(100% - 60px); } .page-container { padding:12px; } }
   `}</style>;
 }
@@ -1925,7 +1973,7 @@ function TelaAdmin({ token, usuario, onVoltar }) {
       mostrarToast('Erro ao testar conexão com Drive: ' + (error.response?.data?.erro || error.message), 'erro');
     }
   };
-  return <div className="content-card admin-screen"><Breadcrumb atual="Admin" onVoltar={onVoltar} /><h2>⚙️ Administração</h2><div className="admin-tabs">{[['backups','💾 Backups'],['drive','☁️ Drive'],['sistema','⚙️ Sistema']].map(([id,label]) => <button key={id} className={aba === id ? 'active' : ''} onClick={() => setAba(id)}>{label}</button>)}</div>{aba === 'backups' && <AdminBackups token={token} />}{aba === 'drive' && <section><h3>Google Drive</h3><p>Status: conectado via backend Railway.</p><p><strong>DRIVE_FINANCAS_FOLDER_ID:</strong> configurado no servidor</p><p><strong>DRIVE_BACKUPS_FOLDER_ID:</strong> configurado no servidor</p><button className="primary-button" onClick={testarDrive}>Testar conexão</button>{resultadoDrive && <pre>{JSON.stringify(resultadoDrive, null, 2)}</pre>}</section>}{aba === 'sistema' && <section><h3>Configurações do Sistema</h3><p>Versão: {import.meta.env.VITE_APP_VERSION || 'frontend-local'}</p><p>Build: {import.meta.env.MODE}</p><p>Usuário: {usuario?.nome || usuario?.email}</p><p>API: {API_URL}</p></section>}</div>;
+  return <div className="content-card admin-screen"><PageHeader icone="⚙️" titulo="Administração" descricao="Backups, Drive e configurações do sistema." breadcrumb={<Breadcrumb atual="Admin" onVoltar={onVoltar} />} /><div className="admin-tabs">{[['backups','💾 Backups'],['drive','☁️ Drive'],['sistema','⚙️ Sistema']].map(([id,label]) => <button key={id} className={aba === id ? 'active' : ''} onClick={() => setAba(id)}>{label}</button>)}</div>{aba === 'backups' && <AdminBackups token={token} />}{aba === 'drive' && <section><h3>Google Drive</h3><p>Status: conectado via backend Railway.</p><p><strong>DRIVE_FINANCAS_FOLDER_ID:</strong> configurado no servidor</p><p><strong>DRIVE_BACKUPS_FOLDER_ID:</strong> configurado no servidor</p><Btn variant="primary" onClick={testarDrive}>Testar conexão</Btn>{resultadoDrive && <pre>{JSON.stringify(resultadoDrive, null, 2)}</pre>}</section>}{aba === 'sistema' && <section><h3>Configurações do Sistema</h3><p>Versão: {import.meta.env.VITE_APP_VERSION || 'frontend-local'}</p><p>Build: {import.meta.env.MODE}</p><p>Usuário: {usuario?.nome || usuario?.email}</p><p>API: {API_URL}</p></section>}</div>;
 }
 
 
@@ -2110,33 +2158,12 @@ function Dashboard({ usuario, token, onLogout }) {
                   Clique abaixo para importar uma planilha XLSX padronizada.
                 </p>
 
-                <button
-                  onClick={() => setModo('importar')}
-                  style={{
-                    background: '#667eea',
-                    color: 'white',
-                    border: 'none',
-                    padding: '12px 24px',
-                    borderRadius: '8px',
-                    fontSize: '16px',
-                    cursor: 'pointer'
-                  }}
-                >
-                  📊 Importar XLSX
-                </button>
+                <Btn variant="primary" size="lg" onClick={() => setModo('importar')}>📊 Importar XLSX</Btn>
               </div>
             ) : (
               <div>
+                <PageHeader icone="📊" titulo="Dashboard financeiro" descricao={`Visão executiva entre ${formatarData(periodoDashboard.dataInicial)} e ${formatarData(periodoDashboard.dataFinal)}`} action={<Btn variant="primary" onClick={() => setModo('importar')}>📊 Importar XLSX</Btn>} />
                 <div style={{ background: 'white', borderRadius: '16px', padding: '20px', boxShadow: '0 2px 10px rgba(15,23,42,0.08)', marginBottom: '20px' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: '16px', alignItems: 'flex-start', flexWrap: 'wrap', marginBottom: '16px' }}>
-                    <div>
-                      <h2 style={{ margin: '0 0 6px' }}>Dashboard financeiro</h2>
-                      <p style={{ margin: 0, color: '#64748b' }}>Visão executiva entre {formatarData(periodoDashboard.dataInicial)} e {formatarData(periodoDashboard.dataFinal)}.</p>
-                    </div>
-                    <div className="dashboard-actions" style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
-                      <button onClick={() => setModo('importar')} className="primary-button">📊 Importar XLSX</button>
-                    </div>
-                  </div>
 
                   {contasSemConferenciaRecente.length > 0 && (
                     <div style={{ background: '#fffbeb', border: '1px solid #fde68a', color: '#92400e', borderRadius: '10px', padding: '12px', marginBottom: '14px', display: 'flex', justifyContent: 'space-between', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
@@ -2186,23 +2213,23 @@ function Dashboard({ usuario, token, onLogout }) {
                 </div>
 
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '14px', marginBottom: '20px' }}>
-                  <KpiCard titulo="Receitas no período" valor={formatarMoeda(kpisDashboard.receitas)} detalhe="Entradas confirmadas" cor="#059669" />
-                  <KpiCard titulo="Despesas no período" valor={formatarMoeda(kpisDashboard.despesas)} detalhe="Saídas registradas" cor="#dc2626" />
-                  <KpiCard titulo="Saldo líquido" valor={formatarMoeda(saldoLiquido)} detalhe="Receitas - despesas" cor={saldoLiquido >= 0 ? '#059669' : '#dc2626'} />
-                  <KpiCard titulo="Transações" valor={Number(kpisDashboard.quantidadeTransacoes || 0)} detalhe="No período" cor="#2563eb" />
-                  <KpiCard titulo="Ticket médio despesa" valor={formatarMoeda(kpisDashboard.ticketMedioDespesa)} detalhe="Média dos débitos" cor="#7c3aed" />
-                  <KpiCard titulo="Categorizado" valor={formatarPercentual(kpisDashboard.percentualCategorizado)} detalhe="Transações com categoria" cor="#0f766e" />
-                  <KpiCard titulo="Transferências internas" valor={Number(kpisDashboard.transferenciasInternas || 0)} detalhe="Não entram nos KPIs financeiros" cor="#0f766e" />
+                  <KpiCard icone="📈" titulo="Receitas no período" valor={formatarMoeda(kpisDashboard.receitas)} detalhe="Entradas confirmadas" cor="#059669" />
+                  <KpiCard icone="📉" titulo="Despesas no período" valor={formatarMoeda(kpisDashboard.despesas)} detalhe="Saídas registradas" cor="#dc2626" />
+                  <KpiCard icone="💰" titulo="Saldo líquido" valor={formatarMoeda(saldoLiquido)} detalhe="Receitas - despesas" cor={saldoLiquido >= 0 ? '#059669' : '#dc2626'} />
+                  <KpiCard icone="🔢" titulo="Transações" valor={Number(kpisDashboard.quantidadeTransacoes || 0)} detalhe="No período" cor="#2563eb" />
+                  <KpiCard icone="🎫" titulo="Ticket médio despesa" valor={formatarMoeda(kpisDashboard.ticketMedioDespesa)} detalhe="Média dos débitos" cor="#7c3aed" />
+                  <KpiCard icone="🏷️" titulo="Categorizado" valor={formatarPercentual(kpisDashboard.percentualCategorizado)} detalhe="Transações com categoria" cor="#0f766e" />
+                  <KpiCard icone="↔️" titulo="Transferências internas" valor={Number(kpisDashboard.transferenciasInternas || 0)} detalhe="Não entram nos KPIs financeiros" cor="#0f766e" />
                 </div>
 
                 <div style={{ background: 'white', borderRadius: '14px', padding: '16px', marginBottom: '20px' }}>
                   <h3 style={{ marginTop: 0 }}>Contas previstas no período</h3>
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '12px' }}>
-                    <KpiCard titulo="Provisionado a pagar" valor={formatarMoeda(provisoesDashboard.totalProvisionadoPagar)} detalhe="Débitos previstos" cor="#dc2626" fundo="#fef2f2" />
-                    <KpiCard titulo="Provisionado a receber" valor={formatarMoeda(provisoesDashboard.totalProvisionadoReceber)} detalhe="Créditos previstos" cor="#059669" fundo="#ecfdf5" />
-                    <KpiCard titulo="Realizado conciliado" valor={formatarMoeda(provisoesDashboard.totalRealizadoConciliado)} detalhe="Transações vinculadas" cor="#2563eb" fundo="#eff6ff" />
-                    <KpiCard titulo="Provisões pendentes" valor={Number(provisoesDashboard.pendentes || 0)} detalhe="Aguardando conciliação" cor="#d97706" fundo="#fffbeb" />
-                    <KpiCard titulo="Provisões conciliadas" valor={Number(provisoesDashboard.conciliadas || 0)} detalhe={`${formatarPercentual(provisoesDashboard.percentualConciliado)} do total`} cor="#0f766e" fundo="#f0fdfa" />
+                    <KpiCard icone="📤" titulo="Provisionado a pagar" valor={formatarMoeda(provisoesDashboard.totalProvisionadoPagar)} detalhe="Débitos previstos" cor="#dc2626" fundo="#fef2f2" />
+                    <KpiCard icone="📥" titulo="Provisionado a receber" valor={formatarMoeda(provisoesDashboard.totalProvisionadoReceber)} detalhe="Créditos previstos" cor="#059669" fundo="#ecfdf5" />
+                    <KpiCard icone="✅" titulo="Realizado conciliado" valor={formatarMoeda(provisoesDashboard.totalRealizadoConciliado)} detalhe="Transações vinculadas" cor="#2563eb" fundo="#eff6ff" />
+                    <KpiCard icone="⏳" titulo="Provisões pendentes" valor={Number(provisoesDashboard.pendentes || 0)} detalhe="Aguardando conciliação" cor="#d97706" fundo="#fffbeb" />
+                    <KpiCard icone="🔗" titulo="Provisões conciliadas" valor={Number(provisoesDashboard.conciliadas || 0)} detalhe={`${formatarPercentual(provisoesDashboard.percentualConciliado)} do total`} cor="#0f766e" fundo="#f0fdfa" />
                     <KpiCard titulo="Provisões atrasadas" valor={Number(provisoesDashboard.atrasadas || 0)} detalhe="Status atrasada" cor="#b91c1c" fundo="#fef2f2" />
                   </div>
                 </div>
@@ -2271,19 +2298,7 @@ function Dashboard({ usuario, token, onLogout }) {
                 }}>
                   <h2 style={{ margin: 0 }}>Suas Contas</h2>
 
-                  <button
-                    onClick={() => setModo('importar')}
-                    style={{
-                      background: '#667eea',
-                      color: 'white',
-                      border: 'none',
-                      padding: '10px 16px',
-                      borderRadius: '8px',
-                      cursor: 'pointer'
-                    }}
-                  >
-                    📊 Importar XLSX
-                  </button>
+                  <Btn variant="primary" onClick={() => setModo('importar')}>📊 Importar XLSX</Btn>
                 </div>
 
                 <div style={{
@@ -2559,16 +2574,10 @@ function TelaConferenciaSaldos({ contas = [], token, onVoltar, onAtualizarContas
 
   return (
     <div style={{ minHeight: '100vh', background: '#f8fafc', padding: '20px' }}>
-      <Breadcrumb atual="Conferência de Saldos" onVoltar={onVoltar} />
-      <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'center', flexWrap: 'wrap' }}>
-        <div>
-          <h1 style={{ margin: '14px 0 4px' }}>🏦 Conferência de Saldos Bancários</h1>
-          <p style={{ color: '#64748b', marginTop: 0 }}>Compare o saldo calculado pelo app com o saldo real do banco e veja diagnósticos automáticos de divergência.</p>
-        </div>
-      </div>
+      <PageHeader icone="🏦" titulo="Conferência de Saldos" descricao="Compare o saldo calculado com o saldo real do banco." breadcrumb={<Breadcrumb atual="Conferência de Saldos" onVoltar={onVoltar} />} />
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '14px', marginBottom: '16px' }}>
-        <div style={{ background: 'white', border: '1px solid #e5e7eb', borderRadius: '12px', padding: '14px' }}>
+        <div className="filter-card" style={{ marginBottom: 0 }}>
           <h3 style={{ marginTop: 0 }}>Filtros da conferência</h3>
           <div style={{ display: 'grid', gap: '10px' }}>
             <label>Conta<select value={contaId} onChange={(e) => { setContaId(e.target.value); setCalculo(null); setConferencia(null); setDiagnostico(null); }} style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }}>{contas.map((c) => <option key={c.id} value={c.id}>{c.nome}</option>)}</select></label>
@@ -2576,11 +2585,11 @@ function TelaConferenciaSaldos({ contas = [], token, onVoltar, onAtualizarContas
             <label>Período inicial<input type="date" value={periodoInicial} onChange={(e) => setPeriodoInicial(e.target.value)} disabled style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px', background: '#f8fafc' }} /></label>
             <label>Período final<input type="date" value={periodoFinal} onChange={(e) => setPeriodoFinal(e.target.value)} disabled style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px', background: '#f8fafc' }} /></label>
             <label>Tolerância de diferença<input value={tolerancia} onChange={(e) => setTolerancia(e.target.value)} placeholder="0,01" style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }} /></label>
-            <button onClick={calcularSaldo} disabled={carregando || !contaId} style={{ background: '#2563eb', color: 'white', border: 'none', padding: '10px 14px', borderRadius: '8px', cursor: 'pointer' }}>Calcular saldo</button>
+            <Btn variant="primary" onClick={calcularSaldo} disabled={carregando || !contaId}>Calcular saldo</Btn>
           </div>
         </div>
 
-        <div style={{ background: 'white', border: '1px solid #e5e7eb', borderRadius: '12px', padding: '14px' }}>
+        <div className="filter-card" style={{ marginBottom: 0 }}>
           <h3 style={{ marginTop: 0 }}>Saldo inicial da conta</h3>
           {!contaSelecionada?.data_saldo_inicial && !contaSelecionada?.dataSaldoInicial && (
             <p style={{ background: '#fffbeb', color: '#92400e', padding: '10px', borderRadius: '8px' }}>Esta conta ainda não possui saldo inicial configurado. Cadastre um saldo inicial para permitir a conferência.</p>
@@ -2588,16 +2597,16 @@ function TelaConferenciaSaldos({ contas = [], token, onVoltar, onAtualizarContas
           <div style={{ display: 'grid', gap: '10px' }}>
             <label>Saldo inicial<input value={saldoInicial} onChange={(e) => setSaldoInicial(e.target.value)} placeholder="0,00" style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }} /></label>
             <label>Data saldo inicial<input type="date" value={dataSaldoInicial} onChange={(e) => setDataSaldoInicial(e.target.value)} style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }} /></label>
-            <button onClick={salvarSaldoInicial} disabled={carregando || !contaId} style={{ background: '#0f766e', color: 'white', border: 'none', padding: '10px 14px', borderRadius: '8px', cursor: 'pointer' }}>Salvar saldo inicial</button>
+            <Btn variant="primary" onClick={salvarSaldoInicial} disabled={carregando || !contaId}>Salvar saldo inicial</Btn>
           </div>
         </div>
 
-        <div style={{ background: 'white', border: '1px solid #e5e7eb', borderRadius: '12px', padding: '14px' }}>
+        <div className="filter-card" style={{ marginBottom: 0 }}>
           <h3 style={{ marginTop: 0 }}>Saldo real do banco</h3>
           <div style={{ display: 'grid', gap: '10px' }}>
             <label>Saldo real informado<input value={saldoReal} onChange={(e) => { setSaldoReal(e.target.value); setConferencia(null); }} placeholder="-516,87" style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }} /></label>
             <label>Observação<textarea value={observacao} onChange={(e) => setObservacao(e.target.value)} placeholder="Saldo conferido no extrato" rows={3} style={{ width: '100%', padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }} /></label>
-            <button onClick={salvarConferencia} disabled={carregando || !calculo?.saldoInicialConfigurado} style={{ background: '#7c3aed', color: 'white', border: 'none', padding: '10px 14px', borderRadius: '8px', cursor: 'pointer', opacity: calculo?.saldoInicialConfigurado ? 1 : 0.6 }}>Salvar conferência</button>
+            <Btn variant="primary" onClick={salvarConferencia} disabled={carregando || !calculo?.saldoInicialConfigurado}>Salvar conferência</Btn>
           </div>
         </div>
       </div>
@@ -2624,7 +2633,7 @@ function TelaConferenciaSaldos({ contas = [], token, onVoltar, onAtualizarContas
             <div style={{ marginTop: '14px', display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
               {(() => { const [bg, cor] = badgeStatusConferencia(resultadoAtual.status); return <span style={{ background: bg, color: cor, padding: '6px 10px', borderRadius: '999px', fontWeight: 'bold' }}>{resultadoAtual.status}</span>; })()}
               {resultadoAtual.status === 'CONCILIADO' ? <strong style={{ color: '#166534' }}>Saldo conciliado com sucesso.</strong> : <strong style={{ color: '#991b1b' }}>Saldo divergente: revise a diferença e execute a análise inteligente.</strong>}
-              {resultadoAtual.status === 'DIVERGENTE' && <button onClick={() => analisarDivergencia(resultadoAtual)} style={{ background: '#1d4ed8', color: 'white', border: 'none', padding: '9px 12px', borderRadius: '8px', cursor: 'pointer' }}>Analisar divergência</button>}
+              {resultadoAtual.status === 'DIVERGENTE' && <Btn variant="primary" size="sm" onClick={() => analisarDivergencia(resultadoAtual)}>Analisar divergência</Btn>}
             </div>
           )}
         </div>
@@ -2839,19 +2848,14 @@ function TelaProvisoes({ contas = [], token, onVoltar }) {
 
   return (
     <div style={{ minHeight: '100vh', background: '#f5f5f5' }}>
-      <div style={{ background: '#1f2937', color: 'white', padding: '20px' }}>
-        <Breadcrumb atual="Provisões" onVoltar={onVoltar} />
-        <h1 style={{ margin: '14px 0 4px' }}>📌 Contas previstas</h1>
-        <p style={{ margin: 0, opacity: 0.8 }}>Cadastre valores previstos e confirme conciliações com transações reais.</p>
-      </div>
-
       <div style={{ padding: '20px', maxWidth: '1280px', margin: '0 auto' }}>
-        <div style={{ background: 'white', borderRadius: '14px', padding: '16px', marginBottom: '16px' }}>
+        <PageHeader icone="📌" titulo="Contas previstas" descricao="Cadastre valores previstos e confirme conciliações." breadcrumb={<Breadcrumb atual="Provisões" onVoltar={onVoltar} />} />
+        <div className="filter-card">
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap', marginBottom: '12px' }}>
             <h2 style={{ margin: 0 }}>Contas provisionadas</h2>
-            <button onClick={abrirNova} style={{ background: '#2563eb', color: 'white', border: 'none', padding: '10px 14px', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold' }}>+ Nova provisão</button>
+            <Btn variant="primary" onClick={abrirNova}>+ Nova provisão</Btn>
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '10px' }}>
+          <div className="filter-grid">
             <input type="date" value={filtros.dataInicial} onChange={(e) => setFiltros({ ...filtros, dataInicial: e.target.value })} style={{ padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }} />
             <input type="date" value={filtros.dataFinal} onChange={(e) => setFiltros({ ...filtros, dataFinal: e.target.value })} style={{ padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }} />
             <select value={filtros.status} onChange={(e) => setFiltros({ ...filtros, status: e.target.value })} style={{ padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }}><option value="todos">Todos status</option>{STATUS_PROVISAO_OPCOES.map((s) => <option key={s} value={s}>{s}</option>)}</select>
@@ -2860,7 +2864,7 @@ function TelaProvisoes({ contas = [], token, onVoltar }) {
             <select value={filtros.categoriaMacroId} onChange={(e) => setFiltros({ ...filtros, categoriaMacroId: e.target.value, categoriaDetalhadaId: 'todas' })} style={{ padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }}><option value="todas">Todas macros</option>{categoriasMacro.map((c) => <option key={c.id} value={c.id}>{c.nome}</option>)}</select>
             <select value={filtros.categoriaDetalhadaId} onChange={(e) => setFiltros({ ...filtros, categoriaDetalhadaId: e.target.value })} style={{ padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }}><option value="todas">Todas detalhadas</option>{categoriasDetalhadasFiltro.map((c) => <option key={c.id} value={c.id}>{c.nome}</option>)}</select>
             <input value={filtros.busca} onChange={(e) => setFiltros({ ...filtros, busca: e.target.value })} placeholder="Buscar descrição" style={{ padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }} />
-            <button onClick={aplicarFiltros} style={{ background: '#111827', color: 'white', border: 'none', padding: '10px', borderRadius: '8px', cursor: 'pointer' }}>Filtrar</button>
+            <Btn variant="primary" onClick={aplicarFiltros}>Filtrar</Btn>
           </div>
         </div>
 
@@ -2884,13 +2888,13 @@ function TelaProvisoes({ contas = [], token, onVoltar }) {
                       <td style={{ padding: '12px' }}>{p.transacao_conciliada_id ? `${p.transacao_conciliada_descricao || 'Transação'} (${formatarData(p.transacao_conciliada_data)})` : '-'}</td>
                       <td style={{ padding: '12px' }}>
                         <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-                          <button onClick={() => abrirEdicao(p)} style={{ padding: '5px 8px', borderRadius: '6px', border: '1px solid #d1d5db', background: 'white', cursor: 'pointer' }}>Editar</button>
-                          <button onClick={() => excluirProvisao(p)} style={{ padding: '5px 8px', borderRadius: '6px', border: '1px solid #dc2626', color: '#dc2626', background: 'white', cursor: 'pointer' }}>Excluir</button>
-                          <button onClick={() => abrirConciliacao(p)} disabled={!['PENDENTE','ATRASADA'].includes(p.status)} style={{ padding: '5px 8px', borderRadius: '6px', border: '1px solid #2563eb', color: '#2563eb', background: 'white', cursor: ['PENDENTE','ATRASADA'].includes(p.status) ? 'pointer' : 'not-allowed' }}>Conciliar</button>
-                          <button onClick={() => duplicarProvisao(p)} style={{ padding: '5px 8px', borderRadius: '6px', border: '1px solid #6b7280', background: 'white', cursor: 'pointer' }}>Duplicar</button>
-                          {p.status !== 'CANCELADA' && <button onClick={() => atualizarStatus(p, 'CANCELADA')} style={{ padding: '5px 8px', borderRadius: '6px', border: '1px solid #6b7280', background: 'white', cursor: 'pointer' }}>Cancelar</button>}
-                          {p.status !== 'IGNORADA' && <button onClick={() => atualizarStatus(p, 'IGNORADA')} style={{ padding: '5px 8px', borderRadius: '6px', border: '1px solid #7c3aed', color: '#7c3aed', background: 'white', cursor: 'pointer' }}>Ignorar</button>}
-                          {p.conciliacao_id && <button onClick={() => desfazerConciliacao(p)} style={{ padding: '5px 8px', borderRadius: '6px', border: '1px solid #f59e0b', color: '#92400e', background: 'white', cursor: 'pointer' }}>Desfazer</button>}
+                          <Btn variant="secondary" size="sm" onClick={() => abrirEdicao(p)}>Editar</Btn>
+                          <Btn variant="danger" size="sm" onClick={() => excluirProvisao(p)}>Excluir</Btn>
+                          <Btn variant="secondary" size="sm" onClick={() => abrirConciliacao(p)} disabled={!['PENDENTE','ATRASADA'].includes(p.status)}>Conciliar</Btn>
+                          <Btn variant="secondary" size="sm" onClick={() => duplicarProvisao(p)}>Duplicar</Btn>
+                          {p.status !== 'CANCELADA' && <Btn variant="secondary" size="sm" onClick={() => atualizarStatus(p, 'CANCELADA')}>Cancelar</Btn>}
+                          {p.status !== 'IGNORADA' && <Btn variant="secondary" size="sm" onClick={() => atualizarStatus(p, 'IGNORADA')}>Ignorar</Btn>}
+                          {p.conciliacao_id && <Btn variant="secondary" size="sm" onClick={() => desfazerConciliacao(p)}>Desfazer</Btn>}
                         </div>
                       </td>
                     </tr>
@@ -2944,8 +2948,8 @@ function TelaProvisoes({ contas = [], token, onVoltar }) {
                   </div>
                   <small style={{ color: '#6b7280' }}>{(s.motivos || []).join(' • ')}</small>
                   <div style={{ display: 'flex', gap: '8px', marginTop: '10px' }}>
-                    <button onClick={() => confirmarConciliacao(s)} style={{ background: '#16a34a', color: 'white', border: 'none', padding: '8px 10px', borderRadius: '8px', cursor: 'pointer' }}>Confirmar conciliação</button>
-                    <button onClick={() => ignorarSugestao(s)} style={{ background: 'white', color: '#6b7280', border: '1px solid #6b7280', padding: '8px 10px', borderRadius: '8px', cursor: 'pointer' }}>Ignorar sugestão</button>
+                    <Btn variant="primary" size="sm" onClick={() => confirmarConciliacao(s)}>Confirmar conciliação</Btn>
+                    <Btn variant="secondary" size="sm" onClick={() => ignorarSugestao(s)}>Ignorar sugestão</Btn>
                   </div>
                 </div>
               ))}
@@ -2996,6 +3000,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
   const [resultadoConferenciaRapida, setResultadoConferenciaRapida] = useState(null);
   const [salvandoConferenciaRapida, setSalvandoConferenciaRapida] = useState(false);
   const [destacarInicioBase, setDestacarInicioBase] = useState(false);
+  const [maisAcoesAberto, setMaisAcoesAberto] = useState(false);
   const tabelaRef = useRef(null);
 
   useEffect(() => {
@@ -3539,91 +3544,38 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
 
   return (
     <div style={{ minHeight: '100vh', background: '#f5f5f5' }}>
-      <div style={{ background: '#1f2937', color: 'white', padding: '20px' }}>
-        <Breadcrumb atual="Transações Consolidadas" onVoltar={onVoltar} />
-        <h1 style={{ margin: 0 }}>Transações consolidadas</h1>
-        <p style={{ margin: '5px 0 0', opacity: 0.8 }}>Todas as contas em uma única visão</p>
-      </div>
-
       <div style={{ padding: '20px', maxWidth: '1200px', margin: '0 auto' }}>
-        <div style={{ background: 'white', borderRadius: '12px', padding: '16px', marginBottom: '16px', boxShadow: '0 2px 8px rgba(0,0,0,0.08)' }}>
-          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(220px, 2fr) repeat(5, 1fr)', gap: '12px', alignItems: 'end' }}>
-            <label style={{ display: 'grid', gap: '6px', fontSize: '13px', color: '#374151' }}>
-              Pesquisar descrição
-              <input value={filtros.busca} onChange={(event) => setFiltros({ ...filtros, busca: event.target.value })} placeholder="Ex.: AUTO POSTO" style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} />
-            </label>
-            <label style={{ display: 'grid', gap: '6px', fontSize: '13px', color: '#374151' }}>
-              Conta
-              <select value={filtros.conta} onChange={(event) => setFiltros({ ...filtros, conta: event.target.value })} style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}>
-                <option value="todas">Todas as contas</option>
-                {contas.map((item) => <option key={item.id} value={item.id}>{item.nome}</option>)}
-              </select>
-            </label>
-            <label style={{ display: 'grid', gap: '6px', fontSize: '13px', color: '#374151' }}>
-              Categoria macro
-              <select value={filtros.categoriaMacro} onChange={(event) => setFiltros({ ...filtros, categoriaMacro: event.target.value, categoriaDetalhada: 'todas' })} style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}>
-                <option value="todas">Todas</option>
-                <option value="sem">Sem categoria</option>
-                {categoriasMacro.map((cat) => <option key={cat.id} value={cat.id}>{cat.emoji} {cat.nome}</option>)}
-              </select>
-            </label>
-            <label style={{ display: 'grid', gap: '6px', fontSize: '13px', color: '#374151' }}>
-              Categoria detalhada
-              <select value={filtros.categoriaDetalhada} onChange={(event) => setFiltros({ ...filtros, categoriaDetalhada: event.target.value })} style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}>
-                <option value="todas">Todas</option>
-                <option value="sem">Sem detalhamento</option>
-                {categoriasDetalhadasFiltro.map((cat) => <option key={cat.id} value={cat.id}>{cat.emoji} {cat.nome}</option>)}
-              </select>
-            </label>
-            <label style={{ display: 'grid', gap: '6px', fontSize: '13px', color: '#374151' }}>
-              Status
-              <select value={filtros.status} onChange={(event) => setFiltros({ ...filtros, status: event.target.value })} style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}>
-                <option value="todas">Todas</option>
-                <option value="sem">Sem categoria</option>
-                <option value="categorizadas">Categorizadas</option>
-              </select>
-            </label>
-            <label style={{ display: 'grid', gap: '6px', fontSize: '13px', color: '#374151' }}>
-              Tipo
-              <select value={filtros.tipo} onChange={(event) => setFiltros({ ...filtros, tipo: event.target.value })} style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}>
-                <option value="todos">Todos</option>
-                <option value="CREDITO">Crédito</option>
-                <option value="DEBITO">Débito</option>
-              </select>
-            </label>
+        <PageHeader icone="💸" titulo="Transações consolidadas" descricao="Todas as contas em uma única visão" breadcrumb={<Breadcrumb atual="Transações Consolidadas" onVoltar={onVoltar} />} />
+        <div className="filter-card">
+          <div className="filter-grid">
+            <label>Pesquisar descrição<input value={filtros.busca} onChange={(event) => setFiltros({ ...filtros, busca: event.target.value })} placeholder="Ex.: AUTO POSTO" /></label>
+            <label>Conta<select value={filtros.conta} onChange={(event) => setFiltros({ ...filtros, conta: event.target.value })}><option value="todas">Todas as contas</option>{contas.map((item) => <option key={item.id} value={item.id}>{item.nome}</option>)}</select></label>
+            <label>Categoria macro<select value={filtros.categoriaMacro} onChange={(event) => setFiltros({ ...filtros, categoriaMacro: event.target.value, categoriaDetalhada: 'todas' })}><option value="todas">Todas</option><option value="sem">Sem categoria</option>{categoriasMacro.map((cat) => <option key={cat.id} value={cat.id}>{cat.emoji} {cat.nome}</option>)}</select></label>
+            <label>Categoria detalhada<select value={filtros.categoriaDetalhada} onChange={(event) => setFiltros({ ...filtros, categoriaDetalhada: event.target.value })}><option value="todas">Todas</option><option value="sem">Sem detalhamento</option>{categoriasDetalhadasFiltro.map((cat) => <option key={cat.id} value={cat.id}>{cat.emoji} {cat.nome}</option>)}</select></label>
+            <label>Status<select value={filtros.status} onChange={(event) => setFiltros({ ...filtros, status: event.target.value })}><option value="todas">Todas</option><option value="sem">Sem categoria</option><option value="categorizadas">Categorizadas</option></select></label>
+            <label>Tipo<select value={filtros.tipo} onChange={(event) => setFiltros({ ...filtros, tipo: event.target.value })}><option value="todos">Todos</option><option value="CREDITO">Crédito</option><option value="DEBITO">Débito</option></select></label>
+            <label>Data inicial<input type="date" value={dataInicial} onChange={(event) => setDataInicial(event.target.value)} /></label>
+            <label>Data final<input type="date" value={dataFinal} onChange={(event) => setDataFinal(event.target.value)} /></label>
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '12px', alignItems: 'end', marginTop: '14px' }}>
-            <label style={{ display: 'grid', gap: '6px', fontSize: '13px', color: '#374151' }}>
-              Data inicial
-              <input type="date" value={dataInicial} onChange={(event) => setDataInicial(event.target.value)} style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} />
-            </label>
-            <label style={{ display: 'grid', gap: '6px', fontSize: '13px', color: '#374151' }}>
-              Data final
-              <input type="date" value={dataFinal} onChange={(event) => setDataFinal(event.target.value)} style={{ padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} />
-            </label>
-            <button onClick={limparFiltros} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', cursor: 'pointer', background: '#e5e7eb' }}>Limpar filtros</button>
-            <button onClick={alternarTodasFiltradas} disabled={transacoesOrdenadas.length === 0} style={{ padding: '10px 14px', borderRadius: '8px', border: '1px solid #d1d5db', background: 'white', cursor: transacoesOrdenadas.length === 0 ? 'not-allowed' : 'pointer' }}>
-              {todasFiltradasSelecionadas ? 'Limpar seleção filtrada' : 'Selecionar todos filtrados'}
-            </button>
-            <button onClick={abrirModalLote} disabled={selecionadas.length === 0} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', background: selecionadas.length ? '#667eea' : '#c7d2fe', color: 'white', cursor: selecionadas.length ? 'pointer' : 'not-allowed' }}>
-              Categorizar selecionadas
-            </button>
-            <button onClick={() => exportarExcel(false)} disabled={transacoesOrdenadas.length === 0} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', background: transacoesOrdenadas.length ? '#16a34a' : '#bbf7d0', color: 'white', cursor: transacoesOrdenadas.length ? 'pointer' : 'not-allowed' }}>
-              📊 Exportar Excel
-            </button>
-            <button onClick={() => exportarExcel(true)} disabled={selecionadas.length === 0} style={{ padding: '10px 14px', borderRadius: '8px', border: '1px solid #16a34a', background: selecionadas.length ? 'white' : '#f0fdf4', color: '#15803d', cursor: selecionadas.length ? 'pointer' : 'not-allowed' }}>
-              Exportar selecionadas
-            </button>
-            <button onClick={verificarTransferenciasInternas} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', background: '#0f766e', color: 'white', cursor: 'pointer' }}>
-              Verificar transferências entre contas
-            </button>
-            <button onClick={verInicioBase} disabled={!resumoBase} style={{ padding: '10px 14px', borderRadius: '8px', border: '1px solid #1d4ed8', background: resumoBase ? 'white' : '#eff6ff', color: '#1d4ed8', cursor: resumoBase ? 'pointer' : 'not-allowed' }}>
-              Ver início da base
-            </button>
-            <button onClick={abrirModalSaldoInicial} disabled={!contaSelecionadaFiltro || !primeiraTransacaoBase} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', background: contaSelecionadaFiltro && primeiraTransacaoBase ? '#7c3aed' : '#ddd6fe', color: 'white', cursor: contaSelecionadaFiltro && primeiraTransacaoBase ? 'pointer' : 'not-allowed' }}>
-              Configurar saldo inicial desta conta
-            </button>
+          <div className="transactions-actions">
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+              <Btn variant="secondary" size="sm" onClick={alternarTodasFiltradas} disabled={transacoesOrdenadas.length === 0}>{todasFiltradasSelecionadas ? 'Limpar seleção filtrada' : 'Selecionar todos filtrados'}</Btn>
+              <Btn variant="primary" size="sm" onClick={abrirModalLote} disabled={selecionadas.length === 0}>Categorizar selecionadas</Btn>
+              <Btn variant="ghost" size="sm" onClick={limparFiltros}>Limpar filtros</Btn>
+            </div>
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+              {resumoBase && <span style={{ color: '#64748b', fontSize: '13px' }}>Início da base: {formatarData(resumoBase.data_inicio || resumoBase.dataInicio || resumoBase.primeira_data || resumoBase.primeiraData)}</span>}
+              {contaSelecionadaFiltro && primeiraTransacaoBase && <Btn variant="ghost" size="sm" onClick={abrirModalSaldoInicial}>Configurar saldo inicial</Btn>}
+              <div className="more-actions">
+                <Btn variant="secondary" size="sm" onClick={() => setMaisAcoesAberto((aberto) => !aberto)}>⬇️ Exportar Excel ▾</Btn>
+                {maisAcoesAberto && <div className="more-actions-menu">
+                  <Btn variant="ghost" size="sm" onClick={() => { exportarExcel(false); setMaisAcoesAberto(false); }} disabled={transacoesOrdenadas.length === 0}>Exportar todas filtradas</Btn>
+                  <Btn variant="ghost" size="sm" onClick={() => { exportarExcel(true); setMaisAcoesAberto(false); }} disabled={selecionadas.length === 0}>Exportar selecionadas</Btn>
+                  <Btn variant="ghost" size="sm" onClick={() => { verificarTransferenciasInternas(); setMaisAcoesAberto(false); }}>Verificar transferências</Btn>
+                </div>}
+              </div>
+            </div>
           </div>
 
           <div style={{ marginTop: '14px' }}>
@@ -3646,14 +3598,14 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
                 {contaSelecionadaFiltro && Number.isFinite(resumoBase.saldoFinalCalculado) && <p style={{ margin: '4px 0', color: '#475569' }}>Saldo final calculado: <strong>{formatarMoeda(resumoBase.saldoFinalCalculado)}</strong></p>}
                 {!contaSelecionadaFiltro && <p style={{ margin: '4px 0', color: '#475569' }}>Saldo final calculado (contas configuradas): <strong>{formatarMoeda(resumoBase.saldoFinalConsolidado)}</strong></p>}
                 {contaSelecionadaFiltro && Number.isFinite(resumoBase.saldoFinalCalculado) && (
-                  <button onClick={() => { setResultadoConferenciaRapida(null); setSaldoRealConferencia(''); setModalConferenciaRapidaAberto(true); }} style={{ marginTop: '8px', background: '#1d4ed8', color: 'white', border: 'none', borderRadius: '8px', padding: '8px 10px', cursor: 'pointer' }}>Conferir saldo final</button>
+                  <Btn variant="primary" size="sm" style={{ marginTop: '8px' }} onClick={() => { setResultadoConferenciaRapida(null); setSaldoRealConferencia(''); setModalConferenciaRapidaAberto(true); }}>Conferir saldo final</Btn>
                 )}
               </div>
               {contaSelecionadaFiltro && !contaSelecionadaFiltro.data_saldo_inicial && (
                 <div style={{ background: '#fffbeb', color: '#92400e', border: '1px solid #fde68a', borderRadius: '10px', padding: '12px', maxWidth: '420px' }}>
                   <strong>Saldo inicial ausente</strong>
                   <p style={{ margin: '6px 0' }}>Esta conta ainda não possui saldo inicial configurado. Para conferir o saldo bancário, informe o saldo da conta no dia anterior à primeira transação importada.</p>
-                  <button onClick={abrirModalSaldoInicial} style={{ background: '#7c3aed', color: 'white', border: 'none', borderRadius: '8px', padding: '8px 10px', cursor: 'pointer' }}>Configurar saldo inicial</button>
+                  <Btn variant="primary" size="sm" onClick={abrirModalSaldoInicial}>Configurar saldo inicial</Btn>
                 </div>
               )}
             </div>
@@ -3733,17 +3685,11 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
                     </td>
                     <td style={{ padding: '12px', textAlign: 'center' }}>
                       <div style={{ display: 'flex', justifyContent: 'center', gap: '8px', flexWrap: 'wrap' }}>
-                        <button onClick={() => abrirModalIndividual(tx)} style={{ background: '#667eea', color: 'white', border: 'none', padding: '4px 12px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>
-                          Categorizar
-                        </button>
+                        <Btn variant="secondary" size="sm" onClick={() => abrirModalIndividual(tx)}>Categorizar</Btn>
                         {tx.eh_transferencia_interna && (
-                          <button onClick={() => desmarcarTransferenciaInterna(tx)} style={{ background: 'white', color: '#0f766e', border: '1px solid #0f766e', padding: '4px 12px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>
-                            Desmarcar transferência
-                          </button>
+                          <Btn variant="secondary" size="sm" onClick={() => desmarcarTransferenciaInterna(tx)}>Desmarcar transferência</Btn>
                         )}
-                        <button onClick={() => abrirModalExclusao(tx)} style={{ background: 'white', color: '#dc2626', border: '1px solid #dc2626', padding: '4px 12px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}>
-                          Excluir
-                        </button>
+                        <Btn variant="danger" size="sm" onClick={() => abrirModalExclusao(tx)}>Excluir</Btn>
                       </div>
                     </td>
                   </tr>
@@ -3779,8 +3725,8 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
               </div>
             )}
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', flexWrap: 'wrap' }}>
-              <button onClick={() => setModalConferenciaRapidaAberto(false)} disabled={salvandoConferenciaRapida} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', background: '#e5e7eb', cursor: 'pointer' }}>Fechar</button>
-              <button onClick={salvarConferenciaRapida} disabled={salvandoConferenciaRapida} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', background: '#1d4ed8', color: 'white', cursor: 'pointer' }}>{salvandoConferenciaRapida ? 'Conferindo...' : 'Conferir'}</button>
+              <Btn variant="secondary" onClick={() => setModalConferenciaRapidaAberto(false)} disabled={salvandoConferenciaRapida}>Fechar</Btn>
+              <Btn variant="primary" onClick={salvarConferenciaRapida} disabled={salvandoConferenciaRapida}>{salvandoConferenciaRapida ? 'Conferindo...' : 'Conferir'}</Btn>
             </div>
           </div>
         </div>
@@ -3813,8 +3759,8 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
               </label>
             </div>
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', flexWrap: 'wrap' }}>
-              <button onClick={() => setModalSaldoInicialAberto(false)} disabled={salvandoSaldoInicial} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', background: '#e5e7eb', cursor: 'pointer' }}>Cancelar</button>
-              <button onClick={salvarSaldoInicialConta} disabled={salvandoSaldoInicial} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', background: '#7c3aed', color: 'white', cursor: 'pointer' }}>{salvandoSaldoInicial ? 'Salvando...' : 'Salvar saldo inicial'}</button>
+              <Btn variant="secondary" onClick={() => setModalSaldoInicialAberto(false)} disabled={salvandoSaldoInicial}>Cancelar</Btn>
+              <Btn variant="primary" onClick={salvarSaldoInicialConta} disabled={salvandoSaldoInicial}>{salvandoSaldoInicial ? 'Salvando...' : 'Salvar saldo inicial'}</Btn>
             </div>
           </div>
         </div>
@@ -3857,12 +3803,8 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
             )}
 
             <div style={{ display: 'flex', gap: '10px' }}>
-              <button onClick={handleCategorizar} disabled={salvandoCategoria} style={{ background: '#667eea', color: 'white', border: 'none', padding: '12px', borderRadius: '8px', cursor: 'pointer', flex: 1 }}>
-                {salvandoCategoria ? 'Salvando...' : 'Salvar categorização'}
-              </button>
-              <button onClick={fecharModal} disabled={salvandoCategoria} style={{ background: '#e5e7eb', border: 'none', padding: '12px', borderRadius: '8px', cursor: 'pointer', flex: 1 }}>
-                Cancelar
-              </button>
+              <Btn variant="primary" onClick={handleCategorizar} disabled={salvandoCategoria} style={{ flex: 1 }}>{salvandoCategoria ? 'Salvando...' : 'Salvar categorização'}</Btn>
+              <Btn variant="secondary" onClick={fecharModal} disabled={salvandoCategoria} style={{ flex: 1 }}>Cancelar</Btn>
             </div>
           </div>
         </div>
@@ -3883,9 +3825,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
             </div>
 
             <div style={{ display: 'flex', gap: '10px' }}>
-              <button onClick={fecharModalExclusao} disabled={excluindoTransacao} style={{ background: '#e5e7eb', border: 'none', padding: '12px', borderRadius: '8px', cursor: excluindoTransacao ? 'not-allowed' : 'pointer', flex: 1 }}>
-                Cancelar
-              </button>
+              <Btn variant="secondary" onClick={fecharModalExclusao} disabled={excluindoTransacao} style={{ flex: 1 }}>Cancelar</Btn>
               <button onClick={handleExcluirTransacao} disabled={excluindoTransacao} style={{ background: '#dc2626', color: 'white', border: 'none', padding: '12px', borderRadius: '8px', cursor: excluindoTransacao ? 'not-allowed' : 'pointer', flex: 1 }}>
                 {excluindoTransacao ? 'Excluindo...' : 'Excluir transação'}
               </button>
@@ -3902,7 +3842,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
                 <h3 style={{ margin: 0 }}>Possíveis transferências internas</h3>
                 <p style={{ margin: '6px 0 0', color: '#64748b', fontSize: '14px' }}>Revise os pares sugeridos antes de marcar. Nada é aplicado automaticamente.</p>
               </div>
-              <button onClick={() => setModalTransferenciasAberto(false)} style={{ border: 'none', background: '#e5e7eb', borderRadius: '8px', padding: '8px 12px', cursor: 'pointer' }}>Fechar</button>
+              <Btn variant="secondary" size="sm" onClick={() => setModalTransferenciasAberto(false)}>Fechar</Btn>
             </div>
 
             {carregandoSugestoes ? (
@@ -3933,11 +3873,9 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
                     </div>
                     <p style={{ color: '#64748b', fontSize: '12px' }}>Motivos: {sugestao.motivos.join(', ')}</p>
                     <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-                      <button onClick={() => marcarTransferenciaInterna(sugestao)} disabled={marcandoTransferencia === sugestao.id} style={{ background: '#0f766e', color: 'white', border: 'none', padding: '8px 12px', borderRadius: '8px', cursor: marcandoTransferencia === sugestao.id ? 'not-allowed' : 'pointer' }}>
-                        {marcandoTransferencia === sugestao.id ? 'Marcando...' : 'Marcar como transferência interna'}
-                      </button>
-                      <button onClick={() => ignorarSugestaoTransferencia(sugestao.id)} style={{ background: '#e5e7eb', border: 'none', padding: '8px 12px', borderRadius: '8px', cursor: 'pointer' }}>Ignorar</button>
-                      <button onClick={() => ignorarSugestaoTransferencia(sugestao.id)} style={{ background: 'white', color: '#dc2626', border: '1px solid #dc2626', padding: '8px 12px', borderRadius: '8px', cursor: 'pointer' }}>Não é transferência</button>
+                      <Btn variant="primary" size="sm" onClick={() => marcarTransferenciaInterna(sugestao)} disabled={marcandoTransferencia === sugestao.id}>{marcandoTransferencia === sugestao.id ? 'Marcando...' : 'Marcar como transferência interna'}</Btn>
+                      <Btn variant="secondary" size="sm" onClick={() => ignorarSugestaoTransferencia(sugestao.id)}>Ignorar</Btn>
+                      <Btn variant="danger" size="sm" onClick={() => ignorarSugestaoTransferencia(sugestao.id)}>Não é transferência</Btn>
                     </div>
                   </div>
                 ))}
