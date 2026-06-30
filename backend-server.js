@@ -3027,9 +3027,13 @@ app.get('/api/planejamento', verificarToken, async (req, res) => {
   try {
     const { mes, ano } = validarMesAnoPlanejamento(req.query.mes, req.query.ano);
     await materializarRecorrenciasMensaisUsuario(req.usuario.usuario_id, mes, ano);
+    const filtros = normalizarFiltrosPlanejamento(req.query);
+    const valores = [req.usuario.usuario_id, mes, ano];
+    const where = ['usuario_id = $1', 'mes = $2', 'ano = $3', 'ativa = true'];
+    aplicarFiltrosPlanejamento(where, valores, filtros, 'planejamentos_mensais');
     const result = await pool.query(
-      `SELECT * FROM planejamentos_mensais WHERE usuario_id = $1 AND mes = $2 AND ano = $3 AND ativa = true ORDER BY tipo_despesa, dia_previsto NULLS LAST, criado_em DESC`,
-      [req.usuario.usuario_id, mes, ano]
+      `SELECT * FROM planejamentos_mensais WHERE ${where.join(' AND ')} ORDER BY tipo_despesa, dia_previsto NULLS LAST, criado_em DESC`,
+      valores
     );
     const totalRealizado = await buscarTotalRealizadoMes(req.usuario.usuario_id, mes, ano);
     const comparativoCategorias = await buscarComparativoPlanejadoRealizadoPorCategoria(req.usuario.usuario_id, mes, ano);
@@ -3041,6 +3045,34 @@ app.get('/api/planejamento', verificarToken, async (req, res) => {
 function montarLabelMesPlanejamento(mes, ano) {
   const nomes = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
   return `${nomes[Number(mes) - 1]}/${String(ano).slice(-2)}`;
+}
+
+
+function normalizarFiltrosPlanejamento(query = {}) {
+  const tipo = String(query.tipo || 'TODOS').trim().toUpperCase();
+  const recorrencia = String(query.recorrencia || 'TODAS').trim().toUpperCase();
+  const categoria = String(query.categoria || '').trim();
+  return {
+    tipo: ['FIXA', 'VARIAVEL'].includes(tipo) ? tipo : 'TODOS',
+    recorrencia: ['UNICA', 'MENSAL', 'PARCELADA'].includes(recorrencia) ? recorrencia : 'TODAS',
+    categoria,
+  };
+}
+
+function aplicarFiltrosPlanejamento(where, valores, filtros, alias = 'p') {
+  if (filtros.tipo !== 'TODOS') {
+    valores.push(filtros.tipo);
+    where.push(`${alias}.tipo_despesa = $${valores.length}`);
+  }
+  if (filtros.recorrencia !== 'TODAS') {
+    valores.push(filtros.recorrencia);
+    where.push(`${alias}.recorrencia_tipo = $${valores.length}`);
+  }
+  if (filtros.categoria) {
+    valores.push(filtros.categoria);
+    const indice = valores.length;
+    where.push(`(${alias}.categoria_id::text = $${indice} OR LOWER(COALESCE(NULLIF(TRIM(${alias}.categoria), ''), 'Sem categoria')) = LOWER($${indice}))`);
+  }
 }
 
 app.get('/api/planejamento/resumo-mensal', verificarToken, async (req, res) => {
@@ -3058,6 +3090,10 @@ app.get('/api/planejamento/resumo-mensal', verificarToken, async (req, res) => {
 
     const primeiro = meses[0];
     const ultimo = meses[meses.length - 1];
+    const filtros = normalizarFiltrosPlanejamento(req.query);
+    const valores = [req.usuario.usuario_id, primeiro.ano, primeiro.mes, ultimo.ano, ultimo.mes];
+    const where = ['usuario_id = $1', 'ativa = true', '(ano * 12 + mes) BETWEEN ($2::int * 12 + $3::int) AND ($4::int * 12 + $5::int)'];
+    aplicarFiltrosPlanejamento(where, valores, filtros, 'planejamentos_mensais');
     const result = await pool.query(
       `SELECT mes, ano,
               COALESCE(SUM(CASE WHEN tipo_despesa = 'FIXA' THEN valor_previsto ELSE 0 END), 0) AS total_fixas,
@@ -3066,11 +3102,9 @@ app.get('/api/planejamento/resumo-mensal', verificarToken, async (req, res) => {
               COALESCE(SUM(valor_previsto), 0) AS total_previsto,
               COUNT(*)::int AS quantidade_itens
        FROM planejamentos_mensais
-       WHERE usuario_id = $1
-         AND ativa = true
-         AND (ano * 12 + mes) BETWEEN ($2::int * 12 + $3::int) AND ($4::int * 12 + $5::int)
+       WHERE ${where.join(' AND ')}
        GROUP BY mes, ano`,
-      [req.usuario.usuario_id, primeiro.ano, primeiro.mes, ultimo.ano, ultimo.mes]
+      valores
     );
 
     const porPeriodo = new Map(result.rows.map((row) => [`${row.ano}-${row.mes}`, row]));
@@ -3089,6 +3123,62 @@ app.get('/api/planejamento/resumo-mensal', verificarToken, async (req, res) => {
           total_parceladas: totalParceladas,
           total_previsto: Number(row.total_previsto || totalFixas + totalVariaveis),
           quantidade_itens: Number(row.quantidade_itens || 0),
+        };
+      })
+    });
+  } catch (error) { res.status(400).json({ erro: error.message }); }
+});
+
+
+app.get('/api/planejamento/resumo-categorias', verificarToken, async (req, res) => {
+  try {
+    const { mes: mesInicio, ano: anoInicio } = validarMesAnoPlanejamento(req.query.mesInicio, req.query.anoInicio);
+    const quantidadeMeses = Number(req.query.quantidadeMeses || 12);
+    if (!Number.isInteger(quantidadeMeses) || quantidadeMeses < 1 || quantidadeMeses > 24) throw new Error('Quantidade de meses deve estar entre 1 e 24.');
+
+    const meses = [];
+    for (let indice = 0; indice < quantidadeMeses; indice++) {
+      const periodo = adicionarMesesPlanejamento(mesInicio, anoInicio, indice);
+      await materializarRecorrenciasMensaisUsuario(req.usuario.usuario_id, periodo.mes, periodo.ano);
+      meses.push(periodo);
+    }
+
+    const primeiro = meses[0];
+    const ultimo = meses[meses.length - 1];
+    const filtros = normalizarFiltrosPlanejamento(req.query);
+    const valores = [req.usuario.usuario_id, primeiro.ano, primeiro.mes, ultimo.ano, ultimo.mes];
+    const where = ['p.usuario_id = $1', 'p.ativa = true', '(p.ano * 12 + p.mes) BETWEEN ($2::int * 12 + $3::int) AND ($4::int * 12 + $5::int)'];
+    aplicarFiltrosPlanejamento(where, valores, filtros, 'p');
+
+    const result = await pool.query(
+      `SELECT p.mes, p.ano,
+              COALESCE(cat.nome, NULLIF(TRIM(p.categoria), ''), 'Sem categoria') AS categoria,
+              COALESCE(SUM(p.valor_previsto), 0) AS valor
+       FROM planejamentos_mensais p
+       LEFT JOIN categorias cat ON cat.id = p.categoria_id
+       WHERE ${where.join(' AND ')}
+       GROUP BY p.mes, p.ano, COALESCE(cat.nome, NULLIF(TRIM(p.categoria), ''), 'Sem categoria')
+       ORDER BY p.ano, p.mes, categoria`,
+      valores
+    );
+
+    const porPeriodo = new Map(meses.map((periodo) => [`${periodo.ano}-${periodo.mes}`, []]));
+    for (const row of result.rows) {
+      const chave = `${row.ano}-${row.mes}`;
+      const lista = porPeriodo.get(chave) || [];
+      lista.push({ categoria: row.categoria || 'Sem categoria', valor: Number(row.valor || 0) });
+      porPeriodo.set(chave, lista);
+    }
+
+    res.json({
+      meses: meses.map((periodo) => {
+        const categorias = (porPeriodo.get(`${periodo.ano}-${periodo.mes}`) || []).sort((a, b) => b.valor - a.valor);
+        return {
+          mes: periodo.mes,
+          ano: periodo.ano,
+          label: montarLabelMesPlanejamento(periodo.mes, periodo.ano),
+          total_previsto: categorias.reduce((total, item) => total + Number(item.valor || 0), 0),
+          categorias,
         };
       })
     });
