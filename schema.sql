@@ -581,3 +581,38 @@ CREATE INDEX idx_conciliacoes_provisao ON conciliacoes(provisao_id);
 CREATE INDEX idx_conciliacoes_transacao ON conciliacoes(transacao_id);
 CREATE UNIQUE INDEX idx_conciliacoes_provisao_ativa ON conciliacoes(provisao_id) WHERE status = 'CONFIRMADA';
 CREATE UNIQUE INDEX idx_conciliacoes_transacao_ativa ON conciliacoes(transacao_id) WHERE status = 'CONFIRMADA';
+
+-- ============================================================================
+-- PLANEJAMENTO MENSAL
+-- ============================================================================
+-- Planejamento é orçamento/previsão por mês e categoria. Ele não é conciliado
+-- diretamente com transações; a comparação com realizado é agregada por categoria.
+
+CREATE TABLE planejamentos_mensais (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  usuario_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+  mes INT NOT NULL CHECK (mes BETWEEN 1 AND 12),
+  ano INT NOT NULL CHECK (ano BETWEEN 1900 AND 2100),
+  descricao TEXT NOT NULL,
+  categoria TEXT,
+  categoria_id UUID REFERENCES categorias(id) ON DELETE SET NULL,
+  tipo_despesa VARCHAR(20) NOT NULL CHECK (tipo_despesa IN ('FIXA', 'VARIAVEL')),
+  valor_previsto DECIMAL(12, 2) NOT NULL CHECK (valor_previsto > 0),
+  dia_previsto INT CHECK (dia_previsto IS NULL OR dia_previsto BETWEEN 1 AND 31),
+  observacao TEXT,
+  recorrencia_tipo VARCHAR(20) NOT NULL DEFAULT 'UNICA' CHECK (recorrencia_tipo IN ('UNICA', 'MENSAL', 'PARCELADA')),
+  recorrencia_id UUID,
+  quantidade_parcelas INT CHECK (quantidade_parcelas IS NULL OR quantidade_parcelas > 0),
+  parcela_atual INT CHECK (parcela_atual IS NULL OR parcela_atual > 0),
+  mes_inicio INT,
+  ano_inicio INT,
+  mes_fim INT CHECK (mes_fim IS NULL OR mes_fim BETWEEN 1 AND 12),
+  ano_fim INT CHECK (ano_fim IS NULL OR ano_fim BETWEEN 1900 AND 2100),
+  ativa BOOLEAN DEFAULT true,
+  criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_planejamentos_usuario_mes_ano ON planejamentos_mensais(usuario_id, ano, mes);
+CREATE INDEX idx_planejamentos_recorrencia ON planejamentos_mensais(usuario_id, recorrencia_id);
+CREATE INDEX idx_planejamentos_categoria ON planejamentos_mensais(usuario_id, categoria_id);

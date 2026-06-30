@@ -1437,11 +1437,13 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
   const [planejamentos, setPlanejamentos] = useState([]);
   const [resumo, setResumo] = useState({});
   const [resumoMensal, setResumoMensal] = useState([]);
+  const [comparativoCategorias, setComparativoCategorias] = useState([]);
+  const [categorias, setCategorias] = useState([]);
   const [carregandoResumoMensal, setCarregandoResumoMensal] = useState(false);
   const [carregando, setCarregando] = useState(false);
   const [editandoId, setEditandoId] = useState(null);
   const [formularioAberto, setFormularioAberto] = useState(false);
-  const formularioInicial = { descricao: '', categoria: '', tipo_despesa: 'FIXA', valor_previsto: '', dia_previsto: '', observacao: '', recorrencia_tipo: 'UNICA', recorrencia_termino: 'SEM_FIM', mes_fim: String(hoje.getMonth() + 1), ano_fim: String(hoje.getFullYear()), quantidade_parcelas: '', parcela_inicial: '1' };
+  const formularioInicial = { descricao: '', categoria: '', categoria_id: '', tipo_despesa: 'FIXA', valor_previsto: '', dia_previsto: '', observacao: '', recorrencia_tipo: 'UNICA', recorrencia_termino: 'SEM_FIM', mes_fim: String(hoje.getMonth() + 1), ano_fim: String(hoje.getFullYear()), quantidade_parcelas: '', parcela_inicial: '1' };
   const [form, setForm] = useState(formularioInicial);
 
   const authHeaders = { Authorization: `Bearer ${token}` };
@@ -1453,10 +1455,20 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
       const response = await axios.get(`${API_URL}/planejamento?mes=${mes}&ano=${ano}`, { headers: authHeaders });
       setPlanejamentos(response.data.planejamentos || []);
       setResumo(response.data.resumo || {});
+      setComparativoCategorias(response.data.comparativoCategorias || []);
     } catch (error) {
       alert('Erro ao carregar planejamento: ' + (error.response?.data?.erro || error.message));
     } finally {
       setCarregando(false);
+    }
+  };
+
+  const carregarCategorias = async () => {
+    try {
+      const response = await axios.get(`${API_URL}/categorias`, { headers: authHeaders });
+      setCategorias((response.data.categorias || []).filter((cat) => cat.ativa !== false));
+    } catch (error) {
+      console.warn('Não foi possível carregar categorias para o planejamento:', error.response?.data?.erro || error.message);
     }
   };
 
@@ -1473,6 +1485,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
   };
 
   useEffect(() => { carregarPlanejamento(); carregarResumoMensal(); }, [mes, ano]);
+  useEffect(() => { carregarCategorias(); }, []);
 
   const limparFormulario = () => {
     setEditandoId(null);
@@ -1482,7 +1495,8 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
 
   const salvarPlanejamento = async (event) => {
     event.preventDefault();
-    const payload = { ...form, mes: Number(mes), ano: Number(ano), valor_previsto: Number(form.valor_previsto), dia_previsto: form.dia_previsto === '' ? null : Number(form.dia_previsto), quantidade_parcelas: form.recorrencia_tipo === 'PARCELADA' ? Number(form.quantidade_parcelas) : null, parcela_inicial: form.recorrencia_tipo === 'PARCELADA' ? Number(form.parcela_inicial || 1) : null, mes_fim: form.recorrencia_tipo === 'MENSAL' && form.recorrencia_termino === 'COM_FIM' ? Number(form.mes_fim) : null, ano_fim: form.recorrencia_tipo === 'MENSAL' && form.recorrencia_termino === 'COM_FIM' ? Number(form.ano_fim) : null };
+    const categoriaSelecionada = categorias.find((cat) => cat.id === form.categoria_id);
+    const payload = { ...form, categoria: categoriaSelecionada?.nome || form.categoria, categoria_id: form.categoria_id || null, mes: Number(mes), ano: Number(ano), valor_previsto: Number(form.valor_previsto), dia_previsto: form.dia_previsto === '' ? null : Number(form.dia_previsto), quantidade_parcelas: form.recorrencia_tipo === 'PARCELADA' ? Number(form.quantidade_parcelas) : null, parcela_inicial: form.recorrencia_tipo === 'PARCELADA' ? Number(form.parcela_inicial || 1) : null, mes_fim: form.recorrencia_tipo === 'MENSAL' && form.recorrencia_termino === 'COM_FIM' ? Number(form.mes_fim) : null, ano_fim: form.recorrencia_tipo === 'MENSAL' && form.recorrencia_termino === 'COM_FIM' ? Number(form.ano_fim) : null };
     try {
       if (editandoId) {
         await axios.put(`${API_URL}/planejamento/${editandoId}`, payload, { headers: authHeaders });
@@ -1503,6 +1517,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
     setForm({
       descricao: item.descricao || '',
       categoria: item.categoria || '',
+      categoria_id: item.categoria_id || '',
       tipo_despesa: item.tipo_despesa || 'FIXA',
       valor_previsto: item.valor_previsto || '',
       dia_previsto: item.dia_previsto || '',
@@ -1565,6 +1580,23 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
         </div>
 
         <div style={{ background: 'white', borderRadius: '16px', padding: '22px', boxShadow: '0 2px 10px rgba(15,23,42,0.08)', marginBottom: '18px' }}>
+          <h2 style={{ margin: '0 0 6px' }}>Planejado x Realizado por categoria</h2>
+          <p style={{ color: '#64748b', marginTop: 0 }}>Comparativo secundário do mês selecionado. O planejado vem das despesas planejadas e o realizado soma transações de saída categorizadas no mês, sem transferências internas.</p>
+          {comparativoCategorias.length === 0 ? <p style={{ color: '#64748b' }}>Sem valores planejados ou realizados por categoria neste mês.</p> : (
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '720px' }}>
+                <thead style={{ background: '#f8fafc' }}><tr>{['Categoria','Valor planejado','Valor realizado','Diferença','Percentual utilizado'].map((h) => <th key={h} style={{ padding: '10px', textAlign: 'left' }}>{h}</th>)}</tr></thead>
+                <tbody>{comparativoCategorias.map((item) => {
+                  const diferenca = Number(item.diferenca || 0);
+                  const percentual = item.percentualUtilizado === null || item.percentualUtilizado === undefined ? '—' : formatarPercentual(Number(item.percentualUtilizado));
+                  return <tr key={item.categoriaId || item.categoria} style={{ borderTop: '1px solid #e5e7eb' }}><td style={{ padding: '10px', fontWeight: 'bold' }}>{item.categoria || 'Sem categoria'}</td><td style={{ padding: '10px' }}>{formatarMoeda(item.valorPlanejado)}</td><td style={{ padding: '10px' }}>{formatarMoeda(item.valorRealizado)}</td><td style={{ padding: '10px', color: diferenca < 0 ? '#dc2626' : '#0f766e', fontWeight: 'bold' }}>{formatarMoeda(diferenca)}</td><td style={{ padding: '10px' }}>{percentual}</td></tr>;
+                })}</tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        <div style={{ background: 'white', borderRadius: '16px', padding: '22px', boxShadow: '0 2px 10px rgba(15,23,42,0.08)', marginBottom: '18px' }}>
           <h2 style={{ margin: '0 0 6px' }}>Compromissos previstos para os próximos 12 meses</h2>
           <p style={{ color: '#64748b', marginTop: 0 }}>Valores calculados com base nas despesas únicas, recorrentes e parceladas cadastradas no planejamento.</p>
           <div style={{ display: 'flex', gap: '14px', flexWrap: 'wrap', marginBottom: '16px', color: '#475569', fontSize: '13px' }}>
@@ -1618,7 +1650,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
               <label>Ano<input type="number" value={ano} onChange={(e) => setAno(Number(e.target.value))} min="1900" max="2100" required style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} /></label>
             </div>
             <label>Descrição<input value={form.descricao} onChange={(e) => setForm({ ...form, descricao: e.target.value })} required placeholder="Ex.: Aluguel" style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} /></label>
-            <label>Categoria<input value={form.categoria} onChange={(e) => setForm({ ...form, categoria: e.target.value })} placeholder="Ex.: Moradia" style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} /></label>
+            <label>Categoria<select value={form.categoria_id} onChange={(e) => { const categoria = categorias.find((cat) => cat.id === e.target.value); setForm({ ...form, categoria_id: e.target.value, categoria: categoria?.nome || form.categoria }); }} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}><option value="">Usar texto livre / legado</option>{categorias.map((cat) => <option key={cat.id} value={cat.id}>{cat.categoria_pai_id ? '↳ ' : ''}{cat.nome}</option>)}</select><input value={form.categoria} onChange={(e) => setForm({ ...form, categoria: e.target.value, categoria_id: '' })} placeholder="Texto legado, se não escolher categoria" style={{ width: '100%', marginTop: '8px', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} /><small style={{ color: '#64748b' }}>Prefira uma categoria cadastrada. O texto livre foi mantido para compatibilidade com planejamentos antigos.</small></label>
             <label>Tipo de despesa<select value={form.tipo_despesa} onChange={(e) => setForm({ ...form, tipo_despesa: e.target.value })} required style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}><option value="FIXA">Fixa</option><option value="VARIAVEL">Variável</option></select></label>
             <label>Recorrência<select value={form.recorrencia_tipo} onChange={(e) => setForm({ ...form, recorrencia_tipo: e.target.value })} required style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}><option value="UNICA">Única</option><option value="MENSAL">Mensal recorrente</option><option value="PARCELADA">Parcelada</option></select></label>
             {form.recorrencia_tipo === 'MENSAL' && (
@@ -1954,7 +1986,7 @@ function Dashboard({ usuario, token, onLogout }) {
                         onClick={() => setModo('provisoes')}
                         style={{ background: '#0f766e', color: 'white', border: 'none', padding: '10px 16px', borderRadius: '8px', cursor: 'pointer' }}
                       >
-                        📌 Provisões
+                        📌 Contas previstas
                       </button>
                       <button
                         onClick={() => setModo('conferencia-saldos')}
@@ -2029,7 +2061,7 @@ function Dashboard({ usuario, token, onLogout }) {
                 </div>
 
                 <div style={{ background: 'white', borderRadius: '14px', padding: '16px', marginBottom: '20px' }}>
-                  <h3 style={{ marginTop: 0 }}>Provisões no período</h3>
+                  <h3 style={{ marginTop: 0 }}>Contas previstas no período</h3>
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '12px' }}>
                     <KpiCard titulo="Provisionado a pagar" valor={formatarMoeda(provisoesDashboard.totalProvisionadoPagar)} detalhe="Débitos previstos" cor="#dc2626" fundo="#fef2f2" />
                     <KpiCard titulo="Provisionado a receber" valor={formatarMoeda(provisoesDashboard.totalProvisionadoReceber)} detalhe="Créditos previstos" cor="#059669" fundo="#ecfdf5" />
@@ -2657,7 +2689,7 @@ function TelaProvisoes({ contas = [], token, onVoltar }) {
     <div style={{ minHeight: '100vh', background: '#f5f5f5' }}>
       <div style={{ background: '#1f2937', color: 'white', padding: '20px' }}>
         <button onClick={onVoltar} style={{ background: 'rgba(255,255,255,0.2)', color: 'white', border: '1px solid rgba(255,255,255,0.3)', padding: '8px 12px', borderRadius: '6px', cursor: 'pointer' }}>← Voltar</button>
-        <h1 style={{ margin: '14px 0 4px' }}>📌 Provisões</h1>
+        <h1 style={{ margin: '14px 0 4px' }}>📌 Contas previstas</h1>
         <p style={{ margin: 0, opacity: 0.8 }}>Cadastre valores previstos e confirme conciliações com transações reais.</p>
       </div>
 
