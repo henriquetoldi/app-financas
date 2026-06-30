@@ -2155,14 +2155,12 @@ function Dashboard({ usuario, token, onLogout }) {
               }}>
                 <h2>Nenhuma conta importada</h2>
                 <p style={{ color: '#666', marginBottom: '20px' }}>
-                  Clique abaixo para importar uma planilha XLSX padronizada.
+                  Nenhuma conta foi carregada para exibição no dashboard.
                 </p>
-
-                <Btn variant="primary" size="lg" onClick={() => setModo('importar')}>📊 Importar XLSX</Btn>
               </div>
             ) : (
               <div>
-                <PageHeader icone="📊" titulo="Dashboard financeiro" descricao={`Visão executiva entre ${formatarData(periodoDashboard.dataInicial)} e ${formatarData(periodoDashboard.dataFinal)}`} action={<Btn variant="primary" onClick={() => setModo('importar')}>📊 Importar XLSX</Btn>} />
+                <PageHeader icone="📊" titulo="Dashboard financeiro" descricao={`Visão executiva entre ${formatarData(periodoDashboard.dataInicial)} e ${formatarData(periodoDashboard.dataFinal)}`} />
                 <div style={{ background: 'white', borderRadius: '16px', padding: '20px', boxShadow: '0 2px 10px rgba(15,23,42,0.08)', marginBottom: '20px' }}>
 
                   {contasSemConferenciaRecente.length > 0 && (
@@ -2297,8 +2295,6 @@ function Dashboard({ usuario, token, onLogout }) {
                   margin: '26px 0 20px'
                 }}>
                   <h2 style={{ margin: 0 }}>Suas Contas</h2>
-
-                  <Btn variant="primary" onClick={() => setModo('importar')}>📊 Importar XLSX</Btn>
                 </div>
 
                 <div style={{
