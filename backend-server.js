@@ -2990,6 +2990,7 @@ app.get('/api/planejamento/resumo-mensal', verificarToken, async (req, res) => {
       `SELECT mes, ano,
               COALESCE(SUM(CASE WHEN tipo_despesa = 'FIXA' THEN valor_previsto ELSE 0 END), 0) AS total_fixas,
               COALESCE(SUM(CASE WHEN tipo_despesa = 'VARIAVEL' THEN valor_previsto ELSE 0 END), 0) AS total_variaveis,
+              COALESCE(SUM(CASE WHEN recorrencia_tipo = 'PARCELADA' THEN valor_previsto ELSE 0 END), 0) AS total_parceladas,
               COALESCE(SUM(valor_previsto), 0) AS total_previsto,
               COUNT(*)::int AS quantidade_itens
        FROM planejamentos_mensais
@@ -3006,12 +3007,14 @@ app.get('/api/planejamento/resumo-mensal', verificarToken, async (req, res) => {
         const row = porPeriodo.get(`${periodo.ano}-${periodo.mes}`) || {};
         const totalFixas = Number(row.total_fixas || 0);
         const totalVariaveis = Number(row.total_variaveis || 0);
+        const totalParceladas = Number(row.total_parceladas || 0);
         return {
           mes: periodo.mes,
           ano: periodo.ano,
           label: montarLabelMesPlanejamento(periodo.mes, periodo.ano),
           total_fixas: totalFixas,
           total_variaveis: totalVariaveis,
+          total_parceladas: totalParceladas,
           total_previsto: Number(row.total_previsto || totalFixas + totalVariaveis),
           quantidade_itens: Number(row.quantidade_itens || 0),
         };

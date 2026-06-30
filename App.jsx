@@ -1440,6 +1440,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
   const [carregandoResumoMensal, setCarregandoResumoMensal] = useState(false);
   const [carregando, setCarregando] = useState(false);
   const [editandoId, setEditandoId] = useState(null);
+  const [formularioAberto, setFormularioAberto] = useState(false);
   const formularioInicial = { descricao: '', categoria: '', tipo_despesa: 'FIXA', valor_previsto: '', dia_previsto: '', observacao: '', recorrencia_tipo: 'UNICA', recorrencia_termino: 'SEM_FIM', mes_fim: String(hoje.getMonth() + 1), ano_fim: String(hoje.getFullYear()), quantidade_parcelas: '', parcela_inicial: '1' };
   const [form, setForm] = useState(formularioInicial);
 
@@ -1476,6 +1477,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
   const limparFormulario = () => {
     setEditandoId(null);
     setForm(formularioInicial);
+    setFormularioAberto(false);
   };
 
   const salvarPlanejamento = async (event) => {
@@ -1496,6 +1498,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
   };
 
   const editarPlanejamento = (item) => {
+    setFormularioAberto(true);
     setEditandoId(item.id);
     setForm({
       descricao: item.descricao || '',
@@ -1536,6 +1539,9 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
   };
 
   const maiorTotalResumoMensal = Math.max(...resumoMensal.map((item) => Number(item.total_previsto || 0)), 0);
+  const rotuloMesAnoSelecionado = `${nomesMesesCurtos[Number(mes) - 1]}/${ano}`;
+  const parcelasPlanejadas = planejamentos.filter((item) => item.recorrencia_tipo === 'PARCELADA');
+  const totalParcelasPlanejadas = parcelasPlanejadas.reduce((soma, item) => soma + Number(item.valor_previsto || 0), 0);
 
   return (
     <div style={{ minHeight: '100vh', background: '#f5f5f5', padding: '20px' }}>
@@ -1545,18 +1551,22 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
           <h1 style={{ margin: '0 0 8px' }}>🗓️ Planejamento Mensal</h1>
           <p style={{ color: '#64748b', marginTop: 0 }}>Cadastre aqui os gastos que você já sabe ou estima que terá no mês. Separe despesas fixas, como aluguel, internet e assinaturas, das despesas variáveis, como mercado, transporte, lazer e delivery.</p>
           <p style={{ color: '#64748b', marginTop: 0 }}>Use a recorrência para despesas que se repetem. Escolha mensal para gastos fixos como aluguel, internet e assinaturas. Escolha parcelada para dívidas ou compras divididas em vários meses.</p>
+          <h2 style={{ margin: '18px 0 12px' }}>Resumo planejado de {rotuloMesAnoSelecionado}</h2>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '12px', marginTop: '16px' }}>
-            <KpiCard titulo="Despesas fixas" valor={formatarMoeda(resumo.totalFixas)} detalhe="Gastos recorrentes" cor="#dc2626" fundo="#fef2f2" />
-            <KpiCard titulo="Despesas variáveis" valor={formatarMoeda(resumo.totalVariaveis)} detalhe="Estimativas do mês" cor="#d97706" fundo="#fffbeb" />
-            <KpiCard titulo="Total previsto" valor={formatarMoeda(resumo.totalPrevisto)} detalhe="Fixas + variáveis" cor="#2563eb" fundo="#eff6ff" />
-            <KpiCard titulo="Itens planejados" valor={Number(resumo.quantidade || 0)} detalhe="Despesas cadastradas" cor="#0f766e" fundo="#f0fdfa" />
-            <KpiCard titulo="Realizado no mês" valor={formatarMoeda(resumo.totalRealizado)} detalhe={`Diferença: ${formatarMoeda(resumo.diferencaPrevistoRealizado)}`} cor="#7c3aed" fundo="#f5f3ff" />
+            <KpiCard titulo="Fixas planejadas" valor={formatarMoeda(resumo.totalFixas)} detalhe="Compromissos fixos do mês" cor="#2563eb" fundo="#eff6ff" />
+            <KpiCard titulo="Variáveis planejadas" valor={formatarMoeda(resumo.totalVariaveis)} detalhe="Estimativas variáveis" cor="#f97316" fundo="#fff7ed" />
+            <KpiCard titulo="Total previsto no mês" valor={formatarMoeda(resumo.totalPrevisto)} detalhe="Soma do planejamento" cor="#0f766e" fundo="#f0fdfa" />
+            <KpiCard titulo="Itens planejados" valor={Number(resumo.quantidade || 0)} detalhe="Despesas cadastradas" cor="#475569" fundo="#f8fafc" />
+            {parcelasPlanejadas.length > 0 && <KpiCard titulo="Parcelas previstas" valor={formatarMoeda(totalParcelasPlanejadas)} detalhe={`${parcelasPlanejadas.length} parcela(s) no mês`} cor="#7c3aed" fundo="#f5f3ff" />}
+          </div>
+          <div style={{ marginTop: '12px', background: '#f8fafc', border: '1px solid #e5e7eb', borderRadius: '10px', padding: '12px', color: '#64748b' }}>
+            <strong style={{ color: '#334155' }}>Comparativo com realizado:</strong> realizado no mês {formatarMoeda(resumo.totalRealizado)} · diferença {formatarMoeda(resumo.diferencaPrevistoRealizado)}.
           </div>
         </div>
 
         <div style={{ background: 'white', borderRadius: '16px', padding: '22px', boxShadow: '0 2px 10px rgba(15,23,42,0.08)', marginBottom: '18px' }}>
-          <h2 style={{ margin: '0 0 6px' }}>Previsão mensal de gastos</h2>
-          <p style={{ color: '#64748b', marginTop: 0 }}>Valores previstos com base nas despesas cadastradas, recorrentes e parceladas.</p>
+          <h2 style={{ margin: '0 0 6px' }}>Compromissos previstos para os próximos 12 meses</h2>
+          <p style={{ color: '#64748b', marginTop: 0 }}>Valores calculados com base nas despesas únicas, recorrentes e parceladas cadastradas no planejamento.</p>
           <div style={{ display: 'flex', gap: '14px', flexWrap: 'wrap', marginBottom: '16px', color: '#475569', fontSize: '13px' }}>
             <span><strong style={{ color: '#2563eb' }}>■</strong> Fixas</span>
             <span><strong style={{ color: '#f97316' }}>■</strong> Variáveis</span>
@@ -1588,16 +1598,20 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
               </div>
               <div style={{ overflowX: 'auto', marginTop: '14px' }}>
                 <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '560px' }}>
-                  <thead style={{ background: '#f8fafc' }}><tr>{['Mês','Fixas','Variáveis','Total previsto'].map((h) => <th key={h} style={{ padding: '10px', textAlign: 'left' }}>{h}</th>)}</tr></thead>
-                  <tbody>{resumoMensal.map((item) => <tr key={`${item.ano}-${item.mes}`} style={{ borderTop: '1px solid #e5e7eb' }}><td style={{ padding: '10px' }}>{item.label}</td><td style={{ padding: '10px' }}>{formatarMoeda(item.total_fixas)}</td><td style={{ padding: '10px' }}>{formatarMoeda(item.total_variaveis)}</td><td style={{ padding: '10px', fontWeight: 'bold' }}>{formatarMoeda(item.total_previsto)}</td></tr>)}</tbody>
+                  <thead style={{ background: '#f8fafc' }}><tr>{['Mês','Fixas planejadas','Variáveis planejadas','Parceladas','Total previsto'].map((h) => <th key={h} style={{ padding: '10px', textAlign: 'left' }}>{h}</th>)}</tr></thead>
+                  <tbody>{resumoMensal.map((item) => <tr key={`${item.ano}-${item.mes}`} style={{ borderTop: '1px solid #e5e7eb' }}><td style={{ padding: '10px' }}>{item.label}</td><td style={{ padding: '10px' }}>{formatarMoeda(item.total_fixas)}</td><td style={{ padding: '10px' }}>{formatarMoeda(item.total_variaveis)}</td><td style={{ padding: '10px' }}>{formatarMoeda(item.total_parceladas)}</td><td style={{ padding: '10px', fontWeight: 'bold' }}>{formatarMoeda(item.total_previsto)}</td></tr>)}</tbody>
                 </table>
               </div>
             </>
           )}
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '18px' }}>
-          <form onSubmit={salvarPlanejamento} style={{ background: 'white', borderRadius: '14px', padding: '18px', display: 'grid', gap: '12px' }}>
+        <div style={{ marginBottom: '14px' }}>
+          <button onClick={() => setFormularioAberto(true)} style={{ background: '#2563eb', color: 'white', border: 'none', padding: '12px 16px', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold' }}>+ Adicionar despesa planejada</button>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: formularioAberto ? 'repeat(auto-fit, minmax(320px, 1fr))' : '1fr', gap: '18px' }}>
+          {formularioAberto && <form onSubmit={salvarPlanejamento} style={{ background: 'white', borderRadius: '14px', padding: '18px', display: 'grid', gap: '12px', border: '1px solid #e5e7eb' }}>
             <h2 style={{ margin: 0 }}>{editandoId ? 'Editar despesa planejada' : 'Adicionar despesa planejada'}</h2>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
               <label>Mês<select value={mes} onChange={(e) => setMes(Number(e.target.value))} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}>{Array.from({ length: 12 }, (_, i) => <option key={i + 1} value={i + 1}>{i + 1}</option>)}</select></label>
@@ -1632,10 +1646,10 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
             </div>
             <label>Observação<textarea value={form.observacao} onChange={(e) => setForm({ ...form, observacao: e.target.value })} rows="3" placeholder="Detalhes opcionais" style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} /></label>
             <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}><button type="submit" style={{ background: '#2563eb', color: 'white', border: 'none', padding: '10px 14px', borderRadius: '8px', cursor: 'pointer' }}>{editandoId ? 'Salvar alterações' : 'Adicionar despesa'}</button><button type="button" onClick={limparFormulario} style={{ background: '#e5e7eb', border: 'none', padding: '10px 14px', borderRadius: '8px', cursor: 'pointer' }}>Limpar formulário</button></div>
-          </form>
+          </form>}
 
           <div style={{ background: 'white', borderRadius: '14px', padding: '18px', overflowX: 'auto' }}>
-            <h2 style={{ marginTop: 0 }}>Despesas cadastradas</h2>
+            <h2 style={{ marginTop: 0 }}>Despesas planejadas de {rotuloMesAnoSelecionado}</h2>
             {carregando ? <p>Carregando...</p> : planejamentos.length === 0 ? <p style={{ color: '#64748b' }}>Nenhuma despesa planejada para este mês.</p> : (
               <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '760px' }}>
                 <thead style={{ background: '#f8fafc' }}><tr>{['Descrição','Categoria','Tipo','Recorrência','Valor previsto','Dia previsto','Observação','Ações'].map((h) => <th key={h} style={{ padding: '10px', textAlign: 'left' }}>{h}</th>)}</tr></thead>
