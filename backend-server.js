@@ -402,6 +402,7 @@ async function inicializarBanco() {
       ano INT NOT NULL,
       descricao TEXT NOT NULL,
       categoria TEXT,
+      categoria_id UUID REFERENCES categorias(id) ON DELETE SET NULL,
       tipo_despesa VARCHAR(20) NOT NULL,
       valor_previsto DECIMAL(12, 2) NOT NULL,
       dia_previsto INT,
@@ -440,7 +441,8 @@ async function inicializarBanco() {
       ADD COLUMN IF NOT EXISTS ano_inicio INT,
       ADD COLUMN IF NOT EXISTS mes_fim INT,
       ADD COLUMN IF NOT EXISTS ano_fim INT,
-      ADD COLUMN IF NOT EXISTS ativa BOOLEAN DEFAULT true
+      ADD COLUMN IF NOT EXISTS ativa BOOLEAN DEFAULT true,
+      ADD COLUMN IF NOT EXISTS categoria_id UUID REFERENCES categorias(id) ON DELETE SET NULL
   `);
 
   await pool.query(`
@@ -475,6 +477,7 @@ async function inicializarBanco() {
 
   await pool.query('CREATE INDEX IF NOT EXISTS idx_planejamentos_usuario_mes_ano ON planejamentos_mensais(usuario_id, ano, mes)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_planejamentos_recorrencia ON planejamentos_mensais(usuario_id, recorrencia_id)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_planejamentos_categoria ON planejamentos_mensais(usuario_id, categoria_id)');
 
   await pool.query("CREATE UNIQUE INDEX IF NOT EXISTS idx_conciliacoes_provisao_ativa ON conciliacoes(provisao_id) WHERE status = 'CONFIRMADA'");
   await pool.query("CREATE UNIQUE INDEX IF NOT EXISTS idx_conciliacoes_transacao_ativa ON conciliacoes(transacao_id) WHERE status = 'CONFIRMADA'");
@@ -2881,6 +2884,7 @@ function validarPayloadPlanejamento(body = {}, parcial = false) {
     payload.parcelaInicial = null;
   }
   if (body.categoria !== undefined) payload.categoria = String(body.categoria || '').trim() || null;
+  if (body.categoria_id !== undefined || body.categoriaId !== undefined) payload.categoriaId = String(body.categoria_id || body.categoriaId || '').trim() || null;
   if (body.observacao !== undefined) payload.observacao = String(body.observacao || '').trim() || null;
   return payload;
 }
@@ -2896,7 +2900,7 @@ function montarLancamentosPlanejamento(usuarioId, payload, recorrenciaId = crypt
     const periodo = adicionarMesesPlanejamento(payload.mes, payload.ano, indice);
     const parcelaAtual = payload.recorrenciaTipo === 'PARCELADA' ? payload.parcelaInicial + indice : null;
     const descricao = payload.recorrenciaTipo === 'PARCELADA' ? `${payload.descricao} (${parcelaAtual}/${payload.quantidadeParcelas})` : payload.descricao;
-    return [usuarioId, periodo.mes, periodo.ano, descricao, payload.categoria || null, payload.tipoDespesa, payload.valorPrevisto, payload.diaPrevisto ?? null, payload.observacao || null, payload.recorrenciaTipo, recorrenciaId, payload.quantidadeParcelas, parcelaAtual, payload.mes, payload.ano, payload.mesFim, payload.anoFim, true];
+    return [usuarioId, periodo.mes, periodo.ano, descricao, payload.categoria || null, payload.categoriaId || null, payload.tipoDespesa, payload.valorPrevisto, payload.diaPrevisto ?? null, payload.observacao || null, payload.recorrenciaTipo, recorrenciaId, payload.quantidadeParcelas, parcelaAtual, payload.mes, payload.ano, payload.mesFim, payload.anoFim, true];
   });
 }
 
@@ -2922,9 +2926,9 @@ async function materializarRecorrenciasMensaisUsuario(usuarioId, mes, ano) {
     if (existente.rows.length > 0) continue;
 
     await pool.query(
-      `INSERT INTO planejamentos_mensais (usuario_id, mes, ano, descricao, categoria, tipo_despesa, valor_previsto, dia_previsto, observacao, recorrencia_tipo, recorrencia_id, quantidade_parcelas, parcela_atual, mes_inicio, ano_inicio, mes_fim, ano_fim, ativa)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'MENSAL',$10,NULL,NULL,$11,$12,$13,$14,true)`,
-      [usuarioId, mes, ano, item.descricao, item.categoria, item.tipo_despesa, item.valor_previsto, item.dia_previsto, item.observacao, item.recorrencia_id, item.mes_inicio, item.ano_inicio, item.mes_fim, item.ano_fim]
+      `INSERT INTO planejamentos_mensais (usuario_id, mes, ano, descricao, categoria, categoria_id, tipo_despesa, valor_previsto, dia_previsto, observacao, recorrencia_tipo, recorrencia_id, quantidade_parcelas, parcela_atual, mes_inicio, ano_inicio, mes_fim, ano_fim, ativa)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'MENSAL',$11,NULL,NULL,$12,$13,$14,$15,true)`,
+      [usuarioId, mes, ano, item.descricao, item.categoria, item.categoria_id, item.tipo_despesa, item.valor_previsto, item.dia_previsto, item.observacao, item.recorrencia_id, item.mes_inicio, item.ano_inicio, item.mes_fim, item.ano_fim]
     );
   }
 }
@@ -2937,6 +2941,72 @@ function montarResumoPlanejamento(rows = [], totalRealizado = 0) {
   return { totalFixas, totalVariaveis, totalPrevisto, quantidade: rows.length, totalRealizado, diferencaPrevistoRealizado: totalPrevisto - totalRealizado };
 }
 
+async function validarCategoriaPlanejamentoUsuario(usuarioId, categoriaId) {
+  if (!categoriaId) return null;
+  const result = await pool.query(
+    `SELECT id, nome FROM categorias WHERE id = $1 AND (usuario_id = $2 OR usuario_id IS NULL) AND ativa = true LIMIT 1`,
+    [categoriaId, usuarioId]
+  );
+  if (result.rows.length === 0) throw new Error('Categoria inválida para este usuário.');
+  return result.rows[0];
+}
+
+function chaveComparativoCategoria(id, nome) {
+  return id ? `id:${id}` : `nome:${String(nome || 'Sem categoria').trim().toLowerCase()}`;
+}
+
+async function buscarComparativoPlanejadoRealizadoPorCategoria(usuarioId, mes, ano) {
+  const planejados = await pool.query(
+    `SELECT p.categoria_id, COALESCE(cat.nome, NULLIF(TRIM(p.categoria), ''), 'Sem categoria') AS categoria_nome, COALESCE(SUM(p.valor_previsto), 0) AS valor_planejado
+     FROM planejamentos_mensais p
+     LEFT JOIN categorias cat ON cat.id = p.categoria_id
+     WHERE p.usuario_id = $1 AND p.mes = $2 AND p.ano = $3 AND p.ativa = true
+     GROUP BY p.categoria_id, COALESCE(cat.nome, NULLIF(TRIM(p.categoria), ''), 'Sem categoria')`,
+    [usuarioId, mes, ano]
+  );
+
+  const realizados = await pool.query(
+    `SELECT COALESCE(t.categoria_macro_id, CASE WHEN cat.categoria_pai_id IS NULL THEN t.categoria_id ELSE cat.categoria_pai_id END) AS categoria_id,
+            COALESCE(cm.nome, cat_macro.nome, CASE WHEN cat.categoria_pai_id IS NULL THEN cat.nome ELSE NULL END, cat.nome, 'Sem categoria') AS categoria_nome,
+            COALESCE(SUM(ABS(t.valor)), 0) AS valor_realizado
+     FROM transacoes t
+     JOIN contas c ON c.id = t.conta_id
+     LEFT JOIN categorias cat ON cat.id = t.categoria_id
+     LEFT JOIN categorias cat_macro ON cat_macro.id = cat.categoria_pai_id
+     LEFT JOIN categorias cm ON cm.id = t.categoria_macro_id
+     WHERE c.usuario_id = $1
+       AND t.deletado_em IS NULL
+       AND COALESCE(t.eh_transferencia_interna, false) = false
+       AND EXTRACT(MONTH FROM t.data) = $2
+       AND EXTRACT(YEAR FROM t.data) = $3
+       AND UPPER(t.tipo) IN ('DEBITO', 'DESPESA')
+     GROUP BY COALESCE(t.categoria_macro_id, CASE WHEN cat.categoria_pai_id IS NULL THEN t.categoria_id ELSE cat.categoria_pai_id END),
+              COALESCE(cm.nome, cat_macro.nome, CASE WHEN cat.categoria_pai_id IS NULL THEN cat.nome ELSE NULL END, cat.nome, 'Sem categoria')`,
+    [usuarioId, mes, ano]
+  );
+
+  const mapa = new Map();
+  for (const row of planejados.rows) {
+    const chave = chaveComparativoCategoria(row.categoria_id, row.categoria_nome);
+    mapa.set(chave, { categoriaId: row.categoria_id, categoria: row.categoria_nome, valorPlanejado: Number(row.valor_planejado || 0), valorRealizado: 0 });
+  }
+  for (const row of realizados.rows) {
+    const chavePorId = chaveComparativoCategoria(row.categoria_id, row.categoria_nome);
+    const chavePorNome = chaveComparativoCategoria(null, row.categoria_nome);
+    const chave = mapa.has(chavePorId) ? chavePorId : mapa.has(chavePorNome) ? chavePorNome : chavePorId;
+    const atual = mapa.get(chave) || { categoriaId: row.categoria_id, categoria: row.categoria_nome, valorPlanejado: 0, valorRealizado: 0 };
+    atual.categoriaId = atual.categoriaId || row.categoria_id;
+    atual.valorRealizado += Number(row.valor_realizado || 0);
+    mapa.set(chave, atual);
+  }
+
+  return Array.from(mapa.values()).map((item) => {
+    const diferenca = item.valorPlanejado - item.valorRealizado;
+    const percentualUtilizado = item.valorPlanejado > 0 ? Number(((item.valorRealizado / item.valorPlanejado) * 100).toFixed(1)) : null;
+    return { ...item, diferenca, percentualUtilizado };
+  }).sort((a, b) => (b.valorPlanejado + b.valorRealizado) - (a.valorPlanejado + a.valorRealizado));
+}
+
 async function buscarTotalRealizadoMes(usuarioId, mes, ano) {
   const result = await pool.query(
     `SELECT COALESCE(SUM(ABS(t.valor)), 0) AS total
@@ -2944,6 +3014,7 @@ async function buscarTotalRealizadoMes(usuarioId, mes, ano) {
      JOIN contas c ON c.id = t.conta_id
      WHERE c.usuario_id = $1
        AND t.deletado_em IS NULL
+       AND COALESCE(t.eh_transferencia_interna, false) = false
        AND EXTRACT(MONTH FROM t.data) = $2
        AND EXTRACT(YEAR FROM t.data) = $3
        AND UPPER(t.tipo) IN ('DEBITO', 'DESPESA')`,
@@ -2956,12 +3027,17 @@ app.get('/api/planejamento', verificarToken, async (req, res) => {
   try {
     const { mes, ano } = validarMesAnoPlanejamento(req.query.mes, req.query.ano);
     await materializarRecorrenciasMensaisUsuario(req.usuario.usuario_id, mes, ano);
+    const filtros = normalizarFiltrosPlanejamento(req.query);
+    const valores = [req.usuario.usuario_id, mes, ano];
+    const where = ['usuario_id = $1', 'mes = $2', 'ano = $3', 'ativa = true'];
+    aplicarFiltrosPlanejamento(where, valores, filtros, 'planejamentos_mensais');
     const result = await pool.query(
-      `SELECT * FROM planejamentos_mensais WHERE usuario_id = $1 AND mes = $2 AND ano = $3 AND ativa = true ORDER BY tipo_despesa, dia_previsto NULLS LAST, criado_em DESC`,
-      [req.usuario.usuario_id, mes, ano]
+      `SELECT * FROM planejamentos_mensais WHERE ${where.join(' AND ')} ORDER BY tipo_despesa, dia_previsto NULLS LAST, criado_em DESC`,
+      valores
     );
     const totalRealizado = await buscarTotalRealizadoMes(req.usuario.usuario_id, mes, ano);
-    res.json({ planejamentos: result.rows, resumo: montarResumoPlanejamento(result.rows, totalRealizado) });
+    const comparativoCategorias = await buscarComparativoPlanejadoRealizadoPorCategoria(req.usuario.usuario_id, mes, ano);
+    res.json({ planejamentos: result.rows, resumo: montarResumoPlanejamento(result.rows, totalRealizado), comparativoCategorias });
   } catch (error) { res.status(400).json({ erro: error.message }); }
 });
 
@@ -2969,6 +3045,34 @@ app.get('/api/planejamento', verificarToken, async (req, res) => {
 function montarLabelMesPlanejamento(mes, ano) {
   const nomes = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
   return `${nomes[Number(mes) - 1]}/${String(ano).slice(-2)}`;
+}
+
+
+function normalizarFiltrosPlanejamento(query = {}) {
+  const tipo = String(query.tipo || 'TODOS').trim().toUpperCase();
+  const recorrencia = String(query.recorrencia || 'TODAS').trim().toUpperCase();
+  const categoria = String(query.categoria || '').trim();
+  return {
+    tipo: ['FIXA', 'VARIAVEL'].includes(tipo) ? tipo : 'TODOS',
+    recorrencia: ['UNICA', 'MENSAL', 'PARCELADA'].includes(recorrencia) ? recorrencia : 'TODAS',
+    categoria,
+  };
+}
+
+function aplicarFiltrosPlanejamento(where, valores, filtros, alias = 'p') {
+  if (filtros.tipo !== 'TODOS') {
+    valores.push(filtros.tipo);
+    where.push(`${alias}.tipo_despesa = $${valores.length}`);
+  }
+  if (filtros.recorrencia !== 'TODAS') {
+    valores.push(filtros.recorrencia);
+    where.push(`${alias}.recorrencia_tipo = $${valores.length}`);
+  }
+  if (filtros.categoria) {
+    valores.push(filtros.categoria);
+    const indice = valores.length;
+    where.push(`(${alias}.categoria_id::text = $${indice} OR LOWER(COALESCE(NULLIF(TRIM(${alias}.categoria), ''), 'Sem categoria')) = LOWER($${indice}))`);
+  }
 }
 
 app.get('/api/planejamento/resumo-mensal', verificarToken, async (req, res) => {
@@ -2986,6 +3090,10 @@ app.get('/api/planejamento/resumo-mensal', verificarToken, async (req, res) => {
 
     const primeiro = meses[0];
     const ultimo = meses[meses.length - 1];
+    const filtros = normalizarFiltrosPlanejamento(req.query);
+    const valores = [req.usuario.usuario_id, primeiro.ano, primeiro.mes, ultimo.ano, ultimo.mes];
+    const where = ['usuario_id = $1', 'ativa = true', '(ano * 12 + mes) BETWEEN ($2::int * 12 + $3::int) AND ($4::int * 12 + $5::int)'];
+    aplicarFiltrosPlanejamento(where, valores, filtros, 'planejamentos_mensais');
     const result = await pool.query(
       `SELECT mes, ano,
               COALESCE(SUM(CASE WHEN tipo_despesa = 'FIXA' THEN valor_previsto ELSE 0 END), 0) AS total_fixas,
@@ -2994,11 +3102,9 @@ app.get('/api/planejamento/resumo-mensal', verificarToken, async (req, res) => {
               COALESCE(SUM(valor_previsto), 0) AS total_previsto,
               COUNT(*)::int AS quantidade_itens
        FROM planejamentos_mensais
-       WHERE usuario_id = $1
-         AND ativa = true
-         AND (ano * 12 + mes) BETWEEN ($2::int * 12 + $3::int) AND ($4::int * 12 + $5::int)
+       WHERE ${where.join(' AND ')}
        GROUP BY mes, ano`,
-      [req.usuario.usuario_id, primeiro.ano, primeiro.mes, ultimo.ano, ultimo.mes]
+      valores
     );
 
     const porPeriodo = new Map(result.rows.map((row) => [`${row.ano}-${row.mes}`, row]));
@@ -3023,16 +3129,76 @@ app.get('/api/planejamento/resumo-mensal', verificarToken, async (req, res) => {
   } catch (error) { res.status(400).json({ erro: error.message }); }
 });
 
+
+app.get('/api/planejamento/resumo-categorias', verificarToken, async (req, res) => {
+  try {
+    const { mes: mesInicio, ano: anoInicio } = validarMesAnoPlanejamento(req.query.mesInicio, req.query.anoInicio);
+    const quantidadeMeses = Number(req.query.quantidadeMeses || 12);
+    if (!Number.isInteger(quantidadeMeses) || quantidadeMeses < 1 || quantidadeMeses > 24) throw new Error('Quantidade de meses deve estar entre 1 e 24.');
+
+    const meses = [];
+    for (let indice = 0; indice < quantidadeMeses; indice++) {
+      const periodo = adicionarMesesPlanejamento(mesInicio, anoInicio, indice);
+      await materializarRecorrenciasMensaisUsuario(req.usuario.usuario_id, periodo.mes, periodo.ano);
+      meses.push(periodo);
+    }
+
+    const primeiro = meses[0];
+    const ultimo = meses[meses.length - 1];
+    const filtros = normalizarFiltrosPlanejamento(req.query);
+    const valores = [req.usuario.usuario_id, primeiro.ano, primeiro.mes, ultimo.ano, ultimo.mes];
+    const where = ['p.usuario_id = $1', 'p.ativa = true', '(p.ano * 12 + p.mes) BETWEEN ($2::int * 12 + $3::int) AND ($4::int * 12 + $5::int)'];
+    aplicarFiltrosPlanejamento(where, valores, filtros, 'p');
+
+    const result = await pool.query(
+      `SELECT p.mes, p.ano,
+              COALESCE(cat.nome, NULLIF(TRIM(p.categoria), ''), 'Sem categoria') AS categoria,
+              COALESCE(SUM(p.valor_previsto), 0) AS valor
+       FROM planejamentos_mensais p
+       LEFT JOIN categorias cat ON cat.id = p.categoria_id
+       WHERE ${where.join(' AND ')}
+       GROUP BY p.mes, p.ano, COALESCE(cat.nome, NULLIF(TRIM(p.categoria), ''), 'Sem categoria')
+       ORDER BY p.ano, p.mes, categoria`,
+      valores
+    );
+
+    const porPeriodo = new Map(meses.map((periodo) => [`${periodo.ano}-${periodo.mes}`, []]));
+    for (const row of result.rows) {
+      const chave = `${row.ano}-${row.mes}`;
+      const lista = porPeriodo.get(chave) || [];
+      lista.push({ categoria: row.categoria || 'Sem categoria', valor: Number(row.valor || 0) });
+      porPeriodo.set(chave, lista);
+    }
+
+    res.json({
+      meses: meses.map((periodo) => {
+        const categorias = (porPeriodo.get(`${periodo.ano}-${periodo.mes}`) || []).sort((a, b) => b.valor - a.valor);
+        return {
+          mes: periodo.mes,
+          ano: periodo.ano,
+          label: montarLabelMesPlanejamento(periodo.mes, periodo.ano),
+          total_previsto: categorias.reduce((total, item) => total + Number(item.valor || 0), 0),
+          categorias,
+        };
+      })
+    });
+  } catch (error) { res.status(400).json({ erro: error.message }); }
+});
+
 app.post('/api/planejamento', verificarToken, async (req, res) => {
   try {
     const p = validarPayloadPlanejamento(req.body);
+    if (p.categoriaId) {
+      const categoria = await validarCategoriaPlanejamentoUsuario(req.usuario.usuario_id, p.categoriaId);
+      p.categoria = p.categoria || categoria.nome;
+    }
     const lancamentos = montarLancamentosPlanejamento(req.usuario.usuario_id, p);
     const placeholders = lancamentos.map((_, indice) => {
-      const base = indice * 18;
-      return `(${Array.from({ length: 18 }, (__, coluna) => `$${base + coluna + 1}`).join(',')})`;
+      const base = indice * 19;
+      return `(${Array.from({ length: 19 }, (__, coluna) => `$${base + coluna + 1}`).join(',')})`;
     }).join(',');
     const result = await pool.query(
-      `INSERT INTO planejamentos_mensais (usuario_id, mes, ano, descricao, categoria, tipo_despesa, valor_previsto, dia_previsto, observacao, recorrencia_tipo, recorrencia_id, quantidade_parcelas, parcela_atual, mes_inicio, ano_inicio, mes_fim, ano_fim, ativa)
+      `INSERT INTO planejamentos_mensais (usuario_id, mes, ano, descricao, categoria, categoria_id, tipo_despesa, valor_previsto, dia_previsto, observacao, recorrencia_tipo, recorrencia_id, quantidade_parcelas, parcela_atual, mes_inicio, ano_inicio, mes_fim, ano_fim, ativa)
        VALUES ${placeholders} RETURNING *`,
       lancamentos.flat()
     );
@@ -3043,10 +3209,14 @@ app.post('/api/planejamento', verificarToken, async (req, res) => {
 app.put('/api/planejamento/:id', verificarToken, async (req, res) => {
   try {
     const p = validarPayloadPlanejamento(req.body);
+    if (p.categoriaId) {
+      const categoria = await validarCategoriaPlanejamentoUsuario(req.usuario.usuario_id, p.categoriaId);
+      p.categoria = p.categoria || categoria.nome;
+    }
     const result = await pool.query(
-      `UPDATE planejamentos_mensais SET mes=$1, ano=$2, descricao=$3, categoria=$4, tipo_despesa=$5, valor_previsto=$6, dia_previsto=$7, observacao=$8, recorrencia_tipo=$9, quantidade_parcelas=$10, parcela_atual=$11, mes_inicio=$12, ano_inicio=$13, mes_fim=$14, ano_fim=$15, atualizado_em=NOW()
-       WHERE id=$16 AND usuario_id=$17 RETURNING *`,
-      [p.mes, p.ano, p.descricao, p.categoria || null, p.tipoDespesa, p.valorPrevisto, p.diaPrevisto ?? null, p.observacao || null, p.recorrenciaTipo, p.quantidadeParcelas, p.parcelaInicial, p.mes, p.ano, p.mesFim, p.anoFim, req.params.id, req.usuario.usuario_id]
+      `UPDATE planejamentos_mensais SET mes=$1, ano=$2, descricao=$3, categoria=$4, categoria_id=$5, tipo_despesa=$6, valor_previsto=$7, dia_previsto=$8, observacao=$9, recorrencia_tipo=$10, quantidade_parcelas=$11, parcela_atual=$12, mes_inicio=$13, ano_inicio=$14, mes_fim=$15, ano_fim=$16, atualizado_em=NOW()
+       WHERE id=$17 AND usuario_id=$18 RETURNING *`,
+      [p.mes, p.ano, p.descricao, p.categoria || null, p.categoriaId || null, p.tipoDespesa, p.valorPrevisto, p.diaPrevisto ?? null, p.observacao || null, p.recorrenciaTipo, p.quantidadeParcelas, p.parcelaInicial, p.mes, p.ano, p.mesFim, p.anoFim, req.params.id, req.usuario.usuario_id]
     );
     if (result.rows.length === 0) return res.status(404).json({ erro: 'Planejamento não encontrado.' });
     res.json({ planejamento: result.rows[0] });

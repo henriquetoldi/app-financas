@@ -725,6 +725,21 @@ function NotificacoesBell({ token }) {
 
   const authHeaders = { Authorization: `Bearer ${token}` };
   const nomesMesesCurtos = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
+  const opcoesPeriodoGraficos = [3, 6, 12, 24];
+  const montarQueryFiltrosPlanejamento = (incluirPeriodo = false) => {
+    const params = new URLSearchParams({
+      tipo: filtrosPlanejamento.tipo,
+      recorrencia: filtrosPlanejamento.recorrencia,
+      categoria: filtrosPlanejamento.categoria,
+    });
+    if (incluirPeriodo) params.set('quantidadeMeses', String(filtrosPlanejamento.periodo));
+    return params.toString();
+  };
+  const corCategoriaPlanejamento = (categoria = 'Sem categoria') => {
+    const paleta = ['#2563eb', '#f97316', '#0f766e', '#7c3aed', '#dc2626', '#0891b2', '#ca8a04', '#16a34a', '#be185d', '#475569'];
+    const hash = String(categoria || 'Sem categoria').split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
+    return paleta[hash % paleta.length];
+  };
 
   const carregarNotificacoes = async () => {
     try {
@@ -781,6 +796,21 @@ function ImportarExcel({ contas, token, onConcluida }) {
 
   const authHeaders = { Authorization: `Bearer ${token}` };
   const nomesMesesCurtos = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
+  const opcoesPeriodoGraficos = [3, 6, 12, 24];
+  const montarQueryFiltrosPlanejamento = (incluirPeriodo = false) => {
+    const params = new URLSearchParams({
+      tipo: filtrosPlanejamento.tipo,
+      recorrencia: filtrosPlanejamento.recorrencia,
+      categoria: filtrosPlanejamento.categoria,
+    });
+    if (incluirPeriodo) params.set('quantidadeMeses', String(filtrosPlanejamento.periodo));
+    return params.toString();
+  };
+  const corCategoriaPlanejamento = (categoria = 'Sem categoria') => {
+    const paleta = ['#2563eb', '#f97316', '#0f766e', '#7c3aed', '#dc2626', '#0891b2', '#ca8a04', '#16a34a', '#be185d', '#475569'];
+    const hash = String(categoria || 'Sem categoria').split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
+    return paleta[hash % paleta.length];
+  };
 
   const processarArquivo = async (file) => {
     setArquivo(file);
@@ -1437,22 +1467,42 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
   const [planejamentos, setPlanejamentos] = useState([]);
   const [resumo, setResumo] = useState({});
   const [resumoMensal, setResumoMensal] = useState([]);
+  const [comparativoCategorias, setComparativoCategorias] = useState([]);
+  const [resumoCategorias, setResumoCategorias] = useState([]);
+  const [categorias, setCategorias] = useState([]);
+  const [filtrosPlanejamento, setFiltrosPlanejamento] = useState({ tipo: 'TODOS', recorrencia: 'TODAS', categoria: '', periodo: 12 });
   const [carregandoResumoMensal, setCarregandoResumoMensal] = useState(false);
   const [carregando, setCarregando] = useState(false);
   const [editandoId, setEditandoId] = useState(null);
   const [formularioAberto, setFormularioAberto] = useState(false);
-  const formularioInicial = { descricao: '', categoria: '', tipo_despesa: 'FIXA', valor_previsto: '', dia_previsto: '', observacao: '', recorrencia_tipo: 'UNICA', recorrencia_termino: 'SEM_FIM', mes_fim: String(hoje.getMonth() + 1), ano_fim: String(hoje.getFullYear()), quantidade_parcelas: '', parcela_inicial: '1' };
+  const formularioInicial = { descricao: '', categoria: '', categoria_id: '', tipo_despesa: 'FIXA', valor_previsto: '', dia_previsto: '', observacao: '', recorrencia_tipo: 'UNICA', recorrencia_termino: 'SEM_FIM', mes_fim: String(hoje.getMonth() + 1), ano_fim: String(hoje.getFullYear()), quantidade_parcelas: '', parcela_inicial: '1' };
   const [form, setForm] = useState(formularioInicial);
 
   const authHeaders = { Authorization: `Bearer ${token}` };
   const nomesMesesCurtos = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
+  const opcoesPeriodoGraficos = [3, 6, 12, 24];
+  const montarQueryFiltrosPlanejamento = (incluirPeriodo = false) => {
+    const params = new URLSearchParams({
+      tipo: filtrosPlanejamento.tipo,
+      recorrencia: filtrosPlanejamento.recorrencia,
+      categoria: filtrosPlanejamento.categoria,
+    });
+    if (incluirPeriodo) params.set('quantidadeMeses', String(filtrosPlanejamento.periodo));
+    return params.toString();
+  };
+  const corCategoriaPlanejamento = (categoria = 'Sem categoria') => {
+    const paleta = ['#2563eb', '#f97316', '#0f766e', '#7c3aed', '#dc2626', '#0891b2', '#ca8a04', '#16a34a', '#be185d', '#475569'];
+    const hash = String(categoria || 'Sem categoria').split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
+    return paleta[hash % paleta.length];
+  };
 
   const carregarPlanejamento = async () => {
     setCarregando(true);
     try {
-      const response = await axios.get(`${API_URL}/planejamento?mes=${mes}&ano=${ano}`, { headers: authHeaders });
+      const response = await axios.get(`${API_URL}/planejamento?mes=${mes}&ano=${ano}&${montarQueryFiltrosPlanejamento()}`, { headers: authHeaders });
       setPlanejamentos(response.data.planejamentos || []);
       setResumo(response.data.resumo || {});
+      setComparativoCategorias(response.data.comparativoCategorias || []);
     } catch (error) {
       alert('Erro ao carregar planejamento: ' + (error.response?.data?.erro || error.message));
     } finally {
@@ -1460,10 +1510,19 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
     }
   };
 
+  const carregarCategorias = async () => {
+    try {
+      const response = await axios.get(`${API_URL}/categorias`, { headers: authHeaders });
+      setCategorias((response.data.categorias || []).filter((cat) => cat.ativa !== false));
+    } catch (error) {
+      console.warn('Não foi possível carregar categorias para o planejamento:', error.response?.data?.erro || error.message);
+    }
+  };
+
   const carregarResumoMensal = async () => {
     setCarregandoResumoMensal(true);
     try {
-      const response = await axios.get(`${API_URL}/planejamento/resumo-mensal?mesInicio=${mes}&anoInicio=${ano}&quantidadeMeses=12`, { headers: authHeaders });
+      const response = await axios.get(`${API_URL}/planejamento/resumo-mensal?mesInicio=${mes}&anoInicio=${ano}&${montarQueryFiltrosPlanejamento(true)}`, { headers: authHeaders });
       setResumoMensal(response.data.meses || []);
     } catch (error) {
       alert('Erro ao carregar previsão mensal: ' + (error.response?.data?.erro || error.message));
@@ -1472,7 +1531,17 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
     }
   };
 
-  useEffect(() => { carregarPlanejamento(); carregarResumoMensal(); }, [mes, ano]);
+  const carregarResumoCategorias = async () => {
+    try {
+      const response = await axios.get(`${API_URL}/planejamento/resumo-categorias?mesInicio=${mes}&anoInicio=${ano}&${montarQueryFiltrosPlanejamento(true)}`, { headers: authHeaders });
+      setResumoCategorias(response.data.meses || []);
+    } catch (error) {
+      alert('Erro ao carregar distribuição por categoria: ' + (error.response?.data?.erro || error.message));
+    }
+  };
+
+  useEffect(() => { carregarPlanejamento(); carregarResumoMensal(); carregarResumoCategorias(); }, [mes, ano, filtrosPlanejamento.tipo, filtrosPlanejamento.recorrencia, filtrosPlanejamento.categoria, filtrosPlanejamento.periodo]);
+  useEffect(() => { carregarCategorias(); }, []);
 
   const limparFormulario = () => {
     setEditandoId(null);
@@ -1482,7 +1551,8 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
 
   const salvarPlanejamento = async (event) => {
     event.preventDefault();
-    const payload = { ...form, mes: Number(mes), ano: Number(ano), valor_previsto: Number(form.valor_previsto), dia_previsto: form.dia_previsto === '' ? null : Number(form.dia_previsto), quantidade_parcelas: form.recorrencia_tipo === 'PARCELADA' ? Number(form.quantidade_parcelas) : null, parcela_inicial: form.recorrencia_tipo === 'PARCELADA' ? Number(form.parcela_inicial || 1) : null, mes_fim: form.recorrencia_tipo === 'MENSAL' && form.recorrencia_termino === 'COM_FIM' ? Number(form.mes_fim) : null, ano_fim: form.recorrencia_tipo === 'MENSAL' && form.recorrencia_termino === 'COM_FIM' ? Number(form.ano_fim) : null };
+    const categoriaSelecionada = categorias.find((cat) => cat.id === form.categoria_id);
+    const payload = { ...form, categoria: categoriaSelecionada?.nome || form.categoria, categoria_id: form.categoria_id || null, mes: Number(mes), ano: Number(ano), valor_previsto: Number(form.valor_previsto), dia_previsto: form.dia_previsto === '' ? null : Number(form.dia_previsto), quantidade_parcelas: form.recorrencia_tipo === 'PARCELADA' ? Number(form.quantidade_parcelas) : null, parcela_inicial: form.recorrencia_tipo === 'PARCELADA' ? Number(form.parcela_inicial || 1) : null, mes_fim: form.recorrencia_tipo === 'MENSAL' && form.recorrencia_termino === 'COM_FIM' ? Number(form.mes_fim) : null, ano_fim: form.recorrencia_tipo === 'MENSAL' && form.recorrencia_termino === 'COM_FIM' ? Number(form.ano_fim) : null };
     try {
       if (editandoId) {
         await axios.put(`${API_URL}/planejamento/${editandoId}`, payload, { headers: authHeaders });
@@ -1492,6 +1562,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
       limparFormulario();
       await carregarPlanejamento();
       await carregarResumoMensal();
+      await carregarResumoCategorias();
     } catch (error) {
       alert('Não foi possível salvar: ' + (error.response?.data?.erro || error.message));
     }
@@ -1503,6 +1574,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
     setForm({
       descricao: item.descricao || '',
       categoria: item.categoria || '',
+      categoria_id: item.categoria_id || '',
       tipo_despesa: item.tipo_despesa || 'FIXA',
       valor_previsto: item.valor_previsto || '',
       dia_previsto: item.dia_previsto || '',
@@ -1527,6 +1599,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
       if (editandoId === item.id) limparFormulario();
       await carregarPlanejamento();
       await carregarResumoMensal();
+      await carregarResumoCategorias();
     } catch (error) {
       alert('Erro ao excluir: ' + (error.response?.data?.erro || error.message));
     }
@@ -1542,6 +1615,15 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
   const rotuloMesAnoSelecionado = `${nomesMesesCurtos[Number(mes) - 1]}/${ano}`;
   const parcelasPlanejadas = planejamentos.filter((item) => item.recorrencia_tipo === 'PARCELADA');
   const totalParcelasPlanejadas = parcelasPlanejadas.reduce((soma, item) => soma + Number(item.valor_previsto || 0), 0);
+  const categoriasFiltro = Array.from(new Map([
+    ...categorias.map((cat) => [cat.id, { valor: cat.id, label: cat.nome }]),
+    ...planejamentos.filter((item) => !item.categoria_id && item.categoria).map((item) => [item.categoria, { valor: item.categoria, label: item.categoria }]),
+  ]).values()).sort((a, b) => a.label.localeCompare(b.label));
+  const haDadosResumoMensal = resumoMensal.some((item) => Number(item.total_previsto || 0) > 0);
+  const categoriasDaDistribuicao = Array.from(new Set(resumoCategorias.flatMap((item) => (item.categorias || []).map((cat) => cat.categoria || 'Sem categoria'))));
+  const maiorTotalCategorias = Math.max(...resumoCategorias.map((item) => Number(item.total_previsto || 0)), 0);
+  const linhasResumoCategorias = resumoCategorias.flatMap((item) => (item.categorias || []).map((cat) => ({ mes: item.label, categoria: cat.categoria || 'Sem categoria', valor: Number(cat.valor || 0) })));
+  const limparFiltrosPlanejamento = () => setFiltrosPlanejamento({ tipo: 'TODOS', recorrencia: 'TODAS', categoria: '', periodo: 12 });
 
   return (
     <div style={{ minHeight: '100vh', background: '#f5f5f5', padding: '20px' }}>
@@ -1549,8 +1631,22 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
         <button onClick={onVoltar} style={{ background: '#e5e7eb', border: 'none', padding: '10px 14px', borderRadius: '8px', cursor: 'pointer', marginBottom: '16px' }}>← Voltar</button>
         <div style={{ background: 'white', borderRadius: '16px', padding: '22px', boxShadow: '0 2px 10px rgba(15,23,42,0.08)', marginBottom: '18px' }}>
           <h1 style={{ margin: '0 0 8px' }}>🗓️ Planejamento Mensal</h1>
-          <p style={{ color: '#64748b', marginTop: 0 }}>Cadastre aqui os gastos que você já sabe ou estima que terá no mês. Separe despesas fixas, como aluguel, internet e assinaturas, das despesas variáveis, como mercado, transporte, lazer e delivery.</p>
-          <p style={{ color: '#64748b', marginTop: 0 }}>Use a recorrência para despesas que se repetem. Escolha mensal para gastos fixos como aluguel, internet e assinaturas. Escolha parcelada para dívidas ou compras divididas em vários meses.</p>
+          <p style={{ color: '#64748b', marginTop: 0 }}>Planeje seus gastos antes do mês acontecer. Cadastre despesas únicas, recorrentes e parceladas para entender seus compromissos financeiros futuros.</p>
+          <p style={{ color: '#64748b', marginTop: 0 }}>Esta tela é de orçamento e previsão: planejamento não é conciliação com transações individuais.</p>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '12px', margin: '18px 0' }}>
+            <label>Mês<select value={mes} onChange={(e) => setMes(Number(e.target.value))} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}>{Array.from({ length: 12 }, (_, i) => <option key={i + 1} value={i + 1}>{i + 1}</option>)}</select></label>
+            <label>Ano<input type="number" value={ano} onChange={(e) => setAno(Number(e.target.value))} min="1900" max="2100" required style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} /></label>
+          </div>
+          <div style={{ background: '#f8fafc', border: '1px solid #e5e7eb', borderRadius: '12px', padding: '14px', marginBottom: '18px' }}>
+            <h2 style={{ margin: '0 0 12px' }}>Filtros do planejamento</h2>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '12px', alignItems: 'end' }}>
+              <label>Tipo de despesa<select value={filtrosPlanejamento.tipo} onChange={(e) => setFiltrosPlanejamento({ ...filtrosPlanejamento, tipo: e.target.value })} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}><option value="TODOS">Todos</option><option value="FIXA">Fixas</option><option value="VARIAVEL">Variáveis</option></select></label>
+              <label>Recorrência<select value={filtrosPlanejamento.recorrencia} onChange={(e) => setFiltrosPlanejamento({ ...filtrosPlanejamento, recorrencia: e.target.value })} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}><option value="TODAS">Todas</option><option value="UNICA">Únicas</option><option value="MENSAL">Mensais recorrentes</option><option value="PARCELADA">Parceladas</option></select></label>
+              <label>Categoria<select value={filtrosPlanejamento.categoria} onChange={(e) => setFiltrosPlanejamento({ ...filtrosPlanejamento, categoria: e.target.value })} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}><option value="">Todas as categorias</option>{categoriasFiltro.map((cat) => <option key={cat.valor} value={cat.valor}>{cat.label || 'Sem categoria'}</option>)}</select></label>
+              <label>Período dos gráficos<select value={filtrosPlanejamento.periodo} onChange={(e) => setFiltrosPlanejamento({ ...filtrosPlanejamento, periodo: Number(e.target.value) })} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}>{opcoesPeriodoGraficos.map((qtd) => <option key={qtd} value={qtd}>Próximos {qtd} meses</option>)}</select></label>
+              <button onClick={limparFiltrosPlanejamento} style={{ background: '#e5e7eb', border: 'none', padding: '11px 14px', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold' }}>Limpar filtros</button>
+            </div>
+          </div>
           <h2 style={{ margin: '18px 0 12px' }}>Resumo planejado de {rotuloMesAnoSelecionado}</h2>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '12px', marginTop: '16px' }}>
             <KpiCard titulo="Fixas planejadas" valor={formatarMoeda(resumo.totalFixas)} detalhe="Compromissos fixos do mês" cor="#2563eb" fundo="#eff6ff" />
@@ -1565,16 +1661,33 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
         </div>
 
         <div style={{ background: 'white', borderRadius: '16px', padding: '22px', boxShadow: '0 2px 10px rgba(15,23,42,0.08)', marginBottom: '18px' }}>
-          <h2 style={{ margin: '0 0 6px' }}>Compromissos previstos para os próximos 12 meses</h2>
+          <h2 style={{ margin: '0 0 6px' }}>Planejado x Realizado por categoria</h2>
+          <p style={{ color: '#64748b', marginTop: 0 }}>Comparativo secundário do mês selecionado. O planejado vem das despesas planejadas e o realizado soma transações de saída categorizadas no mês, sem transferências internas.</p>
+          {comparativoCategorias.length === 0 ? <p style={{ color: '#64748b' }}>Sem valores planejados ou realizados por categoria neste mês.</p> : (
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '720px' }}>
+                <thead style={{ background: '#f8fafc' }}><tr>{['Categoria','Valor planejado','Valor realizado','Diferença','Percentual utilizado'].map((h) => <th key={h} style={{ padding: '10px', textAlign: 'left' }}>{h}</th>)}</tr></thead>
+                <tbody>{comparativoCategorias.map((item) => {
+                  const diferenca = Number(item.diferenca || 0);
+                  const percentual = item.percentualUtilizado === null || item.percentualUtilizado === undefined ? '—' : formatarPercentual(Number(item.percentualUtilizado));
+                  return <tr key={item.categoriaId || item.categoria} style={{ borderTop: '1px solid #e5e7eb' }}><td style={{ padding: '10px', fontWeight: 'bold' }}>{item.categoria || 'Sem categoria'}</td><td style={{ padding: '10px' }}>{formatarMoeda(item.valorPlanejado)}</td><td style={{ padding: '10px' }}>{formatarMoeda(item.valorRealizado)}</td><td style={{ padding: '10px', color: diferenca < 0 ? '#dc2626' : '#0f766e', fontWeight: 'bold' }}>{formatarMoeda(diferenca)}</td><td style={{ padding: '10px' }}>{percentual}</td></tr>;
+                })}</tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        <div style={{ background: 'white', borderRadius: '16px', padding: '22px', boxShadow: '0 2px 10px rgba(15,23,42,0.08)', marginBottom: '18px' }}>
+          <h2 style={{ margin: '0 0 6px' }}>Compromissos previstos para os próximos meses</h2>
           <p style={{ color: '#64748b', marginTop: 0 }}>Valores calculados com base nas despesas únicas, recorrentes e parceladas cadastradas no planejamento.</p>
           <div style={{ display: 'flex', gap: '14px', flexWrap: 'wrap', marginBottom: '16px', color: '#475569', fontSize: '13px' }}>
             <span><strong style={{ color: '#2563eb' }}>■</strong> Fixas</span>
             <span><strong style={{ color: '#f97316' }}>■</strong> Variáveis</span>
             <span><strong>Total previsto</strong></span>
           </div>
-          {carregandoResumoMensal ? <p style={{ color: '#64748b' }}>Carregando previsão...</p> : (
+          {carregandoResumoMensal ? <p style={{ color: '#64748b' }}>Carregando previsão...</p> : !haDadosResumoMensal ? <p style={{ color: '#64748b' }}>Nenhuma despesa planejada encontrada para os filtros selecionados.</p> : (
             <>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(12, minmax(58px, 1fr))', gap: '10px', alignItems: 'end', minHeight: '220px', overflowX: 'auto', paddingBottom: '8px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: `repeat(${Math.max(resumoMensal.length, 1)}, minmax(58px, 1fr))`, gap: '10px', alignItems: 'end', minHeight: '220px', overflowX: 'auto', paddingBottom: '8px' }}>
                 {resumoMensal.map((item) => {
                   const total = Number(item.total_previsto || 0);
                   const fixas = Number(item.total_fixas || 0);
@@ -1598,8 +1711,46 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
               </div>
               <div style={{ overflowX: 'auto', marginTop: '14px' }}>
                 <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '560px' }}>
-                  <thead style={{ background: '#f8fafc' }}><tr>{['Mês','Fixas planejadas','Variáveis planejadas','Parceladas','Total previsto'].map((h) => <th key={h} style={{ padding: '10px', textAlign: 'left' }}>{h}</th>)}</tr></thead>
-                  <tbody>{resumoMensal.map((item) => <tr key={`${item.ano}-${item.mes}`} style={{ borderTop: '1px solid #e5e7eb' }}><td style={{ padding: '10px' }}>{item.label}</td><td style={{ padding: '10px' }}>{formatarMoeda(item.total_fixas)}</td><td style={{ padding: '10px' }}>{formatarMoeda(item.total_variaveis)}</td><td style={{ padding: '10px' }}>{formatarMoeda(item.total_parceladas)}</td><td style={{ padding: '10px', fontWeight: 'bold' }}>{formatarMoeda(item.total_previsto)}</td></tr>)}</tbody>
+                  <thead style={{ background: '#f8fafc' }}><tr>{['Mês','Fixas planejadas','Variáveis planejadas','Total previsto'].map((h) => <th key={h} style={{ padding: '10px', textAlign: 'left' }}>{h}</th>)}</tr></thead>
+                  <tbody>{resumoMensal.map((item) => <tr key={`${item.ano}-${item.mes}`} style={{ borderTop: '1px solid #e5e7eb' }}><td style={{ padding: '10px' }}>{item.label}</td><td style={{ padding: '10px' }}>{formatarMoeda(item.total_fixas)}</td><td style={{ padding: '10px' }}>{formatarMoeda(item.total_variaveis)}</td><td style={{ padding: '10px', fontWeight: 'bold' }}>{formatarMoeda(item.total_previsto)}</td></tr>)}</tbody>
+                </table>
+              </div>
+            </>
+          )}
+        </div>
+
+        <div style={{ background: 'white', borderRadius: '16px', padding: '22px', boxShadow: '0 2px 10px rgba(15,23,42,0.08)', marginBottom: '18px' }}>
+          <h2 style={{ margin: '0 0 6px' }}>Distribuição planejada por categoria</h2>
+          <p style={{ color: '#64748b', marginTop: 0 }}>Veja como os gastos planejados de cada mês estão distribuídos entre as categorias.</p>
+          {linhasResumoCategorias.length === 0 ? <p style={{ color: '#64748b' }}>{planejamentos.length === 0 && haDadosResumoMensal ? 'Não há despesas planejadas para este mês, mas existem valores previstos em outros meses do período analisado.' : 'Nenhuma despesa planejada encontrada para os filtros selecionados.'}</p> : (
+            <>
+              <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', marginBottom: '16px', fontSize: '13px', color: '#475569' }}>
+                {categoriasDaDistribuicao.map((categoria) => <span key={categoria}><strong style={{ color: corCategoriaPlanejamento(categoria) }}>■</strong> {categoria}</span>)}
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: `repeat(${Math.max(resumoCategorias.length, 1)}, minmax(72px, 1fr))`, gap: '12px', alignItems: 'end', minHeight: '240px', overflowX: 'auto', paddingBottom: '8px' }}>
+                {resumoCategorias.map((item) => {
+                  const total = Number(item.total_previsto || 0);
+                  const alturaTotal = maiorTotalCategorias > 0 ? Math.max(8, Math.round((total / maiorTotalCategorias) * 170)) : 8;
+                  return (
+                    <div key={`${item.ano}-${item.mes}`} title={`${item.label}: ${formatarMoeda(total)}`} style={{ display: 'grid', gap: '6px', justifyItems: 'center', minWidth: '72px' }}>
+                      <div style={{ fontSize: '11px', color: '#475569', fontWeight: 'bold' }}>{formatarMoeda(total)}</div>
+                      <div style={{ height: '170px', display: 'flex', alignItems: 'end', width: '40px' }}>
+                        <div style={{ width: '100%', height: `${alturaTotal}px`, display: 'flex', flexDirection: 'column-reverse', borderRadius: '8px 8px 4px 4px', overflow: 'hidden', background: '#e5e7eb' }}>
+                          {(item.categorias || []).map((cat) => {
+                            const alturaSegmento = total > 0 ? Math.max(2, Math.round((Number(cat.valor || 0) / total) * alturaTotal)) : 0;
+                            return <div key={cat.categoria || 'Sem categoria'} title={`${cat.categoria || 'Sem categoria'}: ${formatarMoeda(cat.valor)}`} style={{ height: `${alturaSegmento}px`, background: corCategoriaPlanejamento(cat.categoria || 'Sem categoria') }} />;
+                          })}
+                        </div>
+                      </div>
+                      <div style={{ fontSize: '12px', color: '#64748b' }}>{item.label}</div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div style={{ overflowX: 'auto', marginTop: '14px' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '520px' }}>
+                  <thead style={{ background: '#f8fafc' }}><tr>{['Mês','Categoria','Valor previsto'].map((h) => <th key={h} style={{ padding: '10px', textAlign: 'left' }}>{h}</th>)}</tr></thead>
+                  <tbody>{linhasResumoCategorias.map((linha) => <tr key={`${linha.mes}-${linha.categoria}`} style={{ borderTop: '1px solid #e5e7eb' }}><td style={{ padding: '10px' }}>{linha.mes}</td><td style={{ padding: '10px' }}><strong style={{ color: corCategoriaPlanejamento(linha.categoria) }}>■</strong> {linha.categoria}</td><td style={{ padding: '10px', fontWeight: 'bold' }}>{formatarMoeda(linha.valor)}</td></tr>)}</tbody>
                 </table>
               </div>
             </>
@@ -1618,7 +1769,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
               <label>Ano<input type="number" value={ano} onChange={(e) => setAno(Number(e.target.value))} min="1900" max="2100" required style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} /></label>
             </div>
             <label>Descrição<input value={form.descricao} onChange={(e) => setForm({ ...form, descricao: e.target.value })} required placeholder="Ex.: Aluguel" style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} /></label>
-            <label>Categoria<input value={form.categoria} onChange={(e) => setForm({ ...form, categoria: e.target.value })} placeholder="Ex.: Moradia" style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} /></label>
+            <label>Categoria<select value={form.categoria_id} onChange={(e) => { const categoria = categorias.find((cat) => cat.id === e.target.value); setForm({ ...form, categoria_id: e.target.value, categoria: categoria?.nome || form.categoria }); }} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}><option value="">Usar texto livre / legado</option>{categorias.map((cat) => <option key={cat.id} value={cat.id}>{cat.categoria_pai_id ? '↳ ' : ''}{cat.nome}</option>)}</select><input value={form.categoria} onChange={(e) => setForm({ ...form, categoria: e.target.value, categoria_id: '' })} placeholder="Texto legado, se não escolher categoria" style={{ width: '100%', marginTop: '8px', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} /><small style={{ color: '#64748b' }}>Prefira uma categoria cadastrada. O texto livre foi mantido para compatibilidade com planejamentos antigos.</small></label>
             <label>Tipo de despesa<select value={form.tipo_despesa} onChange={(e) => setForm({ ...form, tipo_despesa: e.target.value })} required style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}><option value="FIXA">Fixa</option><option value="VARIAVEL">Variável</option></select></label>
             <label>Recorrência<select value={form.recorrencia_tipo} onChange={(e) => setForm({ ...form, recorrencia_tipo: e.target.value })} required style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}><option value="UNICA">Única</option><option value="MENSAL">Mensal recorrente</option><option value="PARCELADA">Parcelada</option></select></label>
             {form.recorrencia_tipo === 'MENSAL' && (
@@ -1954,7 +2105,7 @@ function Dashboard({ usuario, token, onLogout }) {
                         onClick={() => setModo('provisoes')}
                         style={{ background: '#0f766e', color: 'white', border: 'none', padding: '10px 16px', borderRadius: '8px', cursor: 'pointer' }}
                       >
-                        📌 Provisões
+                        📌 Contas previstas
                       </button>
                       <button
                         onClick={() => setModo('conferencia-saldos')}
@@ -2029,7 +2180,7 @@ function Dashboard({ usuario, token, onLogout }) {
                 </div>
 
                 <div style={{ background: 'white', borderRadius: '14px', padding: '16px', marginBottom: '20px' }}>
-                  <h3 style={{ marginTop: 0 }}>Provisões no período</h3>
+                  <h3 style={{ marginTop: 0 }}>Contas previstas no período</h3>
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '12px' }}>
                     <KpiCard titulo="Provisionado a pagar" valor={formatarMoeda(provisoesDashboard.totalProvisionadoPagar)} detalhe="Débitos previstos" cor="#dc2626" fundo="#fef2f2" />
                     <KpiCard titulo="Provisionado a receber" valor={formatarMoeda(provisoesDashboard.totalProvisionadoReceber)} detalhe="Créditos previstos" cor="#059669" fundo="#ecfdf5" />
@@ -2265,6 +2416,21 @@ function TelaConferenciaSaldos({ contas = [], token, onVoltar, onAtualizarContas
 
   const authHeaders = { Authorization: `Bearer ${token}` };
   const nomesMesesCurtos = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
+  const opcoesPeriodoGraficos = [3, 6, 12, 24];
+  const montarQueryFiltrosPlanejamento = (incluirPeriodo = false) => {
+    const params = new URLSearchParams({
+      tipo: filtrosPlanejamento.tipo,
+      recorrencia: filtrosPlanejamento.recorrencia,
+      categoria: filtrosPlanejamento.categoria,
+    });
+    if (incluirPeriodo) params.set('quantidadeMeses', String(filtrosPlanejamento.periodo));
+    return params.toString();
+  };
+  const corCategoriaPlanejamento = (categoria = 'Sem categoria') => {
+    const paleta = ['#2563eb', '#f97316', '#0f766e', '#7c3aed', '#dc2626', '#0891b2', '#ca8a04', '#16a34a', '#be185d', '#475569'];
+    const hash = String(categoria || 'Sem categoria').split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
+    return paleta[hash % paleta.length];
+  };
   const contaSelecionada = contas.find((conta) => conta.id === contaId);
 
   useEffect(() => {
@@ -2516,6 +2682,21 @@ function TelaProvisoes({ contas = [], token, onVoltar }) {
   const [carregando, setCarregando] = useState(false);
   const authHeaders = { Authorization: `Bearer ${token}` };
   const nomesMesesCurtos = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
+  const opcoesPeriodoGraficos = [3, 6, 12, 24];
+  const montarQueryFiltrosPlanejamento = (incluirPeriodo = false) => {
+    const params = new URLSearchParams({
+      tipo: filtrosPlanejamento.tipo,
+      recorrencia: filtrosPlanejamento.recorrencia,
+      categoria: filtrosPlanejamento.categoria,
+    });
+    if (incluirPeriodo) params.set('quantidadeMeses', String(filtrosPlanejamento.periodo));
+    return params.toString();
+  };
+  const corCategoriaPlanejamento = (categoria = 'Sem categoria') => {
+    const paleta = ['#2563eb', '#f97316', '#0f766e', '#7c3aed', '#dc2626', '#0891b2', '#ca8a04', '#16a34a', '#be185d', '#475569'];
+    const hash = String(categoria || 'Sem categoria').split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
+    return paleta[hash % paleta.length];
+  };
 
   const categoriasMacro = categorias.filter((cat) => (cat.nivel || (cat.categoria_pai_id ? 'DETALHADA' : 'MACRO')) === 'MACRO');
   const categoriasDetalhadas = categorias.filter((cat) => (cat.nivel || (cat.categoria_pai_id ? 'DETALHADA' : 'MACRO')) === 'DETALHADA' && (!form.categoriaMacroId || cat.categoria_pai_id === form.categoriaMacroId));
@@ -2657,7 +2838,7 @@ function TelaProvisoes({ contas = [], token, onVoltar }) {
     <div style={{ minHeight: '100vh', background: '#f5f5f5' }}>
       <div style={{ background: '#1f2937', color: 'white', padding: '20px' }}>
         <button onClick={onVoltar} style={{ background: 'rgba(255,255,255,0.2)', color: 'white', border: '1px solid rgba(255,255,255,0.3)', padding: '8px 12px', borderRadius: '6px', cursor: 'pointer' }}>← Voltar</button>
-        <h1 style={{ margin: '14px 0 4px' }}>📌 Provisões</h1>
+        <h1 style={{ margin: '14px 0 4px' }}>📌 Contas previstas</h1>
         <p style={{ margin: 0, opacity: 0.8 }}>Cadastre valores previstos e confirme conciliações com transações reais.</p>
       </div>
 
