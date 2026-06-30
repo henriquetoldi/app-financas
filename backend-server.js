@@ -412,6 +412,8 @@ async function inicializarBanco() {
       parcela_atual INT,
       mes_inicio INT,
       ano_inicio INT,
+      mes_fim INT,
+      ano_fim INT,
       ativa BOOLEAN DEFAULT true,
       criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -422,7 +424,9 @@ async function inicializarBanco() {
       CONSTRAINT chk_planejamentos_dia CHECK (dia_previsto IS NULL OR dia_previsto BETWEEN 1 AND 31),
       CONSTRAINT chk_planejamentos_recorrencia CHECK (recorrencia_tipo IN ('UNICA', 'MENSAL', 'PARCELADA')),
       CONSTRAINT chk_planejamentos_parcelas CHECK (quantidade_parcelas IS NULL OR quantidade_parcelas > 0),
-      CONSTRAINT chk_planejamentos_parcela_atual CHECK (parcela_atual IS NULL OR parcela_atual > 0)
+      CONSTRAINT chk_planejamentos_parcela_atual CHECK (parcela_atual IS NULL OR parcela_atual > 0),
+      CONSTRAINT chk_planejamentos_mes_fim CHECK (mes_fim IS NULL OR mes_fim BETWEEN 1 AND 12),
+      CONSTRAINT chk_planejamentos_ano_fim CHECK (ano_fim IS NULL OR ano_fim BETWEEN 1900 AND 2100)
     )
   `);
 
@@ -434,6 +438,8 @@ async function inicializarBanco() {
       ADD COLUMN IF NOT EXISTS parcela_atual INT,
       ADD COLUMN IF NOT EXISTS mes_inicio INT,
       ADD COLUMN IF NOT EXISTS ano_inicio INT,
+      ADD COLUMN IF NOT EXISTS mes_fim INT,
+      ADD COLUMN IF NOT EXISTS ano_fim INT,
       ADD COLUMN IF NOT EXISTS ativa BOOLEAN DEFAULT true
   `);
 
@@ -457,6 +463,12 @@ async function inicializarBanco() {
       END IF;
       IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_planejamentos_parcela_atual') THEN
         ALTER TABLE planejamentos_mensais ADD CONSTRAINT chk_planejamentos_parcela_atual CHECK (parcela_atual IS NULL OR parcela_atual > 0);
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_planejamentos_mes_fim') THEN
+        ALTER TABLE planejamentos_mensais ADD CONSTRAINT chk_planejamentos_mes_fim CHECK (mes_fim IS NULL OR mes_fim BETWEEN 1 AND 12);
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_planejamentos_ano_fim') THEN
+        ALTER TABLE planejamentos_mensais ADD CONSTRAINT chk_planejamentos_ano_fim CHECK (ano_fim IS NULL OR ano_fim BETWEEN 1900 AND 2100);
       END IF;
     END $$;
   `);
@@ -2813,6 +2825,10 @@ function adicionarMesesPlanejamento(mes, ano, incremento) {
   return { mes: data.getMonth() + 1, ano: data.getFullYear() };
 }
 
+function compararPeriodoPlanejamento(aMes, aAno, bMes, bAno) {
+  return (Number(aAno) * 12 + Number(aMes)) - (Number(bAno) * 12 + Number(bMes));
+}
+
 function validarPayloadPlanejamento(body = {}, parcial = false) {
   const payload = {};
   if (!parcial || body.mes !== undefined || body.ano !== undefined) Object.assign(payload, validarMesAnoPlanejamento(body.mes, body.ano));
@@ -2827,6 +2843,23 @@ function validarPayloadPlanejamento(body = {}, parcial = false) {
   if (!parcial || body.recorrencia_tipo !== undefined || body.recorrenciaTipo !== undefined) {
     payload.recorrenciaTipo = String(body.recorrencia_tipo || body.recorrenciaTipo || '').trim().toUpperCase();
     if (!['UNICA', 'MENSAL', 'PARCELADA'].includes(payload.recorrenciaTipo)) throw new Error('Recorrência deve ser UNICA, MENSAL ou PARCELADA.');
+  }
+  if (payload.recorrenciaTipo === 'MENSAL') {
+    const terminaEm = String(body.recorrencia_termino || body.recorrenciaTermino || 'SEM_FIM').trim().toUpperCase();
+    payload.recorrenciaTermino = terminaEm === 'COM_FIM' || terminaEm === 'DATA' ? 'COM_FIM' : 'SEM_FIM';
+    if (payload.recorrenciaTermino === 'COM_FIM') {
+      const fim = validarMesAnoPlanejamento(body.mes_fim ?? body.mesFim, body.ano_fim ?? body.anoFim);
+      if (compararPeriodoPlanejamento(fim.mes, fim.ano, payload.mes, payload.ano) < 0) throw new Error('Mês/ano final não pode ser anterior ao início da recorrência.');
+      payload.mesFim = fim.mes;
+      payload.anoFim = fim.ano;
+    } else {
+      payload.mesFim = null;
+      payload.anoFim = null;
+    }
+  } else {
+    payload.recorrenciaTermino = null;
+    payload.mesFim = null;
+    payload.anoFim = null;
   }
   if (!parcial || body.valor_previsto !== undefined || body.valorPrevisto !== undefined) {
     payload.valorPrevisto = Number(body.valor_previsto ?? body.valorPrevisto);
@@ -2853,14 +2886,49 @@ function validarPayloadPlanejamento(body = {}, parcial = false) {
 }
 
 function montarLancamentosPlanejamento(usuarioId, payload, recorrenciaId = crypto.randomUUID()) {
-  const totalLancamentos = payload.recorrenciaTipo === 'MENSAL' ? 12 : payload.recorrenciaTipo === 'PARCELADA' ? payload.quantidadeParcelas - payload.parcelaInicial + 1 : 1;
+  const totalLancamentos = payload.recorrenciaTipo === 'PARCELADA'
+    ? payload.quantidadeParcelas - payload.parcelaInicial + 1
+    : payload.recorrenciaTipo === 'MENSAL' && payload.mesFim && payload.anoFim
+      ? compararPeriodoPlanejamento(payload.mesFim, payload.anoFim, payload.mes, payload.ano) + 1
+      : 1;
+
   return Array.from({ length: totalLancamentos }, (_, indice) => {
     const periodo = adicionarMesesPlanejamento(payload.mes, payload.ano, indice);
     const parcelaAtual = payload.recorrenciaTipo === 'PARCELADA' ? payload.parcelaInicial + indice : null;
     const descricao = payload.recorrenciaTipo === 'PARCELADA' ? `${payload.descricao} (${parcelaAtual}/${payload.quantidadeParcelas})` : payload.descricao;
-    return [usuarioId, periodo.mes, periodo.ano, descricao, payload.categoria || null, payload.tipoDespesa, payload.valorPrevisto, payload.diaPrevisto ?? null, payload.observacao || null, payload.recorrenciaTipo, recorrenciaId, payload.quantidadeParcelas, parcelaAtual, payload.mes, payload.ano, true];
+    return [usuarioId, periodo.mes, periodo.ano, descricao, payload.categoria || null, payload.tipoDespesa, payload.valorPrevisto, payload.diaPrevisto ?? null, payload.observacao || null, payload.recorrenciaTipo, recorrenciaId, payload.quantidadeParcelas, parcelaAtual, payload.mes, payload.ano, payload.mesFim, payload.anoFim, true];
   });
 }
+
+async function materializarRecorrenciasMensaisUsuario(usuarioId, mes, ano) {
+  const recorrentes = await pool.query(
+    `SELECT DISTINCT ON (recorrencia_id) *
+     FROM planejamentos_mensais
+     WHERE usuario_id = $1
+       AND recorrencia_tipo = 'MENSAL'
+       AND ativa = true
+       AND recorrencia_id IS NOT NULL
+       AND (ano_inicio * 12 + mes_inicio) <= ($3::int * 12 + $2::int)
+       AND (ano_fim IS NULL OR mes_fim IS NULL OR (ano_fim * 12 + mes_fim) >= ($3::int * 12 + $2::int))
+     ORDER BY recorrencia_id, ano ASC, mes ASC, criado_em ASC`,
+    [usuarioId, mes, ano]
+  );
+
+  for (const item of recorrentes.rows) {
+    const existente = await pool.query(
+      `SELECT id FROM planejamentos_mensais WHERE usuario_id = $1 AND recorrencia_id = $2 AND mes = $3 AND ano = $4 LIMIT 1`,
+      [usuarioId, item.recorrencia_id, mes, ano]
+    );
+    if (existente.rows.length > 0) continue;
+
+    await pool.query(
+      `INSERT INTO planejamentos_mensais (usuario_id, mes, ano, descricao, categoria, tipo_despesa, valor_previsto, dia_previsto, observacao, recorrencia_tipo, recorrencia_id, quantidade_parcelas, parcela_atual, mes_inicio, ano_inicio, mes_fim, ano_fim, ativa)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'MENSAL',$10,NULL,NULL,$11,$12,$13,$14,true)`,
+      [usuarioId, mes, ano, item.descricao, item.categoria, item.tipo_despesa, item.valor_previsto, item.dia_previsto, item.observacao, item.recorrencia_id, item.mes_inicio, item.ano_inicio, item.mes_fim, item.ano_fim]
+    );
+  }
+}
+
 
 function montarResumoPlanejamento(rows = [], totalRealizado = 0) {
   const totalFixas = rows.filter((item) => item.tipo_despesa === 'FIXA').reduce((soma, item) => soma + Number(item.valor_previsto || 0), 0);
@@ -2887,6 +2955,7 @@ async function buscarTotalRealizadoMes(usuarioId, mes, ano) {
 app.get('/api/planejamento', verificarToken, async (req, res) => {
   try {
     const { mes, ano } = validarMesAnoPlanejamento(req.query.mes, req.query.ano);
+    await materializarRecorrenciasMensaisUsuario(req.usuario.usuario_id, mes, ano);
     const result = await pool.query(
       `SELECT * FROM planejamentos_mensais WHERE usuario_id = $1 AND mes = $2 AND ano = $3 AND ativa = true ORDER BY tipo_despesa, dia_previsto NULLS LAST, criado_em DESC`,
       [req.usuario.usuario_id, mes, ano]
@@ -2901,11 +2970,11 @@ app.post('/api/planejamento', verificarToken, async (req, res) => {
     const p = validarPayloadPlanejamento(req.body);
     const lancamentos = montarLancamentosPlanejamento(req.usuario.usuario_id, p);
     const placeholders = lancamentos.map((_, indice) => {
-      const base = indice * 16;
-      return `(${Array.from({ length: 16 }, (__, coluna) => `$${base + coluna + 1}`).join(',')})`;
+      const base = indice * 18;
+      return `(${Array.from({ length: 18 }, (__, coluna) => `$${base + coluna + 1}`).join(',')})`;
     }).join(',');
     const result = await pool.query(
-      `INSERT INTO planejamentos_mensais (usuario_id, mes, ano, descricao, categoria, tipo_despesa, valor_previsto, dia_previsto, observacao, recorrencia_tipo, recorrencia_id, quantidade_parcelas, parcela_atual, mes_inicio, ano_inicio, ativa)
+      `INSERT INTO planejamentos_mensais (usuario_id, mes, ano, descricao, categoria, tipo_despesa, valor_previsto, dia_previsto, observacao, recorrencia_tipo, recorrencia_id, quantidade_parcelas, parcela_atual, mes_inicio, ano_inicio, mes_fim, ano_fim, ativa)
        VALUES ${placeholders} RETURNING *`,
       lancamentos.flat()
     );
@@ -2917,9 +2986,9 @@ app.put('/api/planejamento/:id', verificarToken, async (req, res) => {
   try {
     const p = validarPayloadPlanejamento(req.body);
     const result = await pool.query(
-      `UPDATE planejamentos_mensais SET mes=$1, ano=$2, descricao=$3, categoria=$4, tipo_despesa=$5, valor_previsto=$6, dia_previsto=$7, observacao=$8, recorrencia_tipo=$9, quantidade_parcelas=$10, parcela_atual=$11, mes_inicio=$12, ano_inicio=$13, atualizado_em=NOW()
-       WHERE id=$14 AND usuario_id=$15 RETURNING *`,
-      [p.mes, p.ano, p.descricao, p.categoria || null, p.tipoDespesa, p.valorPrevisto, p.diaPrevisto ?? null, p.observacao || null, p.recorrenciaTipo, p.quantidadeParcelas, p.parcelaInicial, p.mes, p.ano, req.params.id, req.usuario.usuario_id]
+      `UPDATE planejamentos_mensais SET mes=$1, ano=$2, descricao=$3, categoria=$4, tipo_despesa=$5, valor_previsto=$6, dia_previsto=$7, observacao=$8, recorrencia_tipo=$9, quantidade_parcelas=$10, parcela_atual=$11, mes_inicio=$12, ano_inicio=$13, mes_fim=$14, ano_fim=$15, atualizado_em=NOW()
+       WHERE id=$16 AND usuario_id=$17 RETURNING *`,
+      [p.mes, p.ano, p.descricao, p.categoria || null, p.tipoDespesa, p.valorPrevisto, p.diaPrevisto ?? null, p.observacao || null, p.recorrenciaTipo, p.quantidadeParcelas, p.parcelaInicial, p.mes, p.ano, p.mesFim, p.anoFim, req.params.id, req.usuario.usuario_id]
     );
     if (result.rows.length === 0) return res.status(404).json({ erro: 'Planejamento não encontrado.' });
     res.json({ planejamento: result.rows[0] });
@@ -2928,8 +2997,15 @@ app.put('/api/planejamento/:id', verificarToken, async (req, res) => {
 
 app.delete('/api/planejamento/:id', verificarToken, async (req, res) => {
   try {
-    const result = await pool.query('DELETE FROM planejamentos_mensais WHERE id = $1 AND usuario_id = $2 RETURNING id', [req.params.id, req.usuario.usuario_id]);
-    if (result.rows.length === 0) return res.status(404).json({ erro: 'Planejamento não encontrado.' });
+    const atual = await pool.query('SELECT id, recorrencia_tipo FROM planejamentos_mensais WHERE id = $1 AND usuario_id = $2', [req.params.id, req.usuario.usuario_id]);
+    if (atual.rows.length === 0) return res.status(404).json({ erro: 'Planejamento não encontrado.' });
+
+    if (atual.rows[0].recorrencia_tipo && atual.rows[0].recorrencia_tipo !== 'UNICA') {
+      await pool.query('UPDATE planejamentos_mensais SET ativa = false, atualizado_em = NOW() WHERE id = $1 AND usuario_id = $2', [req.params.id, req.usuario.usuario_id]);
+    } else {
+      await pool.query('DELETE FROM planejamentos_mensais WHERE id = $1 AND usuario_id = $2', [req.params.id, req.usuario.usuario_id]);
+    }
+
     res.json({ sucesso: true });
   } catch (error) { res.status(400).json({ erro: error.message }); }
 });

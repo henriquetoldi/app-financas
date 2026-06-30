@@ -724,6 +724,7 @@ function NotificacoesBell({ token }) {
   const [naoLidas, setNaoLidas] = useState(0);
 
   const authHeaders = { Authorization: `Bearer ${token}` };
+  const nomesMesesCurtos = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
 
   const carregarNotificacoes = async () => {
     try {
@@ -779,6 +780,7 @@ function ImportarExcel({ contas, token, onConcluida }) {
   const [carregando, setCarregando] = useState(false);
 
   const authHeaders = { Authorization: `Bearer ${token}` };
+  const nomesMesesCurtos = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
 
   const processarArquivo = async (file) => {
     setArquivo(file);
@@ -1436,10 +1438,11 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
   const [resumo, setResumo] = useState({});
   const [carregando, setCarregando] = useState(false);
   const [editandoId, setEditandoId] = useState(null);
-  const formularioInicial = { descricao: '', categoria: '', tipo_despesa: 'FIXA', valor_previsto: '', dia_previsto: '', observacao: '', recorrencia_tipo: 'UNICA', quantidade_parcelas: '', parcela_inicial: '1' };
+  const formularioInicial = { descricao: '', categoria: '', tipo_despesa: 'FIXA', valor_previsto: '', dia_previsto: '', observacao: '', recorrencia_tipo: 'UNICA', recorrencia_termino: 'SEM_FIM', mes_fim: String(hoje.getMonth() + 1), ano_fim: String(hoje.getFullYear()), quantidade_parcelas: '', parcela_inicial: '1' };
   const [form, setForm] = useState(formularioInicial);
 
   const authHeaders = { Authorization: `Bearer ${token}` };
+  const nomesMesesCurtos = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
 
   const carregarPlanejamento = async () => {
     setCarregando(true);
@@ -1463,7 +1466,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
 
   const salvarPlanejamento = async (event) => {
     event.preventDefault();
-    const payload = { ...form, mes: Number(mes), ano: Number(ano), valor_previsto: Number(form.valor_previsto), dia_previsto: form.dia_previsto === '' ? null : Number(form.dia_previsto), quantidade_parcelas: form.recorrencia_tipo === 'PARCELADA' ? Number(form.quantidade_parcelas) : null, parcela_inicial: form.recorrencia_tipo === 'PARCELADA' ? Number(form.parcela_inicial || 1) : null };
+    const payload = { ...form, mes: Number(mes), ano: Number(ano), valor_previsto: Number(form.valor_previsto), dia_previsto: form.dia_previsto === '' ? null : Number(form.dia_previsto), quantidade_parcelas: form.recorrencia_tipo === 'PARCELADA' ? Number(form.quantidade_parcelas) : null, parcela_inicial: form.recorrencia_tipo === 'PARCELADA' ? Number(form.parcela_inicial || 1) : null, mes_fim: form.recorrencia_tipo === 'MENSAL' && form.recorrencia_termino === 'COM_FIM' ? Number(form.mes_fim) : null, ano_fim: form.recorrencia_tipo === 'MENSAL' && form.recorrencia_termino === 'COM_FIM' ? Number(form.ano_fim) : null };
     try {
       if (editandoId) {
         await axios.put(`${API_URL}/planejamento/${editandoId}`, payload, { headers: authHeaders });
@@ -1487,6 +1490,9 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
       dia_previsto: item.dia_previsto || '',
       observacao: item.observacao || '',
       recorrencia_tipo: item.recorrencia_tipo || 'UNICA',
+      recorrencia_termino: item.mes_fim && item.ano_fim ? 'COM_FIM' : 'SEM_FIM',
+      mes_fim: item.mes_fim || String(mes),
+      ano_fim: item.ano_fim || String(ano),
       quantidade_parcelas: item.quantidade_parcelas || '',
       parcela_inicial: item.parcela_atual || '1',
     });
@@ -1508,7 +1514,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
   };
 
   const rotuloRecorrencia = (item) => {
-    if (item.recorrencia_tipo === 'MENSAL') return 'Mensal';
+    if (item.recorrencia_tipo === 'MENSAL') return item.mes_fim && item.ano_fim ? `Mensal até ${nomesMesesCurtos[Number(item.mes_fim) - 1]}/${item.ano_fim}` : 'Mensal sem fim';
     if (item.recorrencia_tipo === 'PARCELADA') return `Parcelada ${item.parcela_atual || 1}/${item.quantidade_parcelas || '?'}`;
     return 'Única';
   };
@@ -1541,7 +1547,19 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
             <label>Categoria<input value={form.categoria} onChange={(e) => setForm({ ...form, categoria: e.target.value })} placeholder="Ex.: Moradia" style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} /></label>
             <label>Tipo de despesa<select value={form.tipo_despesa} onChange={(e) => setForm({ ...form, tipo_despesa: e.target.value })} required style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}><option value="FIXA">Fixa</option><option value="VARIAVEL">Variável</option></select></label>
             <label>Recorrência<select value={form.recorrencia_tipo} onChange={(e) => setForm({ ...form, recorrencia_tipo: e.target.value })} required style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}><option value="UNICA">Única</option><option value="MENSAL">Mensal recorrente</option><option value="PARCELADA">Parcelada</option></select></label>
-            {form.recorrencia_tipo === 'MENSAL' && <p style={{ margin: 0, color: '#64748b', background: '#f8fafc', padding: '10px', borderRadius: '8px' }}>Essa despesa será considerada também nos próximos meses.</p>}
+            {form.recorrencia_tipo === 'MENSAL' && (
+              <div style={{ display: 'grid', gap: '10px', background: '#f8fafc', padding: '10px', borderRadius: '8px' }}>
+                <p style={{ margin: 0, color: '#64748b' }}>Essa despesa será considerada também nos próximos meses.</p>
+                <label>Quando termina?<select value={form.recorrencia_termino} onChange={(e) => setForm({ ...form, recorrencia_termino: e.target.value })} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}><option value="SEM_FIM">Sem data de término</option><option value="COM_FIM">Termina em mês/ano específico</option></select></label>
+                <p style={{ margin: 0, color: '#64748b' }}>Use uma data de término quando essa despesa tiver prazo para acabar. Exemplo: assinatura temporária, acordo, aluguel provisório ou pagamento recorrente com fim definido.</p>
+                {form.recorrencia_termino === 'COM_FIM' && (
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+                    <label>Mês final<select value={form.mes_fim} onChange={(e) => setForm({ ...form, mes_fim: e.target.value })} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}>{Array.from({ length: 12 }, (_, i) => <option key={i + 1} value={i + 1}>{i + 1}</option>)}</select></label>
+                    <label>Ano final<input type="number" min="1900" max="2100" value={form.ano_fim} onChange={(e) => setForm({ ...form, ano_fim: e.target.value })} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} /></label>
+                  </div>
+                )}
+              </div>
+            )}
             {form.recorrencia_tipo === 'PARCELADA' && (
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
                 <label>Quantidade de parcelas<input type="number" min="1" value={form.quantidade_parcelas} onChange={(e) => setForm({ ...form, quantidade_parcelas: e.target.value })} required={form.recorrencia_tipo === 'PARCELADA'} placeholder="3" style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} /></label>
@@ -2172,6 +2190,7 @@ function TelaConferenciaSaldos({ contas = [], token, onVoltar, onAtualizarContas
   const [carregando, setCarregando] = useState(false);
 
   const authHeaders = { Authorization: `Bearer ${token}` };
+  const nomesMesesCurtos = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
   const contaSelecionada = contas.find((conta) => conta.id === contaId);
 
   useEffect(() => {
@@ -2422,6 +2441,7 @@ function TelaProvisoes({ contas = [], token, onVoltar }) {
   const [provisaoConciliando, setProvisaoConciliando] = useState(null);
   const [carregando, setCarregando] = useState(false);
   const authHeaders = { Authorization: `Bearer ${token}` };
+  const nomesMesesCurtos = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
 
   const categoriasMacro = categorias.filter((cat) => (cat.nivel || (cat.categoria_pai_id ? 'DETALHADA' : 'MACRO')) === 'MACRO');
   const categoriasDetalhadas = categorias.filter((cat) => (cat.nivel || (cat.categoria_pai_id ? 'DETALHADA' : 'MACRO')) === 'DETALHADA' && (!form.categoriaMacroId || cat.categoria_pai_id === form.categoriaMacroId));
