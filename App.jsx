@@ -1436,7 +1436,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
   const [resumo, setResumo] = useState({});
   const [carregando, setCarregando] = useState(false);
   const [editandoId, setEditandoId] = useState(null);
-  const formularioInicial = { descricao: '', categoria: '', tipo_despesa: 'FIXA', valor_previsto: '', dia_previsto: '', observacao: '' };
+  const formularioInicial = { descricao: '', categoria: '', tipo_despesa: 'FIXA', valor_previsto: '', dia_previsto: '', observacao: '', recorrencia_tipo: 'UNICA', quantidade_parcelas: '', parcela_inicial: '1' };
   const [form, setForm] = useState(formularioInicial);
 
   const authHeaders = { Authorization: `Bearer ${token}` };
@@ -1463,7 +1463,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
 
   const salvarPlanejamento = async (event) => {
     event.preventDefault();
-    const payload = { ...form, mes: Number(mes), ano: Number(ano), valor_previsto: Number(form.valor_previsto), dia_previsto: form.dia_previsto === '' ? null : Number(form.dia_previsto) };
+    const payload = { ...form, mes: Number(mes), ano: Number(ano), valor_previsto: Number(form.valor_previsto), dia_previsto: form.dia_previsto === '' ? null : Number(form.dia_previsto), quantidade_parcelas: form.recorrencia_tipo === 'PARCELADA' ? Number(form.quantidade_parcelas) : null, parcela_inicial: form.recorrencia_tipo === 'PARCELADA' ? Number(form.parcela_inicial || 1) : null };
     try {
       if (editandoId) {
         await axios.put(`${API_URL}/planejamento/${editandoId}`, payload, { headers: authHeaders });
@@ -1486,11 +1486,18 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
       valor_previsto: item.valor_previsto || '',
       dia_previsto: item.dia_previsto || '',
       observacao: item.observacao || '',
+      recorrencia_tipo: item.recorrencia_tipo || 'UNICA',
+      quantidade_parcelas: item.quantidade_parcelas || '',
+      parcela_inicial: item.parcela_atual || '1',
     });
+    if (item.recorrencia_tipo && item.recorrencia_tipo !== 'UNICA') {
+      alert('Esta despesa faz parte de uma recorrência. Nesta versão, a alteração será aplicada apenas neste lançamento.');
+    }
   };
 
   const excluirPlanejamento = async (item) => {
-    if (!window.confirm(`Excluir "${item.descricao}" do planejamento?`)) return;
+    const avisoRecorrencia = item.recorrencia_tipo && item.recorrencia_tipo !== 'UNICA' ? '\n\nEsta despesa faz parte de uma recorrência. Nesta versão, apenas este lançamento será excluído.' : '';
+    if (!window.confirm(`Excluir "${item.descricao}" do planejamento?${avisoRecorrencia}`)) return;
     try {
       await axios.delete(`${API_URL}/planejamento/${item.id}`, { headers: authHeaders });
       if (editandoId === item.id) limparFormulario();
@@ -1500,6 +1507,12 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
     }
   };
 
+  const rotuloRecorrencia = (item) => {
+    if (item.recorrencia_tipo === 'MENSAL') return 'Mensal';
+    if (item.recorrencia_tipo === 'PARCELADA') return `Parcelada ${item.parcela_atual || 1}/${item.quantidade_parcelas || '?'}`;
+    return 'Única';
+  };
+
   return (
     <div style={{ minHeight: '100vh', background: '#f5f5f5', padding: '20px' }}>
       <div style={{ maxWidth: '1200px', margin: '0 auto' }}>
@@ -1507,6 +1520,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
         <div style={{ background: 'white', borderRadius: '16px', padding: '22px', boxShadow: '0 2px 10px rgba(15,23,42,0.08)', marginBottom: '18px' }}>
           <h1 style={{ margin: '0 0 8px' }}>🗓️ Planejamento Mensal</h1>
           <p style={{ color: '#64748b', marginTop: 0 }}>Cadastre aqui os gastos que você já sabe ou estima que terá no mês. Separe despesas fixas, como aluguel, internet e assinaturas, das despesas variáveis, como mercado, transporte, lazer e delivery.</p>
+          <p style={{ color: '#64748b', marginTop: 0 }}>Use a recorrência para despesas que se repetem. Escolha mensal para gastos fixos como aluguel, internet e assinaturas. Escolha parcelada para dívidas ou compras divididas em vários meses.</p>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '12px', marginTop: '16px' }}>
             <KpiCard titulo="Despesas fixas" valor={formatarMoeda(resumo.totalFixas)} detalhe="Gastos recorrentes" cor="#dc2626" fundo="#fef2f2" />
             <KpiCard titulo="Despesas variáveis" valor={formatarMoeda(resumo.totalVariaveis)} detalhe="Estimativas do mês" cor="#d97706" fundo="#fffbeb" />
@@ -1526,6 +1540,14 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
             <label>Descrição<input value={form.descricao} onChange={(e) => setForm({ ...form, descricao: e.target.value })} required placeholder="Ex.: Aluguel" style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} /></label>
             <label>Categoria<input value={form.categoria} onChange={(e) => setForm({ ...form, categoria: e.target.value })} placeholder="Ex.: Moradia" style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} /></label>
             <label>Tipo de despesa<select value={form.tipo_despesa} onChange={(e) => setForm({ ...form, tipo_despesa: e.target.value })} required style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}><option value="FIXA">Fixa</option><option value="VARIAVEL">Variável</option></select></label>
+            <label>Recorrência<select value={form.recorrencia_tipo} onChange={(e) => setForm({ ...form, recorrencia_tipo: e.target.value })} required style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}><option value="UNICA">Única</option><option value="MENSAL">Mensal recorrente</option><option value="PARCELADA">Parcelada</option></select></label>
+            {form.recorrencia_tipo === 'MENSAL' && <p style={{ margin: 0, color: '#64748b', background: '#f8fafc', padding: '10px', borderRadius: '8px' }}>Essa despesa será considerada também nos próximos meses.</p>}
+            {form.recorrencia_tipo === 'PARCELADA' && (
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+                <label>Quantidade de parcelas<input type="number" min="1" value={form.quantidade_parcelas} onChange={(e) => setForm({ ...form, quantidade_parcelas: e.target.value })} required={form.recorrencia_tipo === 'PARCELADA'} placeholder="3" style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} /></label>
+                <label>Parcela inicial<input type="number" min="1" value={form.parcela_inicial} onChange={(e) => setForm({ ...form, parcela_inicial: e.target.value })} placeholder="1" style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} /></label>
+              </div>
+            )}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
               <label>Valor previsto<input type="number" step="0.01" min="0.01" value={form.valor_previsto} onChange={(e) => setForm({ ...form, valor_previsto: e.target.value })} required placeholder="1500" style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} /></label>
               <label>Dia previsto de pagamento<input type="number" min="1" max="31" value={form.dia_previsto} onChange={(e) => setForm({ ...form, dia_previsto: e.target.value })} placeholder="5" style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} /></label>
@@ -1538,8 +1560,8 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
             <h2 style={{ marginTop: 0 }}>Despesas cadastradas</h2>
             {carregando ? <p>Carregando...</p> : planejamentos.length === 0 ? <p style={{ color: '#64748b' }}>Nenhuma despesa planejada para este mês.</p> : (
               <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '760px' }}>
-                <thead style={{ background: '#f8fafc' }}><tr>{['Descrição','Categoria','Tipo','Valor previsto','Dia previsto','Observação','Ações'].map((h) => <th key={h} style={{ padding: '10px', textAlign: 'left' }}>{h}</th>)}</tr></thead>
-                <tbody>{planejamentos.map((item) => <tr key={item.id} style={{ borderTop: '1px solid #e5e7eb' }}><td style={{ padding: '10px' }}>{item.descricao}</td><td style={{ padding: '10px' }}>{item.categoria || '-'}</td><td style={{ padding: '10px' }}>{item.tipo_despesa === 'FIXA' ? 'Fixa' : 'Variável'}</td><td style={{ padding: '10px' }}>{formatarMoeda(item.valor_previsto)}</td><td style={{ padding: '10px' }}>{item.dia_previsto || '-'}</td><td style={{ padding: '10px' }}>{item.observacao || '-'}</td><td style={{ padding: '10px', display: 'flex', gap: '6px' }}><button onClick={() => editarPlanejamento(item)} style={{ padding: '6px 8px', borderRadius: '6px', border: '1px solid #2563eb', color: '#2563eb', background: 'white', cursor: 'pointer' }}>Editar</button><button onClick={() => excluirPlanejamento(item)} style={{ padding: '6px 8px', borderRadius: '6px', border: '1px solid #dc2626', color: '#dc2626', background: 'white', cursor: 'pointer' }}>Excluir</button></td></tr>)}</tbody>
+                <thead style={{ background: '#f8fafc' }}><tr>{['Descrição','Categoria','Tipo','Recorrência','Valor previsto','Dia previsto','Observação','Ações'].map((h) => <th key={h} style={{ padding: '10px', textAlign: 'left' }}>{h}</th>)}</tr></thead>
+                <tbody>{planejamentos.map((item) => <tr key={item.id} style={{ borderTop: '1px solid #e5e7eb' }}><td style={{ padding: '10px' }}>{item.descricao}</td><td style={{ padding: '10px' }}>{item.categoria || '-'}</td><td style={{ padding: '10px' }}>{item.tipo_despesa === 'FIXA' ? 'Fixa' : 'Variável'}</td><td style={{ padding: '10px' }}>{rotuloRecorrencia(item)}</td><td style={{ padding: '10px' }}>{formatarMoeda(item.valor_previsto)}</td><td style={{ padding: '10px' }}>{item.dia_previsto || '-'}</td><td style={{ padding: '10px' }}>{item.observacao || '-'}</td><td style={{ padding: '10px', display: 'flex', gap: '6px' }}><button onClick={() => editarPlanejamento(item)} style={{ padding: '6px 8px', borderRadius: '6px', border: '1px solid #2563eb', color: '#2563eb', background: 'white', cursor: 'pointer' }}>Editar</button><button onClick={() => excluirPlanejamento(item)} style={{ padding: '6px 8px', borderRadius: '6px', border: '1px solid #dc2626', color: '#dc2626', background: 'white', cursor: 'pointer' }}>Excluir</button></td></tr>)}</tbody>
               </table>
             )}
           </div>
