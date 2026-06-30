@@ -3322,6 +3322,12 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
     return [...transacoesFiltradas].sort((a, b) => compararTransacoes(a, b, campo, direcao));
   }, [transacoesFiltradas, sortField, sortDirection]);
 
+  const totalTransacoesPaginacao = Number(paginacao.total || transacoesOrdenadas.length || 0);
+  const paginaAtualPaginacao = Number(paginacao.pagina || pagina);
+  const limiteAtualPaginacao = Number(paginacao.limite || limite);
+  const inicioPaginacao = totalTransacoesPaginacao === 0 ? 0 : ((paginaAtualPaginacao - 1) * limiteAtualPaginacao) + 1;
+  const fimPaginacao = totalTransacoesPaginacao === 0 ? 0 : Math.min(totalTransacoesPaginacao, inicioPaginacao + transacoesOrdenadas.length - 1);
+
   const resumoBase = useMemo(() => {
     if (transacoesFiltradas.length === 0) return null;
     const porDataAsc = [...transacoesFiltradas].sort((a, b) => compararTransacoes(a, b, 'data', 'asc'));
