@@ -2965,6 +2965,61 @@ app.get('/api/planejamento', verificarToken, async (req, res) => {
   } catch (error) { res.status(400).json({ erro: error.message }); }
 });
 
+
+function montarLabelMesPlanejamento(mes, ano) {
+  const nomes = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
+  return `${nomes[Number(mes) - 1]}/${String(ano).slice(-2)}`;
+}
+
+app.get('/api/planejamento/resumo-mensal', verificarToken, async (req, res) => {
+  try {
+    const { mes: mesInicio, ano: anoInicio } = validarMesAnoPlanejamento(req.query.mesInicio, req.query.anoInicio);
+    const quantidadeMeses = Number(req.query.quantidadeMeses || 12);
+    if (!Number.isInteger(quantidadeMeses) || quantidadeMeses < 1 || quantidadeMeses > 24) throw new Error('Quantidade de meses deve estar entre 1 e 24.');
+
+    const meses = [];
+    for (let indice = 0; indice < quantidadeMeses; indice++) {
+      const periodo = adicionarMesesPlanejamento(mesInicio, anoInicio, indice);
+      await materializarRecorrenciasMensaisUsuario(req.usuario.usuario_id, periodo.mes, periodo.ano);
+      meses.push(periodo);
+    }
+
+    const primeiro = meses[0];
+    const ultimo = meses[meses.length - 1];
+    const result = await pool.query(
+      `SELECT mes, ano,
+              COALESCE(SUM(CASE WHEN tipo_despesa = 'FIXA' THEN valor_previsto ELSE 0 END), 0) AS total_fixas,
+              COALESCE(SUM(CASE WHEN tipo_despesa = 'VARIAVEL' THEN valor_previsto ELSE 0 END), 0) AS total_variaveis,
+              COALESCE(SUM(valor_previsto), 0) AS total_previsto,
+              COUNT(*)::int AS quantidade_itens
+       FROM planejamentos_mensais
+       WHERE usuario_id = $1
+         AND ativa = true
+         AND (ano * 12 + mes) BETWEEN ($2::int * 12 + $3::int) AND ($4::int * 12 + $5::int)
+       GROUP BY mes, ano`,
+      [req.usuario.usuario_id, primeiro.ano, primeiro.mes, ultimo.ano, ultimo.mes]
+    );
+
+    const porPeriodo = new Map(result.rows.map((row) => [`${row.ano}-${row.mes}`, row]));
+    res.json({
+      meses: meses.map((periodo) => {
+        const row = porPeriodo.get(`${periodo.ano}-${periodo.mes}`) || {};
+        const totalFixas = Number(row.total_fixas || 0);
+        const totalVariaveis = Number(row.total_variaveis || 0);
+        return {
+          mes: periodo.mes,
+          ano: periodo.ano,
+          label: montarLabelMesPlanejamento(periodo.mes, periodo.ano),
+          total_fixas: totalFixas,
+          total_variaveis: totalVariaveis,
+          total_previsto: Number(row.total_previsto || totalFixas + totalVariaveis),
+          quantidade_itens: Number(row.quantidade_itens || 0),
+        };
+      })
+    });
+  } catch (error) { res.status(400).json({ erro: error.message }); }
+});
+
 app.post('/api/planejamento', verificarToken, async (req, res) => {
   try {
     const p = validarPayloadPlanejamento(req.body);

@@ -1436,6 +1436,8 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
   const [ano, setAno] = useState(hoje.getFullYear());
   const [planejamentos, setPlanejamentos] = useState([]);
   const [resumo, setResumo] = useState({});
+  const [resumoMensal, setResumoMensal] = useState([]);
+  const [carregandoResumoMensal, setCarregandoResumoMensal] = useState(false);
   const [carregando, setCarregando] = useState(false);
   const [editandoId, setEditandoId] = useState(null);
   const formularioInicial = { descricao: '', categoria: '', tipo_despesa: 'FIXA', valor_previsto: '', dia_previsto: '', observacao: '', recorrencia_tipo: 'UNICA', recorrencia_termino: 'SEM_FIM', mes_fim: String(hoje.getMonth() + 1), ano_fim: String(hoje.getFullYear()), quantidade_parcelas: '', parcela_inicial: '1' };
@@ -1457,7 +1459,19 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
     }
   };
 
-  useEffect(() => { carregarPlanejamento(); }, [mes, ano]);
+  const carregarResumoMensal = async () => {
+    setCarregandoResumoMensal(true);
+    try {
+      const response = await axios.get(`${API_URL}/planejamento/resumo-mensal?mesInicio=${mes}&anoInicio=${ano}&quantidadeMeses=12`, { headers: authHeaders });
+      setResumoMensal(response.data.meses || []);
+    } catch (error) {
+      alert('Erro ao carregar previsão mensal: ' + (error.response?.data?.erro || error.message));
+    } finally {
+      setCarregandoResumoMensal(false);
+    }
+  };
+
+  useEffect(() => { carregarPlanejamento(); carregarResumoMensal(); }, [mes, ano]);
 
   const limparFormulario = () => {
     setEditandoId(null);
@@ -1475,6 +1489,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
       }
       limparFormulario();
       await carregarPlanejamento();
+      await carregarResumoMensal();
     } catch (error) {
       alert('Não foi possível salvar: ' + (error.response?.data?.erro || error.message));
     }
@@ -1508,6 +1523,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
       await axios.delete(`${API_URL}/planejamento/${item.id}`, { headers: authHeaders });
       if (editandoId === item.id) limparFormulario();
       await carregarPlanejamento();
+      await carregarResumoMensal();
     } catch (error) {
       alert('Erro ao excluir: ' + (error.response?.data?.erro || error.message));
     }
@@ -1518,6 +1534,8 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
     if (item.recorrencia_tipo === 'PARCELADA') return `Parcelada ${item.parcela_atual || 1}/${item.quantidade_parcelas || '?'}`;
     return 'Única';
   };
+
+  const maiorTotalResumoMensal = Math.max(...resumoMensal.map((item) => Number(item.total_previsto || 0)), 0);
 
   return (
     <div style={{ minHeight: '100vh', background: '#f5f5f5', padding: '20px' }}>
@@ -1534,6 +1552,48 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
             <KpiCard titulo="Itens planejados" valor={Number(resumo.quantidade || 0)} detalhe="Despesas cadastradas" cor="#0f766e" fundo="#f0fdfa" />
             <KpiCard titulo="Realizado no mês" valor={formatarMoeda(resumo.totalRealizado)} detalhe={`Diferença: ${formatarMoeda(resumo.diferencaPrevistoRealizado)}`} cor="#7c3aed" fundo="#f5f3ff" />
           </div>
+        </div>
+
+        <div style={{ background: 'white', borderRadius: '16px', padding: '22px', boxShadow: '0 2px 10px rgba(15,23,42,0.08)', marginBottom: '18px' }}>
+          <h2 style={{ margin: '0 0 6px' }}>Previsão mensal de gastos</h2>
+          <p style={{ color: '#64748b', marginTop: 0 }}>Valores previstos com base nas despesas cadastradas, recorrentes e parceladas.</p>
+          <div style={{ display: 'flex', gap: '14px', flexWrap: 'wrap', marginBottom: '16px', color: '#475569', fontSize: '13px' }}>
+            <span><strong style={{ color: '#2563eb' }}>■</strong> Fixas</span>
+            <span><strong style={{ color: '#f97316' }}>■</strong> Variáveis</span>
+            <span><strong>Total previsto</strong></span>
+          </div>
+          {carregandoResumoMensal ? <p style={{ color: '#64748b' }}>Carregando previsão...</p> : (
+            <>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(12, minmax(58px, 1fr))', gap: '10px', alignItems: 'end', minHeight: '220px', overflowX: 'auto', paddingBottom: '8px' }}>
+                {resumoMensal.map((item) => {
+                  const total = Number(item.total_previsto || 0);
+                  const fixas = Number(item.total_fixas || 0);
+                  const variaveis = Number(item.total_variaveis || 0);
+                  const altura = maiorTotalResumoMensal > 0 ? Math.max(8, Math.round((total / maiorTotalResumoMensal) * 160)) : 8;
+                  const alturaFixas = total > 0 ? Math.round((fixas / total) * altura) : 0;
+                  const alturaVariaveis = Math.max(0, altura - alturaFixas);
+                  return (
+                    <div key={`${item.ano}-${item.mes}`} title={`${item.label}: ${formatarMoeda(total)}`} style={{ display: 'grid', gap: '6px', justifyItems: 'center', minWidth: '58px' }}>
+                      <div style={{ fontSize: '11px', color: '#475569', fontWeight: 'bold' }}>{formatarMoeda(total)}</div>
+                      <div style={{ height: '160px', display: 'flex', alignItems: 'end', width: '32px' }}>
+                        <div style={{ width: '100%', height: `${altura}px`, display: 'flex', flexDirection: 'column-reverse', borderRadius: '8px 8px 4px 4px', overflow: 'hidden', background: '#e5e7eb' }}>
+                          <div style={{ height: `${alturaFixas}px`, background: '#2563eb' }} />
+                          <div style={{ height: `${alturaVariaveis}px`, background: '#f97316' }} />
+                        </div>
+                      </div>
+                      <div style={{ fontSize: '12px', color: '#64748b' }}>{item.label}</div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div style={{ overflowX: 'auto', marginTop: '14px' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '560px' }}>
+                  <thead style={{ background: '#f8fafc' }}><tr>{['Mês','Fixas','Variáveis','Total previsto'].map((h) => <th key={h} style={{ padding: '10px', textAlign: 'left' }}>{h}</th>)}</tr></thead>
+                  <tbody>{resumoMensal.map((item) => <tr key={`${item.ano}-${item.mes}`} style={{ borderTop: '1px solid #e5e7eb' }}><td style={{ padding: '10px' }}>{item.label}</td><td style={{ padding: '10px' }}>{formatarMoeda(item.total_fixas)}</td><td style={{ padding: '10px' }}>{formatarMoeda(item.total_variaveis)}</td><td style={{ padding: '10px', fontWeight: 'bold' }}>{formatarMoeda(item.total_previsto)}</td></tr>)}</tbody>
+                </table>
+              </div>
+            </>
+          )}
         </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '18px' }}>
