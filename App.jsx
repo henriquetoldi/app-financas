@@ -7,6 +7,28 @@ import axios from 'axios';
 
 const API_URL = import.meta.env.VITE_API_URL || '/api';
 
+function mostrarToast(mensagem, tipo = 'sucesso', duracao = 4000) {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('app-toast', { detail: { mensagem: String(mensagem), tipo, duracao } }));
+  } else {
+    console.log(mensagem);
+  }
+}
+
+function pedirConfirmacao(titulo, mensagem, onConfirmar, opcoes = {}) {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('app-confirmacao', { detail: { titulo, mensagem, onConfirmar, ...opcoes } }));
+  }
+}
+
+function Spinner({ texto = 'Carregando...' }) {
+  return <div className="loading-spinner-wrap"><span className="loading-spinner" />{texto && <span>{texto}</span>}</div>;
+}
+
+function Breadcrumb({ atual, onVoltar }) {
+  return <div className="breadcrumb"><button onClick={onVoltar}>Início</button><span>&gt;</span><strong>{atual}</strong></div>;
+}
+
 // ============================================================================
 // FUNÇÕES AUXILIARES
 // ============================================================================
@@ -869,7 +891,7 @@ function ImportarExcel({ contas, token, onConcluida }) {
         nomeCorrigido: pendencia.nomePlanilha,
       })));
     } catch (error) {
-      alert(montarMensagemErroImportacao(error));
+      mostrarToast(montarMensagemErroImportacao(error));
     } finally {
       setCarregando(false);
     }
@@ -887,10 +909,10 @@ function ImportarExcel({ contas, token, onConcluida }) {
         conciliacoesConfirmadas: conciliacoesSelecionadas,
         conciliacoesIgnoradas,
       }, { headers: authHeaders });
-      alert(response.data.mensagem || 'Importação concluída.');
+      mostrarToast(response.data.mensagem || 'Importação concluída.');
       onConcluida();
     } catch (error) {
-      alert(montarMensagemErroImportacao(error));
+      mostrarToast(montarMensagemErroImportacao(error));
     } finally {
       setCarregando(false);
     }
@@ -938,10 +960,10 @@ function ImportarExcel({ contas, token, onConcluida }) {
     const texto = erros.map(formatarErroImportacao).join('\n\n---\n\n');
     try {
       await navigator.clipboard.writeText(texto);
-      alert('Detalhes dos erros copiados para a área de transferência.');
+      mostrarToast('Detalhes dos erros copiados para a área de transferência.');
     } catch (error) {
       console.error('Erro ao copiar detalhes:', error);
-      alert('Não foi possível copiar automaticamente. Selecione e copie os detalhes exibidos no modal.');
+      mostrarToast('Não foi possível copiar automaticamente. Selecione e copie os detalhes exibidos no modal.');
     }
   };
 
@@ -1325,7 +1347,7 @@ function Login() {
       const response = await axios.get(`${API_URL}/auth/google/url`);
       window.location.href = response.data.url;
     } catch (error) {
-      alert('Erro ao fazer login: ' + (error.response?.data?.erro || error.message));
+      mostrarToast('Erro ao fazer login: ' + (error.response?.data?.erro || error.message));
       setCarregando(false);
     }
   };
@@ -1390,8 +1412,10 @@ function Login() {
 
 
 function KpiCard({ titulo, valor, detalhe, cor = '#2563eb', fundo = 'white' }) {
+  const icone = titulo.toLowerCase().includes('receita') ? '📈' : titulo.toLowerCase().includes('despesa') ? '📉' : titulo.toLowerCase().includes('saldo') ? '💰' : titulo.toLowerCase().includes('planej') || titulo.toLowerCase().includes('provis') ? '📌' : '📊';
   return (
-    <div style={{ background: fundo, borderRadius: '14px', padding: '18px', boxShadow: '0 2px 10px rgba(15,23,42,0.08)', border: '1px solid #eef2f7' }}>
+    <div className="kpi-card" style={{ background: fundo, borderRadius: '14px', padding: '18px', boxShadow: '0 2px 10px rgba(15,23,42,0.08)', border: '1px solid #eef2f7' }}>
+      <span className="kpi-icon">{icone}</span>
       <p style={{ margin: '0 0 8px', color: '#64748b', fontSize: '13px', fontWeight: 600 }}>{titulo}</p>
       <p style={{ margin: 0, color: cor, fontSize: '24px', fontWeight: 800 }}>{valor}</p>
       {detalhe && <p style={{ margin: '8px 0 0', color: '#94a3b8', fontSize: '12px' }}>{detalhe}</p>}
@@ -1504,7 +1528,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
       setResumo(response.data.resumo || {});
       setComparativoCategorias(response.data.comparativoCategorias || []);
     } catch (error) {
-      alert('Erro ao carregar planejamento: ' + (error.response?.data?.erro || error.message));
+      mostrarToast('Erro ao carregar planejamento: ' + (error.response?.data?.erro || error.message));
     } finally {
       setCarregando(false);
     }
@@ -1525,7 +1549,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
       const response = await axios.get(`${API_URL}/planejamento/resumo-mensal?mesInicio=${mes}&anoInicio=${ano}&${montarQueryFiltrosPlanejamento(true)}`, { headers: authHeaders });
       setResumoMensal(response.data.meses || []);
     } catch (error) {
-      alert('Erro ao carregar previsão mensal: ' + (error.response?.data?.erro || error.message));
+      mostrarToast('Erro ao carregar previsão mensal: ' + (error.response?.data?.erro || error.message));
     } finally {
       setCarregandoResumoMensal(false);
     }
@@ -1536,7 +1560,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
       const response = await axios.get(`${API_URL}/planejamento/resumo-categorias?mesInicio=${mes}&anoInicio=${ano}&${montarQueryFiltrosPlanejamento(true)}`, { headers: authHeaders });
       setResumoCategorias(response.data.meses || []);
     } catch (error) {
-      alert('Erro ao carregar distribuição por categoria: ' + (error.response?.data?.erro || error.message));
+      mostrarToast('Erro ao carregar distribuição por categoria: ' + (error.response?.data?.erro || error.message));
     }
   };
 
@@ -1564,7 +1588,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
       await carregarResumoMensal();
       await carregarResumoCategorias();
     } catch (error) {
-      alert('Não foi possível salvar: ' + (error.response?.data?.erro || error.message));
+      mostrarToast('Não foi possível salvar: ' + (error.response?.data?.erro || error.message));
     }
   };
 
@@ -1587,22 +1611,23 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
       parcela_inicial: item.parcela_atual || '1',
     });
     if (item.recorrencia_tipo && item.recorrencia_tipo !== 'UNICA') {
-      alert('Esta despesa faz parte de uma recorrência. Nesta versão, a alteração será aplicada apenas neste lançamento.');
+      mostrarToast('Esta despesa faz parte de uma recorrência. Nesta versão, a alteração será aplicada apenas neste lançamento.');
     }
   };
 
   const excluirPlanejamento = async (item) => {
     const avisoRecorrencia = item.recorrencia_tipo && item.recorrencia_tipo !== 'UNICA' ? '\n\nEsta despesa faz parte de uma recorrência. Nesta versão, apenas este lançamento será excluído.' : '';
-    if (!window.confirm(`Excluir "${item.descricao}" do planejamento?${avisoRecorrencia}`)) return;
-    try {
-      await axios.delete(`${API_URL}/planejamento/${item.id}`, { headers: authHeaders });
-      if (editandoId === item.id) limparFormulario();
-      await carregarPlanejamento();
-      await carregarResumoMensal();
-      await carregarResumoCategorias();
-    } catch (error) {
-      alert('Erro ao excluir: ' + (error.response?.data?.erro || error.message));
-    }
+    pedirConfirmacao('Excluir planejamento', `Excluir "${item.descricao}" do planejamento?${avisoRecorrencia}`, async () => {
+      try {
+        await axios.delete(`${API_URL}/planejamento/${item.id}`, { headers: authHeaders });
+        if (editandoId === item.id) limparFormulario();
+        await carregarPlanejamento();
+        await carregarResumoMensal();
+        await carregarResumoCategorias();
+      } catch (error) {
+        mostrarToast('Erro ao excluir: ' + (error.response?.data?.erro || error.message), 'erro');
+      }
+    }, { labelConfirmar: 'Excluir', corConfirmar: '#ef4444' });
   };
 
   const rotuloRecorrencia = (item) => {
@@ -1628,7 +1653,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
   return (
     <div style={{ minHeight: '100vh', background: '#f5f5f5', padding: '20px' }}>
       <div style={{ maxWidth: '1200px', margin: '0 auto' }}>
-        <button onClick={onVoltar} style={{ background: '#e5e7eb', border: 'none', padding: '10px 14px', borderRadius: '8px', cursor: 'pointer', marginBottom: '16px' }}>← Voltar</button>
+        <Breadcrumb atual="Planejamento Mensal" onVoltar={onVoltar} />
         <div style={{ background: 'white', borderRadius: '16px', padding: '22px', boxShadow: '0 2px 10px rgba(15,23,42,0.08)', marginBottom: '18px' }}>
           <h1 style={{ margin: '0 0 8px' }}>🗓️ Planejamento Mensal</h1>
           <p style={{ color: '#64748b', marginTop: 0 }}>Planeje seus gastos antes do mês acontecer. Cadastre despesas únicas, recorrentes e parceladas para entender seus compromissos financeiros futuros.</p>
@@ -1685,7 +1710,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
             <span><strong style={{ color: '#f97316' }}>■</strong> Variáveis</span>
             <span><strong>Total previsto</strong></span>
           </div>
-          {carregandoResumoMensal ? <p style={{ color: '#64748b' }}>Carregando previsão...</p> : !haDadosResumoMensal ? <p style={{ color: '#64748b' }}>Nenhuma despesa planejada encontrada para os filtros selecionados.</p> : (
+          {carregandoResumoMensal ? <Spinner texto="Carregando previsão..." /> : !haDadosResumoMensal ? <p style={{ color: '#64748b' }}>Nenhuma despesa planejada encontrada para os filtros selecionados.</p> : (
             <>
               <div style={{ display: 'grid', gridTemplateColumns: `repeat(${Math.max(resumoMensal.length, 1)}, minmax(58px, 1fr))`, gap: '10px', alignItems: 'end', minHeight: '220px', overflowX: 'auto', paddingBottom: '8px' }}>
                 {resumoMensal.map((item) => {
@@ -1801,7 +1826,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
 
           <div style={{ background: 'white', borderRadius: '14px', padding: '18px', overflowX: 'auto' }}>
             <h2 style={{ marginTop: 0 }}>Despesas planejadas de {rotuloMesAnoSelecionado}</h2>
-            {carregando ? <p>Carregando...</p> : planejamentos.length === 0 ? <p style={{ color: '#64748b' }}>Nenhuma despesa planejada para este mês.</p> : (
+            {carregando ? <Spinner texto="Carregando..." /> : planejamentos.length === 0 ? <p style={{ color: '#64748b' }}>Nenhuma despesa planejada para este mês.</p> : (
               <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '760px' }}>
                 <thead style={{ background: '#f8fafc' }}><tr>{['Descrição','Categoria','Tipo','Recorrência','Valor previsto','Dia previsto','Observação','Ações'].map((h) => <th key={h} style={{ padding: '10px', textAlign: 'left' }}>{h}</th>)}</tr></thead>
                 <tbody>{planejamentos.map((item) => <tr key={item.id} style={{ borderTop: '1px solid #e5e7eb' }}><td style={{ padding: '10px' }}>{item.descricao}</td><td style={{ padding: '10px' }}>{item.categoria || '-'}</td><td style={{ padding: '10px' }}>{item.tipo_despesa === 'FIXA' ? 'Fixa' : 'Variável'}</td><td style={{ padding: '10px' }}>{rotuloRecorrencia(item)}</td><td style={{ padding: '10px' }}>{formatarMoeda(item.valor_previsto)}</td><td style={{ padding: '10px' }}>{item.dia_previsto || '-'}</td><td style={{ padding: '10px' }}>{item.observacao || '-'}</td><td style={{ padding: '10px', display: 'flex', gap: '6px' }}><button onClick={() => editarPlanejamento(item)} style={{ padding: '6px 8px', borderRadius: '6px', border: '1px solid #2563eb', color: '#2563eb', background: 'white', cursor: 'pointer' }}>Editar</button><button onClick={() => excluirPlanejamento(item)} style={{ padding: '6px 8px', borderRadius: '6px', border: '1px solid #dc2626', color: '#dc2626', background: 'white', cursor: 'pointer' }}>Excluir</button></td></tr>)}</tbody>
@@ -1813,6 +1838,96 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
     </div>
   );
 }
+
+
+function AppStyles() {
+  return <style>{`
+    body { margin: 0; background: #f1f5f9; color: #0f172a; }
+    .app-layout { min-height: 100vh; background: #f1f5f9; display: flex; }
+    .app-content { margin-left: 220px; width: calc(100% - 220px); min-height: 100vh; }
+    .page-container { padding: 20px; max-width: 1200px; margin: 0 auto; }
+    .sidebar { position: fixed; inset: 0 auto 0 0; width: 220px; background: #1e293b; color: white; padding: 18px 12px; display: flex; flex-direction: column; z-index: 20; box-sizing: border-box; }
+    .sidebar-brand { display: flex; align-items: center; gap: 10px; font-size: 20px; padding: 4px 10px; }
+    .sidebar-sep { border-top: 1px solid #334155; margin: 16px 6px; }
+    .sidebar nav { display: grid; gap: 6px; }
+    .sidebar-item { display: flex; align-items: center; gap: 10px; width: 100%; color: #94a3b8; background: transparent; border: 0; border-radius: 8px; padding: 10px; cursor: pointer; font-size: 15px; text-align: left; }
+    .sidebar-item:hover { background: #334155; }
+    .sidebar-item.active { background: #3b82f6; color: white; }
+    .sidebar-item.admin { color: #f59e0b; }
+    .sidebar-footer { margin-top: auto; display: grid; gap: 8px; color: #94a3b8; padding: 10px; }
+    .sidebar-footer img, .avatar-button img { width: 34px; height: 34px; border-radius: 50%; object-fit: cover; }
+    .sidebar-footer button { color: #fca5a5; background: transparent; border: 0; padding: 0; text-align: left; cursor: pointer; }
+    .top-header { background: #ffffff; border-bottom: 1px solid #e2e8f0; padding: 16px 20px; display: flex; justify-content: space-between; align-items: center; }
+    .top-header h1 { margin: 0 0 4px; font-size: 22px; } .top-header p { margin: 0; color: #64748b; font-size: 14px; }
+    .top-actions { display: flex; align-items: center; gap: 12px; }
+    .avatar-menu { position: relative; } .avatar-button { display:flex; align-items:center; gap:8px; border:1px solid #e2e8f0; background:white; border-radius:999px; padding:5px 10px 5px 5px; cursor:pointer; }
+    .avatar-dropdown { position:absolute; right:0; top:46px; width:220px; background:white; border:1px solid #e2e8f0; border-radius:12px; box-shadow:0 12px 28px rgba(15,23,42,.16); padding:14px; display:grid; gap:8px; z-index:30; }
+    .avatar-dropdown small { color:#64748b; } .avatar-dropdown button { color:#ef4444; background:#fff1f2; border:0; padding:8px; border-radius:8px; cursor:pointer; }
+    .primary-button { background:#3b82f6; color:white; border:0; border-radius:8px; padding:10px 16px; cursor:pointer; font-weight:700; }
+    .btn-secondary { background:white; border:1px solid #e2e8f0; border-radius:8px; padding:10px 14px; cursor:pointer; }
+    .btn-confirm { color:white; border:0; border-radius:8px; padding:10px 14px; cursor:pointer; font-weight:700; }
+    .toast { position: fixed; right: 24px; bottom: 24px; color: white; padding: 14px 18px; border-radius: 10px; box-shadow: 0 12px 32px rgba(0,0,0,.22); z-index: 100; display:flex; gap:14px; align-items:center; animation: slideIn .18s ease-out; max-width: 420px; white-space: pre-line; }
+    .toast-sucesso { background:#065f46; border-left:4px solid #10b981; } .toast-erro { background:#7f1d1d; border-left:4px solid #ef4444; } .toast-aviso { background:#451a03; border-left:4px solid #f59e0b; }
+    .toast button { background:transparent; border:0; color:white; font-size:18px; cursor:pointer; }
+    @keyframes slideIn { from { transform: translateX(24px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+    .modal-overlay { position: fixed; inset:0; background:rgba(0,0,0,.6); display:flex; align-items:center; justify-content:center; z-index:90; padding:20px; }
+    .modal-card { background:white; border-radius:12px; max-width:420px; width:100%; padding:22px; box-shadow:0 22px 60px rgba(0,0,0,.28); } .modal-card p { color:#64748b; white-space:pre-line; } .modal-actions { display:flex; justify-content:flex-end; gap:10px; }
+    .breadcrumb { display:flex; gap:8px; align-items:center; font-size:13px; color:#64748b; margin-bottom:16px; } .breadcrumb button { border:0; background:transparent; padding:0; color:#3b82f6; cursor:pointer; } .breadcrumb strong { color:#0f172a; }
+    .admin-tabs { display:flex; gap:16px; border-bottom:1px solid #e2e8f0; margin-bottom:18px; } .admin-tabs button { border:0; background:transparent; padding:12px 4px; cursor:pointer; color:#64748b; } .admin-tabs button.active { color:#0f172a; border-bottom:3px solid #3b82f6; font-weight:700; }
+    .loading-spinner-wrap { display:flex; align-items:center; gap:10px; color:#64748b; padding:12px; } .loading-spinner { width:18px; height:18px; border:3px solid #e2e8f0; border-top-color:#3b82f6; border-radius:50%; animation: spin .8s linear infinite; } @keyframes spin { to { transform: rotate(360deg); } }
+    tbody tr:hover { background:#f8fafc; }
+    .kpi-card { position: relative; overflow: hidden; } .kpi-icon { position:absolute; right:14px; top:12px; opacity:.8; }
+    @media (max-width: 767px) { .sidebar { width:60px; } .sidebar-label, .sidebar-brand strong { display:none; } .app-content { margin-left:60px; width:calc(100% - 60px); } .page-container { padding:12px; } }
+  `}</style>;
+}
+
+function Toast({ toast, onFechar }) {
+  if (!toast) return null;
+  return <div className={`toast toast-${toast.tipo || 'sucesso'}`}><span>{toast.mensagem}</span><button onClick={onFechar}>×</button></div>;
+}
+
+function ModalConfirmacao({ config, onCancelar }) {
+  if (!config) return null;
+  const confirmar = async () => {
+    await config.onConfirmar?.();
+    onCancelar();
+  };
+  return <div className="modal-overlay" onClick={onCancelar}><div className="modal-card" onClick={(e) => e.stopPropagation()}><h3>{config.titulo}</h3><p>{config.mensagem}</p><div className="modal-actions"><button className="btn-secondary" onClick={onCancelar}>Cancelar</button><button className="btn-confirm" style={{ background: config.corConfirmar || '#3b82f6' }} onClick={confirmar}>{config.labelConfirmar || 'Confirmar'}</button></div></div></div>;
+}
+
+function Sidebar({ modo, onNavegar, usuario, onLogout }) {
+  const itens = [
+    ['home', '📊', 'Dashboard'],
+    ['transacoes', '💸', 'Transações'],
+    ['planejamento', '🗓️', 'Planejamento'],
+    ['provisoes', '📌', 'Provisões'],
+    ['conferencia-saldos', '🏦', 'Conferência'],
+  ];
+  return <aside className="sidebar"><div className="sidebar-brand"><span>💰</span><strong>Finanças</strong></div><div className="sidebar-sep" /> <nav>{itens.map(([id, icone, label]) => <button key={id} className={`sidebar-item ${modo === id ? 'active' : ''}`} onClick={() => onNavegar(id)}><span>{icone}</span><span className="sidebar-label">{label}</span></button>)}<div className="sidebar-sep" /><button className={`sidebar-item admin ${modo === 'admin' ? 'active' : ''}`} onClick={() => onNavegar('admin')}><span>⚙️</span><span className="sidebar-label">Admin</span></button></nav><div className="sidebar-footer"><img src={usuario?.foto_url || usuario?.picture || 'https://ui-avatars.com/api/?name=Financas'} alt="Usuário" /><span className="sidebar-label">{(usuario?.nome || usuario?.email || 'Usuário').split(' ')[0]}</span><button onClick={onLogout}>→ Sair</button></div></aside>;
+}
+
+function HeaderPrincipal({ usuario, token, onLogout }) {
+  const [aberto, setAberto] = useState(false);
+  const nome = usuario?.nome || usuario?.email || 'Usuário';
+  return <header className="top-header"><div><h1>💰 Finanças Pessoais</h1><p>Olá, {nome}</p></div><div className="top-actions"><NotificacoesBell token={token} /><div className="avatar-menu"><button className="avatar-button" onClick={() => setAberto(!aberto)}><img src={usuario?.foto_url || usuario?.picture || 'https://ui-avatars.com/api/?name=Financas'} alt="Avatar" /><span>{nome.split(' ')[0]}</span><span>▾</span></button>{aberto && <div className="avatar-dropdown"><strong>{nome}</strong><small>{usuario?.email}</small><button onClick={onLogout}>Sair</button></div>}</div></div></header>;
+}
+
+function TelaAdmin({ token, usuario, onVoltar }) {
+  const [aba, setAba] = useState('backups');
+  const [resultadoDrive, setResultadoDrive] = useState(null);
+  const testarDrive = async () => {
+    try {
+      const response = await axios.get(`${API_URL}/drive/pastas`, { headers: { Authorization: `Bearer ${token}` } });
+      setResultadoDrive(response.data);
+      mostrarToast('Conexão com Google Drive testada com sucesso.', 'sucesso');
+    } catch (error) {
+      setResultadoDrive({ erro: error.response?.data?.erro || error.message });
+      mostrarToast('Erro ao testar conexão com Drive: ' + (error.response?.data?.erro || error.message), 'erro');
+    }
+  };
+  return <div className="content-card admin-screen"><Breadcrumb atual="Admin" onVoltar={onVoltar} /><h2>⚙️ Administração</h2><div className="admin-tabs">{[['backups','💾 Backups'],['drive','☁️ Drive'],['sistema','⚙️ Sistema']].map(([id,label]) => <button key={id} className={aba === id ? 'active' : ''} onClick={() => setAba(id)}>{label}</button>)}</div>{aba === 'backups' && <AdminBackups token={token} />}{aba === 'drive' && <section><h3>Google Drive</h3><p>Status: conectado via backend Railway.</p><p><strong>DRIVE_FINANCAS_FOLDER_ID:</strong> configurado no servidor</p><p><strong>DRIVE_BACKUPS_FOLDER_ID:</strong> configurado no servidor</p><button className="primary-button" onClick={testarDrive}>Testar conexão</button>{resultadoDrive && <pre>{JSON.stringify(resultadoDrive, null, 2)}</pre>}</section>}{aba === 'sistema' && <section><h3>Configurações do Sistema</h3><p>Versão: {import.meta.env.VITE_APP_VERSION || 'frontend-local'}</p><p>Build: {import.meta.env.MODE}</p><p>Usuário: {usuario?.nome || usuario?.email}</p><p>API: {API_URL}</p></section>}</div>;
+}
+
 
 function Dashboard({ usuario, token, onLogout }) {
   const [contas, setContas] = useState([]);
@@ -1826,9 +1941,26 @@ function Dashboard({ usuario, token, onLogout }) {
   const [periodoDashboard, setPeriodoDashboard] = useState(calcularPeriodoRapido('mes'));
   const [resumoDashboard, setResumoDashboard] = useState(null);
   const [carregandoDashboard, setCarregandoDashboard] = useState(false);
+  const [toast, setToast] = useState(null);
+  const [confirmacao, setConfirmacao] = useState(null);
 
   useEffect(() => {
     carregarContas();
+  }, []);
+
+  useEffect(() => {
+    const onToast = (event) => {
+      setToast(event.detail);
+      window.clearTimeout(window.__toastTimer);
+      window.__toastTimer = window.setTimeout(() => setToast(null), event.detail?.duracao || 4000);
+    };
+    const onConfirmacao = (event) => setConfirmacao(event.detail);
+    window.addEventListener('app-toast', onToast);
+    window.addEventListener('app-confirmacao', onConfirmacao);
+    return () => {
+      window.removeEventListener('app-toast', onToast);
+      window.removeEventListener('app-confirmacao', onConfirmacao);
+    };
   }, []);
 
   useEffect(() => {
@@ -1893,7 +2025,7 @@ function Dashboard({ usuario, token, onLogout }) {
 
       setPastas(response.data.pastas || []);
     } catch (error) {
-      alert('Erro ao carregar pastas: ' + (error.response?.data?.erro || error.message));
+      mostrarToast('Erro ao carregar pastas: ' + (error.response?.data?.erro || error.message));
     } finally {
       setCarregando(false);
     }
@@ -1910,7 +2042,7 @@ function Dashboard({ usuario, token, onLogout }) {
 
       setArquivos(response.data.arquivos || []);
     } catch (error) {
-      alert('Erro ao carregar arquivos: ' + (error.response?.data?.erro || error.message));
+      mostrarToast('Erro ao carregar arquivos: ' + (error.response?.data?.erro || error.message));
     } finally {
       setCarregando(false);
     }
@@ -1918,61 +2050,30 @@ function Dashboard({ usuario, token, onLogout }) {
 
   const importarArquivo = async (arquivo) => {
     if (!pastaSelecionada) {
-      alert('Selecione uma pasta primeiro.');
+      mostrarToast('Selecione uma pasta primeiro.', 'aviso');
       return;
     }
 
-    if (!window.confirm(`Importar "${arquivo.name}"?`)) return;
-
-    setCarregando(true);
-
-    try {
-      const response = await axios.post(
-        `${API_URL}/importar/${arquivo.id}`,
-        { nomePasta: pastaSelecionada.name },
-        { headers: authHeaders }
-      );
-
-      alert(
-        `✅ Importação concluída!\n` +
-        `${response.data.inseridas || 0} transações importadas.\n` +
-        `${response.data.duplicadas || 0} duplicadas.`
-      );
-
-      await carregarContas();
-      setModo('home');
-      setPastaSelecionada(null);
-      setArquivos([]);
-    } catch (error) {
-      alert(montarMensagemErroImportacao(error));
-    } finally {
-      setCarregando(false);
-    }
+    pedirConfirmacao('Importar arquivo', `Importar "${arquivo.name}"?`, async () => {
+      setCarregando(true);
+      try {
+        const response = await axios.post(
+          `${API_URL}/importar/${arquivo.id}`,
+          { nomePasta: pastaSelecionada.name },
+          { headers: authHeaders }
+        );
+        mostrarToast(`${response.data.inseridas || 0} transações importadas. ${response.data.duplicadas || 0} duplicadas.`, 'sucesso');
+        await carregarContas();
+        setModo('home');
+        setPastaSelecionada(null);
+        setArquivos([]);
+      } catch (error) {
+        mostrarToast(montarMensagemErroImportacao(error), 'erro');
+      } finally {
+        setCarregando(false);
+      }
+    }, { labelConfirmar: 'Importar', corConfirmar: '#3b82f6' });
   };
-
-  if (modo === 'conferencia-saldos') {
-    return <TelaConferenciaSaldos contas={contas} token={token} onVoltar={() => setModo('home')} onAtualizarContas={carregarContas} />;
-  }
-
-  if (modo === 'provisoes') {
-    return <TelaProvisoes contas={contas} token={token} onVoltar={() => setModo('home')} />;
-  }
-
-  if (modo === 'planejamento') {
-    return <TelaPlanejamentoMensal token={token} onVoltar={() => setModo('home')} />;
-  }
-
-  if (modo === 'transacoes' && (contaSelecionada || contas.length > 0)) {
-    return (
-      <TelaTransacoes
-        contaInicial={contaSelecionada}
-        contas={contas}
-        token={token}
-        onVoltar={() => setModo('home')}
-        onAtualizarContas={carregarContas}
-      />
-    );
-  }
 
   const kpisDashboard = resumoDashboard?.kpis || {};
   const seriesDashboard = resumoDashboard?.series || {};
@@ -1987,66 +2088,13 @@ function Dashboard({ usuario, token, onLogout }) {
   });
 
   return (
-    <div style={{ minHeight: '100vh', background: '#f5f5f5' }}>
-      <div className="app-shell-header" style={{
-        background: '#1f2937',
-        color: 'white',
-        padding: '20px',
-        display: 'flex',
-        justifyContent: 'space-between',
-        alignItems: 'center'
-      }}>
-        <div>
-          <h1 style={{ margin: '0 0 5px' }}>💰 Finanças Pessoais</h1>
-          <p style={{ margin: 0, fontSize: '14px', opacity: 0.8 }}>
-            Olá, {usuario?.nome || usuario?.email}
-          </p>
-        </div>
-
-        <div className="app-header-actions" style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
-          <button
-            onClick={() => setModo('planejamento')}
-            style={{
-              background: 'rgba(255,255,255,0.2)',
-              color: 'white',
-              border: '1px solid rgba(255,255,255,0.3)',
-              padding: '8px 12px',
-              borderRadius: '6px',
-              cursor: 'pointer'
-            }}
-          >
-            Planejamento
-          </button>
-          <button
-            onClick={() => setModo('backups')}
-            style={{
-              background: 'rgba(255,255,255,0.2)',
-              color: 'white',
-              border: '1px solid rgba(255,255,255,0.3)',
-              padding: '8px 12px',
-              borderRadius: '6px',
-              cursor: 'pointer'
-            }}
-          >
-            Backups
-          </button>
-          <NotificacoesBell token={token} />
-        <button
-          onClick={onLogout}
-          style={{
-            background: 'rgba(255,255,255,0.2)',
-            color: 'white',
-            border: '1px solid rgba(255,255,255,0.3)',
-            padding: '8px 16px',
-            borderRadius: '6px',
-            cursor: 'pointer'
-          }}
-        >
-          Sair
-        </button>
-        </div>
-      </div>
-
+    <div className="app-layout">
+      <AppStyles />
+      <Sidebar modo={modo} onNavegar={(novoModo) => { setContaSelecionada(null); setModo(novoModo); }} usuario={usuario} onLogout={onLogout} />
+      <div className="app-content">
+        <HeaderPrincipal usuario={usuario} token={token} onLogout={onLogout} />
+        <Toast toast={toast} onFechar={() => setToast(null)} />
+        <ModalConfirmacao config={confirmacao} onCancelar={() => setConfirmacao(null)} />
       <div className="page-container" style={{ padding: '20px', maxWidth: '1200px', margin: '0 auto' }}>
         {modo === 'home' && (
           <>
@@ -2086,46 +2134,14 @@ function Dashboard({ usuario, token, onLogout }) {
                       <p style={{ margin: 0, color: '#64748b' }}>Visão executiva entre {formatarData(periodoDashboard.dataInicial)} e {formatarData(periodoDashboard.dataFinal)}.</p>
                     </div>
                     <div className="dashboard-actions" style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
-                      <button
-                        onClick={() => {
-                          setContaSelecionada(null);
-                          setModo('transacoes');
-                        }}
-                        style={{ background: '#10b981', color: 'white', border: 'none', padding: '10px 16px', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold' }}
-                      >
-                        Ver transações consolidadas
-                      </button>
-                      <button
-                        onClick={() => setModo('planejamento')}
-                        style={{ background: '#7c3aed', color: 'white', border: 'none', padding: '10px 16px', borderRadius: '8px', cursor: 'pointer' }}
-                      >
-                        🗓️ Planejamento
-                      </button>
-                      <button
-                        onClick={() => setModo('provisoes')}
-                        style={{ background: '#0f766e', color: 'white', border: 'none', padding: '10px 16px', borderRadius: '8px', cursor: 'pointer' }}
-                      >
-                        📌 Contas previstas
-                      </button>
-                      <button
-                        onClick={() => setModo('conferencia-saldos')}
-                        style={{ background: '#1d4ed8', color: 'white', border: 'none', padding: '10px 16px', borderRadius: '8px', cursor: 'pointer' }}
-                      >
-                        🏦 Conferir saldos
-                      </button>
-                      <button
-                        onClick={() => setModo('importar')}
-                        style={{ background: '#667eea', color: 'white', border: 'none', padding: '10px 16px', borderRadius: '8px', cursor: 'pointer' }}
-                      >
-                        📊 Importar XLSX
-                      </button>
+                      <button onClick={() => setModo('importar')} className="primary-button">📊 Importar XLSX</button>
                     </div>
                   </div>
 
                   {contasSemConferenciaRecente.length > 0 && (
                     <div style={{ background: '#fffbeb', border: '1px solid #fde68a', color: '#92400e', borderRadius: '10px', padding: '12px', marginBottom: '14px', display: 'flex', justifyContent: 'space-between', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
                       <span>{contasSemConferenciaRecente[0].nome} {contasSemConferenciaRecente[0].ultima_conferencia ? 'não é conferida há mais de 30 dias.' : 'ainda não possui conferência de saldo.'}</span>
-                      <button onClick={() => setModo('conferencia-saldos')} style={{ background: '#1d4ed8', color: 'white', border: 'none', padding: '8px 12px', borderRadius: '8px', cursor: 'pointer' }}>Conferir saldos</button>
+                      <button onClick={() => setModo('conferencia-saldos')} style={{ background: '#3b82f6', color: 'white', border: 'none', padding: '8px 12px', borderRadius: '8px', cursor: 'pointer' }}>Conferir saldos</button>
                     </div>
                   )}
 
@@ -2165,7 +2181,7 @@ function Dashboard({ usuario, token, onLogout }) {
                       Data final
                       <input type="date" value={periodoDashboard.dataFinal} onChange={(event) => alterarPeriodoPersonalizado('dataFinal', event.target.value)} style={{ padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }} />
                     </label>
-                    <button onClick={() => aplicarPeriodoRapido('mes')} style={{ padding: '10px 14px', borderRadius: '8px', border: 'none', background: '#e5e7eb', cursor: 'pointer' }}>Resetar período</button>
+                    <button onClick={() => aplicarPeriodoRapido('mes')} style={{ padding: '10px 14px', borderRadius: '8px', border: '1px solid #e2e8f0', background: 'white', cursor: 'pointer', color: '#64748b' }}>↺ Resetar</button>
                   </div>
                 </div>
 
@@ -2192,7 +2208,7 @@ function Dashboard({ usuario, token, onLogout }) {
                 </div>
 
                 {carregandoDashboard ? (
-                  <div style={{ background: 'white', borderRadius: '14px', padding: '24px', marginBottom: '20px', color: '#64748b' }}>Carregando indicadores...</div>
+                  <div style={{ background: 'white', borderRadius: '14px', padding: '24px', marginBottom: '20px' }}><Spinner texto="Carregando indicadores..." /></div>
                 ) : (
                   <>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '20px', marginBottom: '20px' }}>
@@ -2354,28 +2370,12 @@ function Dashboard({ usuario, token, onLogout }) {
           </div>
         )}
 
-        {modo === 'backups' && (
-          <div className="content-card" style={{
-            background: 'white',
-            borderRadius: '12px',
-            padding: '30px'
-          }}>
-            <button
-              onClick={() => setModo('home')}
-              style={{
-                background: '#e5e7eb',
-                border: 'none',
-                padding: '8px 12px',
-                borderRadius: '6px',
-                cursor: 'pointer',
-                marginBottom: '20px'
-              }}
-            >
-              ← Voltar
-            </button>
-            <AdminBackups token={token} />
-          </div>
-        )}
+        {modo === 'admin' && <TelaAdmin token={token} usuario={usuario} onVoltar={() => setModo('home')} />}
+        {modo === 'conferencia-saldos' && <TelaConferenciaSaldos contas={contas} token={token} onVoltar={() => setModo('home')} onAtualizarContas={carregarContas} />}
+        {modo === 'provisoes' && <TelaProvisoes contas={contas} token={token} onVoltar={() => setModo('home')} />}
+        {modo === 'planejamento' && <TelaPlanejamentoMensal token={token} onVoltar={() => setModo('home')} />}
+        {modo === 'transacoes' && <TelaTransacoes contaInicial={contaSelecionada} contas={contas} token={token} onVoltar={() => setModo('home')} onAtualizarContas={carregarContas} />}
+      </div>
       </div>
     </div>
   );
@@ -2451,27 +2451,27 @@ function TelaConferenciaSaldos({ contas = [], token, onVoltar, onAtualizarContas
   };
 
   const salvarSaldoInicial = async () => {
-    if (!contaId) return alert('Selecione uma conta.');
-    if (!dataSaldoInicial) return alert('Informe a data do saldo inicial.');
+    if (!contaId) return mostrarToast('Selecione uma conta.');
+    if (!dataSaldoInicial) return mostrarToast('Informe a data do saldo inicial.');
     setCarregando(true);
     try {
       await axios.patch(`${API_URL}/contas/${contaId}/saldo-inicial`, {
         saldoInicial: numeroFormulario(saldoInicial, 0),
         dataSaldoInicial,
       }, { headers: authHeaders });
-      alert('Saldo inicial salvo.');
+      mostrarToast('Saldo inicial salvo.');
       await onAtualizarContas?.();
       await calcularSaldo();
     } catch (error) {
-      alert(error.response?.data?.detalhes || error.response?.data?.erro || error.message);
+      mostrarToast(error.response?.data?.detalhes || error.response?.data?.erro || error.message);
     } finally {
       setCarregando(false);
     }
   };
 
   const calcularSaldo = async () => {
-    if (!contaId) return alert('Selecione uma conta.');
-    if (!dataReferencia) return alert('Informe a data de referência.');
+    if (!contaId) return mostrarToast('Selecione uma conta.');
+    if (!dataReferencia) return mostrarToast('Informe a data de referência.');
     setCarregando(true);
     setDiagnostico(null);
     try {
@@ -2483,16 +2483,16 @@ function TelaConferenciaSaldos({ contas = [], token, onVoltar, onAtualizarContas
       setPeriodoInicial(response.data.dataSaldoInicial || periodoInicial);
       setPeriodoFinal(response.data.dataReferencia || dataReferencia);
     } catch (error) {
-      alert(error.response?.data?.detalhes || error.response?.data?.erro || error.message);
+      mostrarToast(error.response?.data?.detalhes || error.response?.data?.erro || error.message);
     } finally {
       setCarregando(false);
     }
   };
 
   const salvarConferencia = async () => {
-    if (!calculo?.saldoInicialConfigurado) return alert('Cadastre o saldo inicial antes de salvar a conferência.');
+    if (!calculo?.saldoInicialConfigurado) return mostrarToast('Cadastre o saldo inicial antes de salvar a conferência.');
     const saldoRealNumero = numeroFormulario(saldoReal, NaN);
-    if (!Number.isFinite(saldoRealNumero)) return alert('Informe um saldo real válido.');
+    if (!Number.isFinite(saldoRealNumero)) return mostrarToast('Informe um saldo real válido.');
     setCarregando(true);
     try {
       const response = await axios.post(`${API_URL}/conferencia-saldos`, {
@@ -2510,7 +2510,7 @@ function TelaConferenciaSaldos({ contas = [], token, onVoltar, onAtualizarContas
         setDiagnostico(null);
       }
     } catch (error) {
-      alert(error.response?.data?.detalhes || error.response?.data?.erro || error.message);
+      mostrarToast(error.response?.data?.detalhes || error.response?.data?.erro || error.message);
     } finally {
       setCarregando(false);
     }
@@ -2531,7 +2531,7 @@ function TelaConferenciaSaldos({ contas = [], token, onVoltar, onAtualizarContas
       }, { headers: authHeaders });
       setDiagnostico(response.data);
     } catch (error) {
-      alert(error.response?.data?.detalhes || error.response?.data?.erro || error.message);
+      mostrarToast(error.response?.data?.detalhes || error.response?.data?.erro || error.message);
     } finally {
       setCarregando(false);
     }
@@ -2559,7 +2559,7 @@ function TelaConferenciaSaldos({ contas = [], token, onVoltar, onAtualizarContas
 
   return (
     <div style={{ minHeight: '100vh', background: '#f8fafc', padding: '20px' }}>
-      <button onClick={onVoltar} style={{ background: '#e5e7eb', border: 'none', padding: '8px 12px', borderRadius: '6px', cursor: 'pointer' }}>← Voltar</button>
+      <Breadcrumb atual="Conferência de Saldos" onVoltar={onVoltar} />
       <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'center', flexWrap: 'wrap' }}>
         <div>
           <h1 style={{ margin: '14px 0 4px' }}>🏦 Conferência de Saldos Bancários</h1>
@@ -2716,7 +2716,7 @@ function TelaProvisoes({ contas = [], token, onVoltar }) {
       setCategorias(categoriasResponse.data.categorias || []);
       setTransacoes(transacoesResponse.data.transacoes || []);
     } catch (error) {
-      alert(error.response?.data?.erro || error.message);
+      mostrarToast(error.response?.data?.erro || error.message);
     } finally {
       setCarregando(false);
     }
@@ -2756,18 +2756,19 @@ function TelaProvisoes({ contas = [], token, onVoltar }) {
       setModalAberto(false);
       await carregarDados();
     } catch (error) {
-      alert(error.response?.data?.erro || error.message);
+      mostrarToast(error.response?.data?.erro || error.message);
     }
   };
 
   const excluirProvisao = async (provisao) => {
-    if (!window.confirm(`Excluir provisão "${provisao.descricao}"?`)) return;
-    try {
-      await axios.delete(`${API_URL}/provisoes/${provisao.id}${provisao.status === 'CONCILIADA' ? '?confirmar=true' : ''}`, { headers: authHeaders });
-      await carregarDados();
-    } catch (error) {
-      alert(error.response?.data?.erro || error.message);
-    }
+    pedirConfirmacao('Excluir provisão', `Excluir provisão "${provisao.descricao}"?`, async () => {
+      try {
+        await axios.delete(`${API_URL}/provisoes/${provisao.id}${provisao.status === 'CONCILIADA' ? '?confirmar=true' : ''}`, { headers: authHeaders });
+        await carregarDados();
+      } catch (error) {
+        mostrarToast(error.response?.data?.erro || error.message, 'erro');
+      }
+    }, { labelConfirmar: 'Excluir', corConfirmar: '#ef4444' });
   };
 
   const atualizarStatus = async (provisao, status) => {
@@ -2775,7 +2776,7 @@ function TelaProvisoes({ contas = [], token, onVoltar }) {
       await axios.patch(`${API_URL}/provisoes/${provisao.id}`, { status }, { headers: authHeaders });
       await carregarDados();
     } catch (error) {
-      alert(error.response?.data?.erro || error.message);
+      mostrarToast(error.response?.data?.erro || error.message);
     }
   };
 
@@ -2784,7 +2785,7 @@ function TelaProvisoes({ contas = [], token, onVoltar }) {
       await axios.post(`${API_URL}/provisoes/${provisao.id}/duplicar`, {}, { headers: authHeaders });
       await carregarDados();
     } catch (error) {
-      alert(error.response?.data?.erro || error.message);
+      mostrarToast(error.response?.data?.erro || error.message);
     }
   };
 
@@ -2799,7 +2800,7 @@ function TelaProvisoes({ contas = [], token, onVoltar }) {
       const response = await axios.post(`${API_URL}/conciliacoes/sugerir`, { provisaoId: provisao.id, dataInicial: dataInicial.toISOString().slice(0, 10), dataFinal: dataFinal.toISOString().slice(0, 10) }, { headers: authHeaders });
       setSugestoes(response.data.sugestoes || []);
     } catch (error) {
-      alert(error.response?.data?.erro || error.message);
+      mostrarToast(error.response?.data?.erro || error.message);
     }
   };
 
@@ -2809,7 +2810,7 @@ function TelaProvisoes({ contas = [], token, onVoltar }) {
       setProvisaoConciliando(null);
       await carregarDados();
     } catch (error) {
-      alert(error.response?.data?.erro || error.message);
+      mostrarToast(error.response?.data?.erro || error.message);
     }
   };
 
@@ -2818,18 +2819,20 @@ function TelaProvisoes({ contas = [], token, onVoltar }) {
       await axios.post(`${API_URL}/conciliacoes/ignorar`, { provisaoId: sugestao.provisaoId, transacaoId: sugestao.transacaoId, confianca: sugestao.confianca, score: sugestao.score, motivos: sugestao.motivos }, { headers: authHeaders });
       setSugestoes((atuais) => atuais.filter((item) => item.transacaoId !== sugestao.transacaoId));
     } catch (error) {
-      alert(error.response?.data?.erro || error.message);
+      mostrarToast(error.response?.data?.erro || error.message);
     }
   };
 
   const desfazerConciliacao = async (provisao) => {
-    if (!provisao.conciliacao_id || !window.confirm('Desfazer conciliação desta provisão?')) return;
-    try {
-      await axios.post(`${API_URL}/conciliacoes/desfazer`, { conciliacaoId: provisao.conciliacao_id }, { headers: authHeaders });
-      await carregarDados();
-    } catch (error) {
-      alert(error.response?.data?.erro || error.message);
-    }
+    if (!provisao.conciliacao_id) return;
+    pedirConfirmacao('Desfazer conciliação', 'Desfazer conciliação desta provisão?', async () => {
+      try {
+        await axios.post(`${API_URL}/conciliacoes/desfazer`, { conciliacaoId: provisao.conciliacao_id }, { headers: authHeaders });
+        await carregarDados();
+      } catch (error) {
+        mostrarToast(error.response?.data?.erro || error.message, 'erro');
+      }
+    }, { labelConfirmar: 'Desfazer', corConfirmar: '#3b82f6' });
   };
 
   const aplicarFiltros = () => carregarDados();
@@ -2837,7 +2840,7 @@ function TelaProvisoes({ contas = [], token, onVoltar }) {
   return (
     <div style={{ minHeight: '100vh', background: '#f5f5f5' }}>
       <div style={{ background: '#1f2937', color: 'white', padding: '20px' }}>
-        <button onClick={onVoltar} style={{ background: 'rgba(255,255,255,0.2)', color: 'white', border: '1px solid rgba(255,255,255,0.3)', padding: '8px 12px', borderRadius: '6px', cursor: 'pointer' }}>← Voltar</button>
+        <Breadcrumb atual="Provisões" onVoltar={onVoltar} />
         <h1 style={{ margin: '14px 0 4px' }}>📌 Contas previstas</h1>
         <p style={{ margin: 0, opacity: 0.8 }}>Cadastre valores previstos e confirme conciliações com transações reais.</p>
       </div>
@@ -2862,7 +2865,7 @@ function TelaProvisoes({ contas = [], token, onVoltar }) {
         </div>
 
         <div style={{ background: 'white', borderRadius: '14px', overflowX: 'auto' }}>
-          {carregando ? <p style={{ padding: '20px' }}>Carregando provisões...</p> : (
+          {carregando ? <Spinner texto="Carregando provisões..." /> : (
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '14px' }}>
               <thead style={{ background: '#f8fafc' }}><tr>{['Data prevista','Vencimento','Descrição','Conta','Valor previsto','Tipo','Categoria','Status','Transação conciliada','Ações'].map((h) => <th key={h} style={{ padding: '12px', textAlign: 'left' }}>{h}</th>)}</tr></thead>
               <tbody>
@@ -3021,7 +3024,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
       );
       setCategorias(categoriasUnicas);
     } catch (error) {
-      alert('Erro ao carregar transações: ' + (error.response?.data?.erro || error.message));
+      mostrarToast('Erro ao carregar transações: ' + (error.response?.data?.erro || error.message));
     } finally {
       setCarregando(false);
     }
@@ -3260,8 +3263,8 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
   };
 
   const abrirModalSaldoInicial = () => {
-    if (!contaSelecionadaFiltro) return alert('Selecione uma conta específica para configurar o saldo inicial.');
-    if (!primeiraTransacaoBase) return alert('Não há transações para sugerir o início da base desta conta.');
+    if (!contaSelecionadaFiltro) return mostrarToast('Selecione uma conta específica para configurar o saldo inicial.');
+    if (!primeiraTransacaoBase) return mostrarToast('Não há transações para sugerir o início da base desta conta.');
     setFormSaldoInicial({
       dataSaldoInicial: dataAnteriorISO(primeiraTransacaoBase.data),
       saldoInicial: String(contaSelecionadaFiltro.saldo_inicial ?? 0).replace('.', ','),
@@ -3273,8 +3276,8 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
   const salvarSaldoInicialConta = async () => {
     if (!contaSelecionadaFiltro) return;
     const parse = parseValorMonetario(formSaldoInicial.saldoInicial);
-    if (!Number.isFinite(parse.valor)) return alert('Informe um saldo inicial válido.');
-    if (!formSaldoInicial.dataSaldoInicial) return alert('Informe a data do saldo inicial.');
+    if (!Number.isFinite(parse.valor)) return mostrarToast('Informe um saldo inicial válido.');
+    if (!formSaldoInicial.dataSaldoInicial) return mostrarToast('Informe a data do saldo inicial.');
     setSalvandoSaldoInicial(true);
     try {
       await axios.patch(`${API_URL}/contas/${contaSelecionadaFiltro.id}/saldo-inicial`, {
@@ -3282,12 +3285,12 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
         dataSaldoInicial: formSaldoInicial.dataSaldoInicial,
         observacao: formSaldoInicial.observacao,
       }, { headers: authHeaders });
-      alert('Saldo inicial salvo.');
+      mostrarToast('Saldo inicial salvo.');
       setModalSaldoInicialAberto(false);
       await onAtualizarContas?.();
       await carregarDados();
     } catch (error) {
-      alert(error.response?.data?.detalhes || error.response?.data?.erro || error.message);
+      mostrarToast(error.response?.data?.detalhes || error.response?.data?.erro || error.message);
     } finally {
       setSalvandoSaldoInicial(false);
     }
@@ -3296,7 +3299,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
   const salvarConferenciaRapida = async () => {
     if (!contaSelecionadaFiltro || !resumoBase) return;
     const saldoRealParse = parseValorMonetario(saldoRealConferencia);
-    if (!Number.isFinite(saldoRealParse.valor)) return alert('Informe um saldo real válido.');
+    if (!Number.isFinite(saldoRealParse.valor)) return mostrarToast('Informe um saldo real válido.');
     setSalvandoConferenciaRapida(true);
     try {
       const response = await axios.post(`${API_URL}/conferencia-saldos`, {
@@ -3308,7 +3311,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
       setResultadoConferenciaRapida(response.data);
       await onAtualizarContas?.();
     } catch (error) {
-      alert(error.response?.data?.detalhes || error.response?.data?.erro || error.message);
+      mostrarToast(error.response?.data?.detalhes || error.response?.data?.erro || error.message);
     } finally {
       setSalvandoConferenciaRapida(false);
     }
@@ -3325,7 +3328,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
 
   const abrirModalLote = () => {
     if (selecionadas.length === 0) {
-      alert('Selecione ao menos uma transação.');
+      mostrarToast('Selecione ao menos uma transação.');
       return;
     }
 
@@ -3349,12 +3352,12 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
 
   const handleCategorizar = async () => {
     if (!categoriaMacroEscolhida) {
-      alert('Escolha uma categoria macro.');
+      mostrarToast('Escolha uma categoria macro.');
       return;
     }
 
     if (criarRegra && !termoRegra.trim()) {
-      alert('Informe o termo da regra automática.');
+      mostrarToast('Informe o termo da regra automática.');
       return;
     }
 
@@ -3375,13 +3378,13 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
       const atualizadas = response.data.atualizadas || 0;
       const atualizadasPorRegra = response.data.atualizadasPorRegra || 0;
       const mensagemRegra = criarRegra ? ` Regra aplicada em ${atualizadasPorRegra} transações sem categoria semelhantes.` : '';
-      alert(`${atualizadas} transação(ões) categorizada(s).${mensagemRegra}`);
+      mostrarToast(`${atualizadas} transação(ões) categorizada(s).${mensagemRegra}`);
 
       fecharModal();
       setSelecionadas([]);
       await carregarDados();
     } catch (error) {
-      alert('Erro ao categorizar: ' + (error.response?.data?.erro || error.message));
+      mostrarToast('Erro ao categorizar: ' + (error.response?.data?.erro || error.message));
     } finally {
       setSalvandoCategoria(false);
     }
@@ -3430,7 +3433,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
       : transacoesOrdenadas;
 
     if (baseExportacao.length === 0) {
-      alert('Não há transações para exportar com os filtros atuais.');
+      mostrarToast('Não há transações para exportar com os filtros atuais.');
       return;
     }
 
@@ -3441,7 +3444,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
       baixarArquivo(bytes, nomeArquivo, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     } catch (error) {
       console.error('Erro ao exportar transações:', error);
-      alert('Erro ao exportar transações. Tente novamente.');
+      mostrarToast('Erro ao exportar transações. Tente novamente.');
     }
   };
 
@@ -3471,7 +3474,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
       setModalExclusaoAberto(false);
       setTransacaoParaExcluir(null);
     } catch (error) {
-      alert('Erro ao excluir transação: ' + (error.response?.data?.erro || error.message));
+      mostrarToast('Erro ao excluir transação: ' + (error.response?.data?.erro || error.message));
     } finally {
       setExcluindoTransacao(false);
     }
@@ -3489,7 +3492,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
       const response = await axios.get(`${API_URL}/transferencias-internas/sugestoes?${params.toString()}`, { headers: authHeaders });
       setSugestoesTransferencia(response.data.sugestoes || []);
     } catch (error) {
-      alert('Erro ao verificar transferências internas: ' + (error.response?.data?.erro || error.message));
+      mostrarToast('Erro ao verificar transferências internas: ' + (error.response?.data?.erro || error.message));
       setModalTransferenciasAberto(false);
     } finally {
       setCarregandoSugestoes(false);
@@ -3509,7 +3512,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
       setSugestoesTransferencia((atuais) => atuais.filter((item) => item.id !== sugestao.id));
       await carregarDados();
     } catch (error) {
-      alert('Erro ao marcar transferência interna: ' + (error.response?.data?.erro || error.message));
+      mostrarToast('Erro ao marcar transferência interna: ' + (error.response?.data?.erro || error.message));
     } finally {
       setMarcandoTransferencia(null);
     }
@@ -3520,26 +3523,24 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
   };
 
   const desmarcarTransferenciaInterna = async (tx) => {
-    if (!window.confirm('Desmarcar esta transferência interna? O vínculo do grupo será removido.')) return;
-
-    try {
-      await axios.post(
-        `${API_URL}/transferencias-internas/desmarcar`,
-        { transferenciaGrupoId: tx.transferencia_grupo_id, transacaoId: tx.id },
-        { headers: authHeaders }
-      );
-      await carregarDados();
-    } catch (error) {
-      alert('Erro ao desmarcar transferência interna: ' + (error.response?.data?.erro || error.message));
-    }
+    pedirConfirmacao('Desmarcar transferência', 'Desmarcar esta transferência interna? O vínculo do grupo será removido.', async () => {
+      try {
+        await axios.post(
+          `${API_URL}/transferencias-internas/desmarcar`,
+          { transferenciaGrupoId: tx.transferencia_grupo_id, transacaoId: tx.id },
+          { headers: authHeaders }
+        );
+        await carregarDados();
+      } catch (error) {
+        mostrarToast('Erro ao desmarcar transferência interna: ' + (error.response?.data?.erro || error.message), 'erro');
+      }
+    }, { labelConfirmar: 'Desmarcar', corConfirmar: '#ef4444' });
   };
 
   return (
     <div style={{ minHeight: '100vh', background: '#f5f5f5' }}>
       <div style={{ background: '#1f2937', color: 'white', padding: '20px' }}>
-        <button onClick={onVoltar} style={{ background: 'rgba(255,255,255,0.2)', color: 'white', border: '1px solid rgba(255,255,255,0.3)', padding: '8px 16px', borderRadius: '6px', cursor: 'pointer', marginBottom: '15px' }}>
-          ← Voltar
-        </button>
+        <Breadcrumb atual="Transações Consolidadas" onVoltar={onVoltar} />
         <h1 style={{ margin: 0 }}>Transações consolidadas</h1>
         <p style={{ margin: '5px 0 0', opacity: 0.8 }}>Todas as contas em uma única visão</p>
       </div>
@@ -3668,7 +3669,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
         )}
 
         {carregando ? (
-          <p>Carregando transações...</p>
+          <Spinner texto="Carregando transações..." />
         ) : transacoes.length === 0 ? (
           <div style={{ background: 'white', borderRadius: '12px', padding: '40px', textAlign: 'center' }}>
             <h2>Nenhuma transação encontrada</h2>
@@ -3965,7 +3966,7 @@ function App() {
     const code = params.get('code');
 
     if (erroCallback) {
-      alert('Erro ao fazer login: ' + erroCallback);
+      mostrarToast('Erro ao fazer login: ' + erroCallback);
       window.history.replaceState({}, document.title, '/');
       return;
     }
@@ -4006,7 +4007,7 @@ function App() {
           window.history.replaceState({}, document.title, '/');
         })
         .catch(error => {
-          alert('Erro ao fazer login: ' + (error.response?.data?.erro || error.message));
+          mostrarToast('Erro ao fazer login: ' + (error.response?.data?.erro || error.message));
         });
     }
   }, []);
