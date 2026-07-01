@@ -1998,6 +1998,12 @@ function AppStyles() {
     .filter-card input:focus, .filter-card select:focus, .filter-card textarea:focus { outline:2px solid #3b82f6; outline-offset:0; border-color:#3b82f6; }
     .transactions-actions { display:flex; justify-content:space-between; gap:12px; align-items:center; flex-wrap:wrap; margin-top:14px; }
     .table-scroll { -webkit-overflow-scrolling: touch; }
+    .transactions-table { width:100%; border-collapse:collapse; table-layout:fixed; font-size:13px; }
+    .transactions-table th, .transactions-table td { padding:8px 6px; vertical-align:middle; overflow-wrap:anywhere; }
+    .transactions-table .tx-cell-compact { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .transactions-table .tx-actions { display:flex; justify-content:center; gap:6px; flex-wrap:wrap; }
+    .transactions-table .tx-actions .btn { padding:6px 8px; font-size:12px; }
+    .transactions-table .tx-description { line-height:1.3; }
     .more-actions { position:relative; display:inline-flex; } .more-actions-menu { position:absolute; right:0; top:38px; background:white; border:1px solid #e2e8f0; border-radius:10px; box-shadow:0 12px 28px rgba(15,23,42,.16); padding:8px; display:grid; gap:4px; min-width:240px; z-index:10; }
     .kpi-card { position: relative; overflow: hidden; } .kpi-icon { position:absolute; right:14px; top:14px; font-size:18px; opacity:.5; user-select:none; }
     @media (max-width: 767px) {
@@ -3522,7 +3528,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
   };
 
   const rotuloOrdenacao = (label, field) => `${label}${sortField === field ? (sortDirection === 'asc' ? ' ▲' : ' ▼') : ''}`;
-  const estiloCabecalhoOrdenavel = (align = 'left') => ({ padding: '12px', textAlign: align, cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap' });
+  const estiloCabecalhoOrdenavel = (align = 'left') => ({ padding: '8px 6px', textAlign: align, cursor: 'pointer', userSelect: 'none', lineHeight: 1.2 });
   const textoSaldoAcumulado = (tx) => {
     if (!tx.saldo_acumulado_configurado) return 'Não configurado';
     return Number.isFinite(tx.saldo_acumulado_calculado) ? formatarMoeda(tx.saldo_acumulado_calculado) : '-';
@@ -3901,48 +3907,61 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
             <h2>Nenhuma transação encontrada</h2>
           </div>
         ) : (
-          <div ref={tabelaRef} className="table-scroll" style={{ background: 'white', borderRadius: '12px', overflowX: 'auto', boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }}>
-            <table style={{ width: '100%', minWidth: '1240px', borderCollapse: 'collapse' }}>
+          <div ref={tabelaRef} className="table-scroll" style={{ background: 'white', borderRadius: '12px', overflowX: 'hidden', boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }}>
+            <table className="transactions-table">
+              <colgroup>
+                <col style={{ width: '3%' }} />
+                <col style={{ width: '7%' }} />
+                <col style={{ width: '8%' }} />
+                <col style={{ width: '20%' }} />
+                <col style={{ width: '8%' }} />
+                <col style={{ width: '9%' }} />
+                <col style={{ width: '6%' }} />
+                <col style={{ width: '10%' }} />
+                <col style={{ width: '10%' }} />
+                <col style={{ width: '8%' }} />
+                <col style={{ width: '11%' }} />
+              </colgroup>
               <thead>
                 <tr style={{ background: '#f9fafb' }}>
-                  <th style={{ padding: '12px', textAlign: 'center' }}>
+                  <th style={{ textAlign: 'center' }}>
                     <input type="checkbox" checked={todasFiltradasSelecionadas} onChange={alternarTodasFiltradas} />
                   </th>
                   <th onClick={() => handleSort('data')} style={estiloCabecalhoOrdenavel('left')}>{rotuloOrdenacao('Data', 'data')}</th>
                   <th onClick={() => handleSort('conta')} style={estiloCabecalhoOrdenavel('left')}>{rotuloOrdenacao('Conta', 'conta')}</th>
                   <th onClick={() => handleSort('descricao')} style={estiloCabecalhoOrdenavel('left')}>{rotuloOrdenacao('Descrição', 'descricao')}</th>
                   <th onClick={() => handleSort('valor')} style={estiloCabecalhoOrdenavel('right')}>{rotuloOrdenacao('Valor', 'valor')}</th>
-                  <th style={{ padding: '12px', textAlign: 'right', whiteSpace: 'nowrap' }}>Saldo acumulado</th>
+                  <th style={{ textAlign: 'right' }}>Saldo acum.</th>
                   <th onClick={() => handleSort('tipo')} style={estiloCabecalhoOrdenavel('left')}>{rotuloOrdenacao('Tipo', 'tipo')}</th>
                   <th onClick={() => handleSort('categoriaMacro')} style={estiloCabecalhoOrdenavel('left')}>{rotuloOrdenacao('Categoria macro', 'categoriaMacro')}</th>
                   <th onClick={() => handleSort('categoriaDetalhada')} style={estiloCabecalhoOrdenavel('left')}>{rotuloOrdenacao('Categoria detalhada', 'categoriaDetalhada')}</th>
                   <th onClick={() => handleSort('status')} style={estiloCabecalhoOrdenavel('left')}>{rotuloOrdenacao('Status/flags', 'status')}</th>
-                  <th style={{ padding: '12px', textAlign: 'center' }}>Ações</th>
+                  <th style={{ textAlign: 'center' }}>Ações</th>
                 </tr>
               </thead>
               <tbody>
                 {transacoesOrdenadas.map((tx) => (
                   <tr key={tx.id} style={{ borderTop: '1px solid #e5e7eb', background: destacarInicioBase && primeiraTransacaoBase?.id === tx.id ? '#fef3c7' : 'white' }}>
-                    <td style={{ padding: '12px', textAlign: 'center' }}>
+                    <td style={{ textAlign: 'center' }}>
                       <input type="checkbox" checked={selecionadas.includes(tx.id)} onChange={() => alternarSelecionada(tx.id)} />
                     </td>
-                    <td style={{ padding: '12px' }}>{formatarData(tx.data)}</td>
-                    <td style={{ padding: '12px', color: '#475569', fontSize: '13px' }}>{tx.conta_nome || 'Conta'}</td>
-                    <td style={{ padding: '12px' }}>{tx.descricao}</td>
-                    <td style={{ padding: '12px', textAlign: 'right', color: tx.tipo === 'CREDITO' ? '#10b981' : '#ef4444', fontWeight: 'bold' }}>
+                    <td className="tx-cell-compact">{formatarData(tx.data)}</td>
+                    <td style={{ color: '#475569', fontSize: '12px' }}>{tx.conta_nome || 'Conta'}</td>
+                    <td className="tx-description">{tx.descricao}</td>
+                    <td className="tx-cell-compact" style={{ textAlign: 'right', color: tx.tipo === 'CREDITO' ? '#10b981' : '#ef4444', fontWeight: 'bold' }}>
                       {tx.tipo === 'CREDITO' ? '+' : '-'}{formatarMoeda(tx.valor)}
                     </td>
-                    <td style={{ padding: '12px', textAlign: 'right', color: Number(tx.saldo_acumulado_calculado || 0) >= 0 ? '#0f766e' : '#dc2626', fontWeight: Number.isFinite(tx.saldo_acumulado_calculado) ? 'bold' : 'normal', fontSize: tx.saldo_acumulado_configurado ? '14px' : '12px' }}>
+                    <td className="tx-cell-compact" style={{ textAlign: 'right', color: Number(tx.saldo_acumulado_calculado || 0) >= 0 ? '#0f766e' : '#dc2626', fontWeight: Number.isFinite(tx.saldo_acumulado_calculado) ? 'bold' : 'normal', fontSize: tx.saldo_acumulado_configurado ? '13px' : '12px' }}>
                       {textoSaldoAcumulado(tx)}
                     </td>
-                    <td style={{ padding: '12px' }}>{tx.tipo === 'CREDITO' ? 'Crédito' : 'Débito'}</td>
-                    <td style={{ padding: '12px' }}>
+                    <td>{tx.tipo === 'CREDITO' ? 'Créd.' : 'Déb.'}</td>
+                    <td>
                       <span style={estiloBadgeCategoria(tx.categoria_origem)}>{nomeCategoriaMacro(tx)}{tx.categoria_origem === 'AUTO' ? ' • auto' : ''}</span>
                     </td>
-                    <td style={{ padding: '12px' }}>
+                    <td>
                       <span style={estiloBadgeCategoria(tx.categoria_origem)}>{nomeCategoriaDetalhada(tx)}</span>
                     </td>
-                    <td style={{ padding: '12px' }}>
+                    <td>
                       <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
                         {tx.eh_transferencia_interna && (
                           <span style={{ background: '#ccfbf1', color: '#0f766e', padding: '3px 7px', borderRadius: '999px', fontSize: '11px', fontWeight: 'bold' }}>
@@ -3957,8 +3976,8 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
                         {!tx.eh_transferencia_interna && !tx.conciliacao_id && <span style={{ color: '#9ca3af' }}>-</span>}
                       </div>
                     </td>
-                    <td style={{ padding: '12px', textAlign: 'center' }}>
-                      <div style={{ display: 'flex', justifyContent: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                    <td style={{ textAlign: 'center' }}>
+                      <div className="tx-actions">
                         <Btn variant="secondary" size="sm" onClick={() => abrirModalIndividual(tx)}>Categorizar</Btn>
                         {tx.eh_transferencia_interna && (
                           <Btn variant="secondary" size="sm" onClick={() => desmarcarTransferenciaInterna(tx)}>Desmarcar transferência</Btn>
