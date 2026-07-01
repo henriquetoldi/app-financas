@@ -2634,7 +2634,7 @@ function Dashboard({ usuario, token, onLogout }) {
         {modo === 'conferencia-saldos' && <TelaConferenciaSaldos contas={contas} token={token} onVoltar={() => setModo('home')} onAtualizarContas={carregarContas} />}
         {modo === 'provisoes' && <TelaProvisoes contas={contas} token={token} onVoltar={() => setModo('home')} />}
         {modo === 'planejamento' && <TelaPlanejamentoMensal token={token} onVoltar={() => setModo('home')} />}
-        {modo === 'transacoes' && <TelaTransacoes contaInicial={contaSelecionada} contas={contas} token={token} onVoltar={() => setModo('home')} onAtualizarContas={carregarContas} />}
+        {modo === 'transacoes' && <TelaTransacoes contaInicial={contaSelecionada} contas={contas} token={token} onVoltar={() => setModo('home')} onAtualizarContas={carregarContas} onImportar={() => setModo('importar')} />}
       </div>
       </div>
     </div>
@@ -3212,7 +3212,7 @@ function TelaProvisoes({ contas = [], token, onVoltar }) {
 // TELA DE TRANSAÇÕES
 // ============================================================================
 
-function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualizarContas }) {
+function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualizarContas, onImportar }) {
   const [transacoes, setTransacoes] = useState([]);
   const [categorias, setCategorias] = useState([]);
   const [carregando, setCarregando] = useState(true);
@@ -3836,6 +3836,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
             </div>
             <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
               {resumoBase && <span style={{ color: '#64748b', fontSize: '13px' }}>Início da base: {formatarData(resumoBase.data_inicio || resumoBase.dataInicio || resumoBase.primeira_data || resumoBase.primeiraData)}</span>}
+              <Btn variant="primary" size="sm" onClick={onImportar}>📥 Importar dados / conciliar</Btn>
               {contaSelecionadaFiltro && primeiraTransacaoBase && <Btn variant="ghost" size="sm" onClick={abrirModalSaldoInicial}>Configurar saldo inicial</Btn>}
               <div className="more-actions">
                 <Btn variant="secondary" size="sm" onClick={() => setMaisAcoesAberto((aberto) => !aberto)}>⬇️ Exportar Excel ▾</Btn>
