@@ -3230,7 +3230,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
   const [dataFinal, setDataFinal] = useState('');
   const [categoriaMacroEscolhida, setCategoriaMacroEscolhida] = useState('');
   const [categoriaDetalhadaEscolhida, setCategoriaDetalhadaEscolhida] = useState('');
-  const [formEdicaoTransacao, setFormEdicaoTransacao] = useState({ data: '', descricao: '', valor: '', tipo: 'DEBITO', conta_id: '', nota_usuario: '' });
+  const [formEdicaoTransacao, setFormEdicaoTransacao] = useState({ data: '', descricao: '', valor: '', tipo: 'DEBITO', conta_id: '', nota_usuario: '', eh_transferencia_interna: false });
   const [criarRegra, setCriarRegra] = useState(false);
   const [termoRegra, setTermoRegra] = useState('');
   const [salvandoCategoria, setSalvandoCategoria] = useState(false);
@@ -3612,6 +3612,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
       tipo: tx.tipo || 'DEBITO',
       conta_id: tx.conta_id || '',
       nota_usuario: tx.nota_usuario || '',
+      eh_transferencia_interna: Boolean(tx.eh_transferencia_interna),
     });
     setCategoriaMacroEscolhida(tx.categoria_macro_id || (tx.categoria_detalhada_id ? '' : tx.categoria_id) || '');
     setCategoriaDetalhadaEscolhida(tx.categoria_detalhada_id || '');
@@ -3630,7 +3631,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
     setTransacaoSelecionada(null);
     setCategoriaMacroEscolhida('');
     setCategoriaDetalhadaEscolhida('');
-    setFormEdicaoTransacao({ data: '', descricao: '', valor: '', tipo: 'DEBITO', conta_id: '', nota_usuario: '' });
+    setFormEdicaoTransacao({ data: '', descricao: '', valor: '', tipo: 'DEBITO', conta_id: '', nota_usuario: '', eh_transferencia_interna: false });
     setCriarRegra(false);
     setTermoRegra(sugerirTermoRegra(filtros.busca || primeira?.descricao || ''));
     setCategoriaModalAberta(true);
@@ -4128,6 +4129,13 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
                 <label style={{ display: 'grid', gap: '6px', fontSize: '14px', gridColumn: '1 / -1' }}>
                   Observação
                   <textarea value={formEdicaoTransacao.nota_usuario} onChange={(event) => setFormEdicaoTransacao({ ...formEdicaoTransacao, nota_usuario: event.target.value })} rows={2} placeholder="Anotação opcional sobre este registro" style={{ padding: '12px', borderRadius: '8px', border: '1px solid #d1d5db' }} />
+                </label>
+                <label style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', fontSize: '14px', gridColumn: '1 / -1', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '10px' }}>
+                  <input type="checkbox" checked={formEdicaoTransacao.eh_transferencia_interna} onChange={(event) => setFormEdicaoTransacao({ ...formEdicaoTransacao, eh_transferencia_interna: event.target.checked })} />
+                  <span>
+                    <strong>Marcar como transferência interna</strong>
+                    <small style={{ display: 'block', color: '#64748b', marginTop: '2px' }}>Use quando for dinheiro saindo de uma conta sua e entrando em outra. Ela fica sinalizada e não entra nos KPIs financeiros de receita/despesa.</small>
+                  </span>
                 </label>
               </div>
             )}

@@ -4050,6 +4050,7 @@ app.patch('/api/transacoes/:id', verificarToken, async (req, res) => {
       conta_id,
       contaId,
       nota_usuario = '',
+      eh_transferencia_interna = false,
       categoriaId,
       categoriaMacroId,
       categoriaDetalhadaId,
@@ -4062,6 +4063,7 @@ app.patch('/api/transacoes/:id', verificarToken, async (req, res) => {
     const valorFinal = Math.abs(Number(valorParse.valor));
     const tipoFinal = String(tipo || '').trim().toUpperCase();
     const contaFinal = conta_id || contaId;
+    const transferenciaInterna = Boolean(eh_transferencia_interna);
 
     if (!dataFinal) return res.status(400).json({ erro: 'Data inválida.' });
     if (!descricaoFinal) return res.status(400).json({ erro: 'Descrição é obrigatória.' });
@@ -4106,14 +4108,19 @@ app.patch('/api/transacoes/:id', verificarToken, async (req, res) => {
            categoria_origem = $10,
            regra_categorizacao_id = $11,
            hash_transacao = $12,
+           eh_transferencia_interna = $13,
+           transferencia_grupo_id = CASE
+             WHEN $13 = true THEN COALESCE(t.transferencia_grupo_id, gen_random_uuid())
+             ELSE NULL
+           END,
            atualizado_em = NOW()
        FROM contas c
-       WHERE t.id = $13
+       WHERE t.id = $14
          AND c.id = t.conta_id
-         AND c.usuario_id = $14
+         AND c.usuario_id = $15
          AND t.deletado_em IS NULL
        RETURNING t.*`,
-      [contaFinal, dataFinal, descricaoFinal, valorFinal, tipoFinal, nota_usuario || null, categorias.categoriaId, categorias.macroId, categorias.detalhadaId, 'MANUAL', regra?.id || null, hashTransacao, req.params.id, req.usuario.usuario_id]
+      [contaFinal, dataFinal, descricaoFinal, valorFinal, tipoFinal, nota_usuario || null, categorias.categoriaId, categorias.macroId, categorias.detalhadaId, 'MANUAL', regra?.id || null, hashTransacao, transferenciaInterna, req.params.id, req.usuario.usuario_id]
     );
 
     res.json({
