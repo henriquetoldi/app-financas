@@ -1558,6 +1558,8 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
   const [carregandoResumoMensal, setCarregandoResumoMensal] = useState(false);
   const [carregando, setCarregando] = useState(false);
   const [editandoId, setEditandoId] = useState(null);
+  const [editandoItem, setEditandoItem] = useState(null);
+  const [escopoEdicao, setEscopoEdicao] = useState('APENAS_ESTE');
   const [formularioAberto, setFormularioAberto] = useState(false);
   const formularioInicial = { descricao: '', categoria: '', categoria_id: '', tipo_despesa: 'FIXA', valor_previsto: '', dia_previsto: '', observacao: '', recorrencia_tipo: 'UNICA', recorrencia_termino: 'SEM_FIM', mes_fim: String(hoje.getMonth() + 1), ano_fim: String(hoje.getFullYear()), quantidade_parcelas: '', parcela_inicial: '1' };
   const [form, setForm] = useState(formularioInicial);
@@ -1629,6 +1631,8 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
 
   const limparFormulario = () => {
     setEditandoId(null);
+    setEditandoItem(null);
+    setEscopoEdicao('APENAS_ESTE');
     setForm(formularioInicial);
     setFormularioAberto(false);
   };
@@ -1636,7 +1640,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
   const salvarPlanejamento = async (event) => {
     event.preventDefault();
     const categoriaSelecionada = categorias.find((cat) => cat.id === form.categoria_id);
-    const payload = { ...form, categoria: categoriaSelecionada?.nome || form.categoria, categoria_id: form.categoria_id || null, mes: Number(mes), ano: Number(ano), valor_previsto: Number(form.valor_previsto), dia_previsto: form.dia_previsto === '' ? null : Number(form.dia_previsto), quantidade_parcelas: form.recorrencia_tipo === 'PARCELADA' ? Number(form.quantidade_parcelas) : null, parcela_inicial: form.recorrencia_tipo === 'PARCELADA' ? Number(form.parcela_inicial || 1) : null, mes_fim: form.recorrencia_tipo === 'MENSAL' && form.recorrencia_termino === 'COM_FIM' ? Number(form.mes_fim) : null, ano_fim: form.recorrencia_tipo === 'MENSAL' && form.recorrencia_termino === 'COM_FIM' ? Number(form.ano_fim) : null };
+    const payload = { ...form, categoria: categoriaSelecionada?.nome || form.categoria, categoria_id: form.categoria_id || null, mes: Number(mes), ano: Number(ano), valor_previsto: Number(form.valor_previsto), dia_previsto: form.dia_previsto === '' ? null : Number(form.dia_previsto), quantidade_parcelas: form.recorrencia_tipo === 'PARCELADA' ? Number(form.quantidade_parcelas) : null, parcela_inicial: form.recorrencia_tipo === 'PARCELADA' ? Number(form.parcela_inicial || 1) : null, mes_fim: form.recorrencia_tipo === 'MENSAL' && form.recorrencia_termino === 'COM_FIM' ? Number(form.mes_fim) : null, ano_fim: form.recorrencia_tipo === 'MENSAL' && form.recorrencia_termino === 'COM_FIM' ? Number(form.ano_fim) : null, escopo_edicao: editandoItem?.recorrencia_tipo && editandoItem.recorrencia_tipo !== 'UNICA' ? escopoEdicao : 'APENAS_ESTE' };
     try {
       if (editandoId) {
         await axios.put(`${API_URL}/planejamento/${editandoId}`, payload, { headers: authHeaders });
@@ -1655,6 +1659,8 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
   const editarPlanejamento = (item) => {
     setFormularioAberto(true);
     setEditandoId(item.id);
+    setEditandoItem(item);
+    setEscopoEdicao('APENAS_ESTE');
     setForm({
       descricao: item.descricao || '',
       categoria: item.categoria || '',
@@ -1670,9 +1676,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
       quantidade_parcelas: item.quantidade_parcelas || '',
       parcela_inicial: item.parcela_atual || '1',
     });
-    if (item.recorrencia_tipo && item.recorrencia_tipo !== 'UNICA') {
-      mostrarToast('Esta despesa faz parte de uma recorrência. Nesta versão, a alteração será aplicada apenas neste lançamento.');
-    }
+
   };
 
   const excluirPlanejamento = async (item) => {
@@ -1879,6 +1883,26 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
               <label>Dia previsto de pagamento<input type="number" min="1" max="31" value={form.dia_previsto} onChange={(e) => setForm({ ...form, dia_previsto: e.target.value })} placeholder="5" style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} /></label>
             </div>
             <label>Observação<textarea value={form.observacao} onChange={(e) => setForm({ ...form, observacao: e.target.value })} rows="3" placeholder="Detalhes opcionais" style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} /></label>
+            {editandoItem?.recorrencia_tipo && editandoItem.recorrencia_tipo !== 'UNICA' && (
+              <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '12px', padding: '12px', display: 'grid', gap: '10px' }}>
+                <strong style={{ color: '#0f172a' }}>Como deseja aplicar esta alteração?</strong>
+                <p style={{ margin: 0, color: '#64748b', fontSize: '13px' }}>
+                  {editandoItem.recorrencia_tipo === 'PARCELADA'
+                    ? 'Esta despesa faz parte de um parcelamento. Você pode alterar só esta parcela, esta parcela e as próximas, ou todas as parcelas.'
+                    : 'Esta despesa se repete mensalmente. Você pode alterar só este mês, este mês e os próximos, ou toda a recorrência.'}
+                </p>
+                {[
+                  ['APENAS_ESTE', editandoItem.recorrencia_tipo === 'PARCELADA' ? 'Apenas esta parcela' : 'Apenas este mês'],
+                  ['ESTE_E_PROXIMOS', editandoItem.recorrencia_tipo === 'PARCELADA' ? 'Esta parcela e as próximas' : 'Este mês e os próximos'],
+                  ['TODA_RECORRENCIA', editandoItem.recorrencia_tipo === 'PARCELADA' ? 'Todas as parcelas' : 'Toda a recorrência'],
+                ].map(([valor, label]) => (
+                  <label key={valor} style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#0f172a', fontSize: '14px' }}>
+                    <input type="radio" name="escopo-edicao-planejamento" value={valor} checked={escopoEdicao === valor} onChange={(e) => setEscopoEdicao(e.target.value)} />
+                    {label}
+                  </label>
+                ))}
+              </div>
+            )}
             <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}><Btn type="submit" variant="primary">{editandoId ? 'Salvar alterações' : 'Adicionar despesa'}</Btn><Btn type="button" variant="secondary" onClick={limparFormulario}>Limpar formulário</Btn></div>
           </form>}
 

@@ -2913,8 +2913,9 @@ async function materializarRecorrenciasMensaisUsuario(usuarioId, mes, ano) {
        AND ativa = true
        AND recorrencia_id IS NOT NULL
        AND (ano_inicio * 12 + mes_inicio) <= ($3::int * 12 + $2::int)
+       AND (ano * 12 + mes) <= ($3::int * 12 + $2::int)
        AND (ano_fim IS NULL OR mes_fim IS NULL OR (ano_fim * 12 + mes_fim) >= ($3::int * 12 + $2::int))
-     ORDER BY recorrencia_id, ano ASC, mes ASC, criado_em ASC`,
+     ORDER BY recorrencia_id, ano DESC, mes DESC, criado_em DESC`,
     [usuarioId, mes, ano]
   );
 
@@ -3209,17 +3210,61 @@ app.post('/api/planejamento', verificarToken, async (req, res) => {
 app.put('/api/planejamento/:id', verificarToken, async (req, res) => {
   try {
     const p = validarPayloadPlanejamento(req.body);
+    const escopoEdicao = String(req.body.escopo_edicao || req.body.escopoEdicao || 'APENAS_ESTE').trim().toUpperCase();
+    if (!['APENAS_ESTE', 'ESTE_E_PROXIMOS', 'TODA_RECORRENCIA'].includes(escopoEdicao)) throw new Error('Escopo de edição inválido.');
     if (p.categoriaId) {
       const categoria = await validarCategoriaPlanejamentoUsuario(req.usuario.usuario_id, p.categoriaId);
       p.categoria = p.categoria || categoria.nome;
     }
-    const result = await pool.query(
-      `UPDATE planejamentos_mensais SET mes=$1, ano=$2, descricao=$3, categoria=$4, categoria_id=$5, tipo_despesa=$6, valor_previsto=$7, dia_previsto=$8, observacao=$9, recorrencia_tipo=$10, quantidade_parcelas=$11, parcela_atual=$12, mes_inicio=$13, ano_inicio=$14, mes_fim=$15, ano_fim=$16, atualizado_em=NOW()
-       WHERE id=$17 AND usuario_id=$18 RETURNING *`,
-      [p.mes, p.ano, p.descricao, p.categoria || null, p.categoriaId || null, p.tipoDespesa, p.valorPrevisto, p.diaPrevisto ?? null, p.observacao || null, p.recorrenciaTipo, p.quantidadeParcelas, p.parcelaInicial, p.mes, p.ano, p.mesFim, p.anoFim, req.params.id, req.usuario.usuario_id]
+
+    const atualResult = await pool.query(
+      `SELECT * FROM planejamentos_mensais WHERE id = $1 AND usuario_id = $2 LIMIT 1`,
+      [req.params.id, req.usuario.usuario_id]
     );
-    if (result.rows.length === 0) return res.status(404).json({ erro: 'Planejamento não encontrado.' });
-    res.json({ planejamento: result.rows[0] });
+    if (atualResult.rows.length === 0) return res.status(404).json({ erro: 'Planejamento não encontrado.' });
+    const atual = atualResult.rows[0];
+    const escopoEfetivo = atual.recorrencia_tipo && atual.recorrencia_tipo !== 'UNICA' ? escopoEdicao : 'APENAS_ESTE';
+    if (escopoEfetivo !== 'APENAS_ESTE' && !atual.recorrencia_id) throw new Error('Este lançamento não possui identificador de recorrência.');
+
+    const valoresComuns = [
+      p.descricao,
+      p.categoria || null,
+      p.categoriaId || null,
+      p.tipoDespesa,
+      p.valorPrevisto,
+      p.diaPrevisto ?? null,
+      p.observacao || null,
+      p.recorrenciaTipo,
+      p.quantidadeParcelas,
+      p.mesFim,
+      p.anoFim,
+    ];
+
+    let result;
+    if (escopoEfetivo === 'APENAS_ESTE') {
+      result = await pool.query(
+        `UPDATE planejamentos_mensais
+         SET mes=$1, ano=$2, descricao=$3, categoria=$4, categoria_id=$5, tipo_despesa=$6, valor_previsto=$7, dia_previsto=$8, observacao=$9, recorrencia_tipo=$10, quantidade_parcelas=$11, parcela_atual=$12, mes_inicio=$13, ano_inicio=$14, mes_fim=$15, ano_fim=$16, atualizado_em=NOW()
+         WHERE id=$17 AND usuario_id=$18 RETURNING *`,
+        [p.mes, p.ano, p.descricao, p.categoria || null, p.categoriaId || null, p.tipoDespesa, p.valorPrevisto, p.diaPrevisto ?? null, p.observacao || null, p.recorrenciaTipo, p.quantidadeParcelas, p.parcelaInicial, p.mes, p.ano, p.mesFim, p.anoFim, req.params.id, req.usuario.usuario_id]
+      );
+    } else {
+      const condicaoEscopo = escopoEfetivo === 'ESTE_E_PROXIMOS'
+        ? `AND (ano * 12 + mes) >= ($15::int * 12 + $14::int)`
+        : '';
+      const valoresEscopo = [...valoresComuns, req.usuario.usuario_id, atual.recorrencia_id];
+      if (escopoEfetivo === 'ESTE_E_PROXIMOS') valoresEscopo.push(atual.mes, atual.ano);
+      result = await pool.query(
+        `UPDATE planejamentos_mensais
+         SET descricao=$1, categoria=$2, categoria_id=$3, tipo_despesa=$4, valor_previsto=$5, dia_previsto=$6, observacao=$7, recorrencia_tipo=$8, quantidade_parcelas=$9, mes_fim=$10, ano_fim=$11, atualizado_em=NOW()
+         WHERE usuario_id=$12 AND recorrencia_id=$13 ${condicaoEscopo}
+         RETURNING *`,
+        valoresEscopo
+      );
+    }
+
+    if (result.rows.length === 0) return res.status(404).json({ erro: 'Nenhum lançamento encontrado para o escopo selecionado.' });
+    res.json({ planejamento: result.rows[0], planejamentos: result.rows, escopo_edicao: escopoEfetivo });
   } catch (error) { res.status(400).json({ erro: error.message }); }
 });
 
