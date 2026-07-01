@@ -1567,6 +1567,25 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
   const authHeaders = { Authorization: `Bearer ${token}` };
   const nomesMesesCurtos = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
   const opcoesPeriodoGraficos = [3, 6, 12, 24];
+  const escopoEdicaoInfo = editandoItem?.recorrencia_tipo === 'PARCELADA'
+    ? {
+        titulo: 'Esta despesa faz parte de um parcelamento. Como deseja aplicar a alteração?',
+        descricao: 'Esta despesa faz parte de um parcelamento. Você pode alterar só esta parcela, esta parcela e as próximas, ou todas as parcelas.',
+        opcoes: [
+          ['APENAS_ESTE', 'Apenas esta parcela'],
+          ['ESTE_E_PROXIMOS', 'Esta parcela e as próximas'],
+          ['TODA_RECORRENCIA', 'Todas as parcelas'],
+        ],
+      }
+    : {
+        titulo: 'Esta despesa faz parte de uma recorrência mensal. Como deseja aplicar a alteração?',
+        descricao: 'Esta despesa se repete mensalmente. Você pode alterar só este mês, este mês e os próximos, ou toda a recorrência.',
+        opcoes: [
+          ['APENAS_ESTE', 'Apenas este mês'],
+          ['ESTE_E_PROXIMOS', 'Este mês e os próximos'],
+          ['TODA_RECORRENCIA', 'Toda a recorrência'],
+        ],
+      };
   const montarQueryFiltrosPlanejamento = (incluirPeriodo = false) => {
     const params = new URLSearchParams({
       tipo: filtrosPlanejamento.tipo,
@@ -1885,17 +1904,9 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
             <label>Observação<textarea value={form.observacao} onChange={(e) => setForm({ ...form, observacao: e.target.value })} rows="3" placeholder="Detalhes opcionais" style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} /></label>
             {editandoItem?.recorrencia_tipo && editandoItem.recorrencia_tipo !== 'UNICA' && (
               <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '12px', padding: '12px', display: 'grid', gap: '10px' }}>
-                <strong style={{ color: '#0f172a' }}>Como deseja aplicar esta alteração?</strong>
-                <p style={{ margin: 0, color: '#64748b', fontSize: '13px' }}>
-                  {editandoItem.recorrencia_tipo === 'PARCELADA'
-                    ? 'Esta despesa faz parte de um parcelamento. Você pode alterar só esta parcela, esta parcela e as próximas, ou todas as parcelas.'
-                    : 'Esta despesa se repete mensalmente. Você pode alterar só este mês, este mês e os próximos, ou toda a recorrência.'}
-                </p>
-                {[
-                  ['APENAS_ESTE', editandoItem.recorrencia_tipo === 'PARCELADA' ? 'Apenas esta parcela' : 'Apenas este mês'],
-                  ['ESTE_E_PROXIMOS', editandoItem.recorrencia_tipo === 'PARCELADA' ? 'Esta parcela e as próximas' : 'Este mês e os próximos'],
-                  ['TODA_RECORRENCIA', editandoItem.recorrencia_tipo === 'PARCELADA' ? 'Todas as parcelas' : 'Toda a recorrência'],
-                ].map(([valor, label]) => (
+                <strong style={{ color: '#0f172a' }}>{escopoEdicaoInfo.titulo}</strong>
+                <p style={{ margin: 0, color: '#64748b', fontSize: '13px' }}>{escopoEdicaoInfo.descricao}</p>
+                {escopoEdicaoInfo.opcoes.map(([valor, label]) => (
                   <label key={valor} style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#0f172a', fontSize: '14px' }}>
                     <input type="radio" name="escopo-edicao-planejamento" value={valor} checked={escopoEdicao === valor} onChange={(e) => setEscopoEdicao(e.target.value)} />
                     {label}

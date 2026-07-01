@@ -3264,7 +3264,7 @@ app.put('/api/planejamento/:id', verificarToken, async (req, res) => {
     }
 
     if (result.rows.length === 0) return res.status(404).json({ erro: 'Nenhum lançamento encontrado para o escopo selecionado.' });
-    res.json({ planejamento: result.rows[0], planejamentos: result.rows, escopo_edicao: escopoEfetivo });
+    res.json({ planejamento: result.rows[0], planejamentos: result.rows, escopo_edicao: escopoEfetivo, quantidade_alterada: result.rowCount });
   } catch (error) { res.status(400).json({ erro: error.message }); }
 });
 
