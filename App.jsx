@@ -2068,6 +2068,9 @@ function HeaderPrincipal({ usuario, token, onLogout, onAbrirMenu }) {
   return <header className="top-header"><div className="top-header-left"><button type="button" className="mobile-menu-button" onClick={onAbrirMenu} aria-label="Abrir menu">☰</button><div><h1>💰 Finanças Pessoais</h1><p>Olá, {nome}</p></div></div><div className="top-actions"><NotificacoesBell token={token} /><div className="avatar-menu"><button className="avatar-button" onClick={() => setAberto(!aberto)}><img src={usuario?.foto_url || usuario?.picture || 'https://ui-avatars.com/api/?name=Financas'} alt="Avatar" /><span className="avatar-name">{nome.split(' ')[0]}</span><span>▾</span></button>{aberto && <div className="avatar-dropdown"><strong>{nome}</strong><small>{usuario?.email}</small><button onClick={onLogout}>Sair</button></div>}</div></div></header>;
 }
 
+const emojisCategorias = ['🍔', '🛒', '🛍️', '🎮', '🎬', '🏠', '🚗', '🚌', '✈️', '💡', '📱', '💊', '🎓', '💼', '💰', '📈', '🎁', '🐶', '🏋️', '☕', '🍕', '🧾', '🔧', '✨'];
+const coresCategorias = ['#ef4444', '#f97316', '#f59e0b', '#eab308', '#22c55e', '#10b981', '#14b8a6', '#06b6d4', '#3b82f6', '#6366f1', '#8b5cf6', '#a855f7', '#d946ef', '#ec4899', '#64748b', '#111827'];
+
 function ModalCategoria({ aberta, categoria, categorias, onFechar, onSalvar }) {
   const [form, setForm] = useState({ nome: '', tipo: 'DESPESA', nivel: 'MACRO', categoria_pai_id: '', emoji: '', cor: '#999999' });
   useEffect(() => {
@@ -2087,7 +2090,44 @@ function ModalCategoria({ aberta, categoria, categorias, onFechar, onSalvar }) {
     if (form.nivel === 'DETALHADA' && !form.categoria_pai_id) return mostrarToast('Selecione a categoria macro pai.', 'aviso');
     onSalvar({ ...form, categoria_pai_id: form.nivel === 'DETALHADA' ? form.categoria_pai_id : null });
   };
-  return <div className="modal-overlay" onClick={onFechar}><div className="modal-card" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '520px' }}><h3>{categoria?.id ? 'Editar categoria' : 'Nova categoria'}</h3><div className="filter-card" style={{ boxShadow: 'none', marginBottom: 0 }}><label>Nome *<input value={form.nome} onChange={(e) => setForm({ ...form, nome: e.target.value })} placeholder="Ex.: Alimentação" /></label><div className="filter-grid" style={{ marginTop: '12px' }}><label>Tipo *<select value={form.tipo} onChange={(e) => setForm({ ...form, tipo: e.target.value })}><option value="DESPESA">DESPESA</option><option value="RECEITA">RECEITA</option></select></label><label>Nível *<select value={form.nivel} onChange={(e) => setForm({ ...form, nivel: e.target.value, categoria_pai_id: '' })}><option value="MACRO">MACRO</option><option value="DETALHADA">DETALHADA</option></select></label></div>{form.nivel === 'DETALHADA' && <label style={{ marginTop: '12px' }}>Categoria pai *<select value={form.categoria_pai_id} onChange={(e) => setForm({ ...form, categoria_pai_id: e.target.value })}><option value="">Selecionar macro...</option>{macros.map((macro) => <option key={macro.id} value={macro.id}>{macro.emoji || ''} {macro.nome}</option>)}</select></label>}<div className="filter-grid" style={{ marginTop: '12px' }}><label>Emoji<input value={form.emoji} onChange={(e) => setForm({ ...form, emoji: e.target.value })} placeholder="🍔" /></label><label>Cor<input value={form.cor} onChange={(e) => setForm({ ...form, cor: e.target.value })} placeholder="#999999" /></label></div></div><div className="modal-actions" style={{ marginTop: '16px' }}><Btn variant="secondary" onClick={onFechar}>Cancelar</Btn><Btn variant="primary" onClick={salvar}>Salvar categoria</Btn></div></div></div>;
+  const corSelecionada = /^#[0-9A-Fa-f]{6}$/.test(form.cor || '') ? form.cor : '#999999';
+  return (
+    <div className="modal-overlay" onClick={onFechar}>
+      <div className="modal-card" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '560px' }}>
+        <h3>{categoria?.id ? 'Editar categoria' : 'Nova categoria'}</h3>
+        <div className="filter-card" style={{ boxShadow: 'none', marginBottom: 0 }}>
+          <label>Nome *<input value={form.nome} onChange={(e) => setForm({ ...form, nome: e.target.value })} placeholder="Ex.: Alimentação" /></label>
+          <div className="filter-grid" style={{ marginTop: '12px' }}>
+            <label>Tipo *<select value={form.tipo} onChange={(e) => setForm({ ...form, tipo: e.target.value })}><option value="DESPESA">DESPESA</option><option value="RECEITA">RECEITA</option></select></label>
+            <label>Nível *<select value={form.nivel} onChange={(e) => setForm({ ...form, nivel: e.target.value, categoria_pai_id: '' })}><option value="MACRO">MACRO</option><option value="DETALHADA">DETALHADA</option></select></label>
+          </div>
+          {form.nivel === 'DETALHADA' && <label style={{ marginTop: '12px' }}>Categoria pai *<select value={form.categoria_pai_id} onChange={(e) => setForm({ ...form, categoria_pai_id: e.target.value })}><option value="">Selecionar macro...</option>{macros.map((macro) => <option key={macro.id} value={macro.id}>{macro.emoji || ''} {macro.nome}</option>)}</select></label>}
+          <div style={{ marginTop: '12px' }}>
+            <strong style={{ display: 'block', color: '#64748b', fontSize: '12px', marginBottom: '8px' }}>Emoji</strong>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(40px, 1fr))', gap: '8px' }}>
+              {emojisCategorias.map((emoji) => (
+                <button key={emoji} type="button" onClick={() => setForm({ ...form, emoji })} aria-label={`Selecionar emoji ${emoji}`} style={{ border: form.emoji === emoji ? '2px solid #3b82f6' : '1px solid #cbd5e1', background: form.emoji === emoji ? '#eff6ff' : '#ffffff', borderRadius: '10px', padding: '8px', fontSize: '20px', cursor: 'pointer' }}>{emoji}</button>
+              ))}
+            </div>
+            <input value={form.emoji} onChange={(e) => setForm({ ...form, emoji: e.target.value })} placeholder="Ou cole outro emoji aqui" style={{ marginTop: '8px' }} />
+          </div>
+          <div style={{ marginTop: '12px' }}>
+            <strong style={{ display: 'block', color: '#64748b', fontSize: '12px', marginBottom: '8px' }}>Cor</strong>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap', marginBottom: '10px' }}>
+              <input type="color" value={corSelecionada} onChange={(e) => setForm({ ...form, cor: e.target.value })} aria-label="Escolher cor da categoria" style={{ width: '56px', height: '42px', padding: '4px', borderRadius: '10px', cursor: 'pointer' }} />
+              <span style={{ color: '#64748b', fontSize: '13px' }}>Clique no quadrado para escolher sem decorar código.</span>
+            </div>
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+              {coresCategorias.map((cor) => (
+                <button key={cor} type="button" onClick={() => setForm({ ...form, cor })} aria-label={`Selecionar cor ${cor}`} title={cor} style={{ width: '30px', height: '30px', borderRadius: '999px', background: cor, border: corSelecionada === cor ? '3px solid #0f172a' : '2px solid #ffffff', boxShadow: '0 0 0 1px #cbd5e1', cursor: 'pointer' }} />
+              ))}
+            </div>
+          </div>
+        </div>
+        <div className="modal-actions" style={{ marginTop: '16px' }}><Btn variant="secondary" onClick={onFechar}>Cancelar</Btn><Btn variant="primary" onClick={salvar}>Salvar categoria</Btn></div>
+      </div>
+    </div>
+  );
 }
 
 function TelaAdminCategorias({ token }) {
@@ -2161,7 +2201,7 @@ function TelaAdminCategorias({ token }) {
     const ehPadrao = !cat.usuario_id;
     const inativa = cat.ativa === false;
     const nivel = cat.nivel || (cat.categoria_pai_id ? 'DETALHADA' : 'MACRO');
-    return <tr key={cat.id} style={{ opacity: inativa ? 0.5 : 1 }}><td style={{ padding: '10px', paddingLeft: cat.categoria_pai_id ? '32px' : '12px' }}>{cat.categoria_pai_id ? '── ' : ''}{cat.emoji || ''} {cat.nome}{inativa && <span style={{ marginLeft: '8px', fontSize: '11px', color: '#ef4444' }}>inativa</span>}</td><td style={{ padding: '10px' }}><span style={{ padding: '2px 8px', borderRadius: '999px', fontSize: '11px', fontWeight: 600, background: cat.tipo === 'RECEITA' ? '#dcfce7' : '#fee2e2', color: cat.tipo === 'RECEITA' ? '#166534' : '#991b1b' }}>{cat.tipo}</span></td><td style={{ padding: '10px', color: '#64748b' }}>{nivel === 'MACRO' ? 'Macro' : 'Detalhada'}</td><td style={{ padding: '10px' }}><span style={{ fontSize: '11px', color: ehPadrao ? '#94a3b8' : '#3b82f6' }}>{ehPadrao ? 'Padrão' : 'Personalizada'}</span></td><td style={{ padding: '10px', display: 'flex', gap: '6px', flexWrap: 'wrap' }}>{!ehPadrao && !inativa && <Btn size="sm" variant="secondary" onClick={() => { setCategoriaEditando(cat); setModalAberto(true); }}>✏️ Editar</Btn>}<Btn size="sm" variant="ghost" onClick={() => alternarAtiva(cat)}>{inativa ? '✅ Reativar' : '🚫 Desativar'}</Btn>{!ehPadrao && <Btn size="sm" variant="danger" onClick={() => excluirCategoria(cat)}>🗑️ Excluir</Btn>}</td></tr>;
+    return <tr key={cat.id} style={{ opacity: inativa ? 0.5 : 1 }}><td style={{ padding: '10px', paddingLeft: cat.categoria_pai_id ? '32px' : '12px' }}>{cat.categoria_pai_id ? '── ' : ''}{cat.emoji || ''} {cat.nome}{inativa && <span style={{ marginLeft: '8px', fontSize: '11px', color: '#ef4444' }}>inativa</span>}</td><td style={{ padding: '10px' }}><span style={{ padding: '2px 8px', borderRadius: '999px', fontSize: '11px', fontWeight: 600, background: cat.tipo === 'RECEITA' ? '#dcfce7' : '#fee2e2', color: cat.tipo === 'RECEITA' ? '#166534' : '#991b1b' }}>{cat.tipo}</span></td><td style={{ padding: '10px', color: '#64748b' }}>{nivel === 'MACRO' ? 'Macro' : 'Detalhada'}</td><td style={{ padding: '10px' }}><span style={{ fontSize: '11px', color: ehPadrao ? '#94a3b8' : '#3b82f6' }}>{ehPadrao ? 'Padrão' : 'Personalizada'}</span></td><td style={{ padding: '10px', display: 'flex', gap: '6px', flexWrap: 'wrap' }}>{!inativa && <Btn size="sm" variant="secondary" onClick={() => { setCategoriaEditando(cat); setModalAberto(true); }}>✏️ Editar</Btn>}<Btn size="sm" variant="ghost" onClick={() => alternarAtiva(cat)}>{inativa ? '✅ Reativar' : '🚫 Desativar'}</Btn>{!ehPadrao && <Btn size="sm" variant="danger" onClick={() => excluirCategoria(cat)}>🗑️ Excluir</Btn>}</td></tr>;
   };
   return <section><div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap', marginBottom: '16px' }}><div><h3 style={{ margin: '0 0 4px' }}>🏷️ Gerenciar Categorias</h3><p style={{ margin: 0, color: '#64748b' }}>Cadastre categorias macro e detalhadas para transações e planejamento. Ao desativar, o histórico continua categorizado; a categoria só deixa de aparecer em novas seleções.</p></div><div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}><Btn variant="primary" onClick={() => abrirNova('MACRO')}>+ Nova categoria macro</Btn><Btn variant="secondary" onClick={() => abrirNova('DETALHADA')}>+ Nova subcategoria</Btn></div></div><div className="filter-card"><div className="filter-grid"><label>Tipo<select value={filtros.tipo} onChange={(e) => setFiltros({ ...filtros, tipo: e.target.value })}><option value="TODAS">Todas</option><option value="DESPESA">Despesa</option><option value="RECEITA">Receita</option></select></label><label>Nível<select value={filtros.nivel} onChange={(e) => setFiltros({ ...filtros, nivel: e.target.value })}><option value="TODOS">Todas</option><option value="MACRO">Macro</option><option value="DETALHADA">Detalhada</option></select></label><label>Origem<select value={filtros.origem} onChange={(e) => setFiltros({ ...filtros, origem: e.target.value })}><option value="TODAS">Todas</option><option value="PADRAO">Padrão</option><option value="PERSONALIZADA">Personalizadas</option></select></label><label style={{ alignSelf: 'center' }}><span><input type="checkbox" checked={filtros.inativas} onChange={(e) => setFiltros({ ...filtros, inativas: e.target.checked })} /> Mostrar inativas</span></label></div></div><div style={{ overflowX: 'auto' }}><table style={{ width: '100%', borderCollapse: 'collapse' }}><thead><tr><th style={{ padding: '10px', textAlign: 'left' }}>Categoria</th><th style={{ padding: '10px', textAlign: 'left' }}>Tipo</th><th style={{ padding: '10px', textAlign: 'left' }}>Nível</th><th style={{ padding: '10px', textAlign: 'left' }}>Origem</th><th style={{ padding: '10px', textAlign: 'left' }}>Ações</th></tr></thead><tbody>{linhasCategoriasAdmin.map(renderLinha)}</tbody></table></div><ModalCategoria aberta={modalAberto} categoria={categoriaEditando} categorias={categorias} onFechar={() => { setModalAberto(false); setCategoriaEditando(null); }} onSalvar={salvarCategoria} /></section>;
 }
@@ -3356,9 +3396,6 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
     tx.eh_transferencia_interna ? 'Transferência interna' : '',
     tx.conciliacao_id ? 'Conciliada' : '',
   ].filter(Boolean).join(' ') || '-';
-  const totalTransacoesPaginacao = Number(paginacao.total || transacoesOrdenadas.length || 0);
-  const inicioPaginacao = totalTransacoesPaginacao === 0 ? 0 : ((Number(paginacao.pagina || pagina) - 1) * Number(paginacao.limite || limite)) + 1;
-  const fimPaginacao = totalTransacoesPaginacao === 0 ? 0 : Math.min(totalTransacoesPaginacao, inicioPaginacao + transacoesOrdenadas.length - 1);
   const contaSelecionadaFiltro = filtros.conta !== 'todas' ? contas.find((conta) => conta.id === filtros.conta) : null;
   const atualizarFiltroTransacoes = (patch) => { setFiltros((atuais) => ({ ...atuais, ...patch })); setPagina(1); };
   const alterarDataInicialTransacoes = (valor) => { setDataInicial(valor); setPagina(1); };
