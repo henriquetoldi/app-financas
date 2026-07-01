@@ -1904,7 +1904,7 @@ function AppStyles() {
     .app-layout { min-height: 100vh; background: #f1f5f9; display: flex; }
     .app-content { margin-left: 220px; width: calc(100% - 220px); min-height: 100vh; }
     .page-container { padding: 20px; max-width: 1200px; margin: 0 auto; }
-    .sidebar { position: fixed; inset: 0 auto 0 0; width: 220px; background: #1e293b; color: white; padding: 18px 12px; display: flex; flex-direction: column; z-index: 20; box-sizing: border-box; }
+    .sidebar { position: fixed; inset: 0 auto 0 0; width: 220px; background: #1e293b; color: white; padding: 18px 12px; display: flex; flex-direction: column; z-index: 20; box-sizing: border-box; transition: transform .2s ease, width .2s ease; }
     .sidebar-brand { display: flex; align-items: center; gap: 10px; font-size: 20px; padding: 4px 10px; }
     .sidebar-sep { border-top: 1px solid #334155; margin: 16px 6px; }
     .sidebar nav { display: grid; gap: 6px; }
@@ -1915,7 +1915,9 @@ function AppStyles() {
     .sidebar-footer { margin-top: auto; display: grid; gap: 8px; color: #94a3b8; padding: 10px; }
     .sidebar-footer img, .avatar-button img { width: 34px; height: 34px; border-radius: 50%; object-fit: cover; }
     .sidebar-footer button { color: #fca5a5; background: transparent; border: 0; padding: 0; text-align: left; cursor: pointer; }
-    .top-header { background: #ffffff; border-bottom: 1px solid #e2e8f0; padding: 16px 20px; display: flex; justify-content: space-between; align-items: center; }
+    .sidebar-close, .mobile-menu-button, .sidebar-overlay { display:none; }
+    .top-header { background: #ffffff; border-bottom: 1px solid #e2e8f0; padding: 16px 20px; display: flex; justify-content: space-between; align-items: center; gap:12px; }
+    .top-header-left { display:flex; align-items:center; gap:12px; min-width:0; }
     .top-header h1 { margin: 0 0 4px; font-size: 22px; } .top-header p { margin: 0; color: #64748b; font-size: 14px; }
     .top-actions { display: flex; align-items: center; gap: 12px; }
     .avatar-menu { position: relative; } .avatar-button { display:flex; align-items:center; gap:8px; border:1px solid #e2e8f0; background:white; border-radius:999px; padding:5px 10px 5px 5px; cursor:pointer; }
@@ -1942,7 +1944,7 @@ function AppStyles() {
     .toast button { background:transparent; border:0; color:white; font-size:18px; cursor:pointer; }
     @keyframes slideIn { from { transform: translateX(24px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
     .modal-overlay { position: fixed; inset:0; background:rgba(0,0,0,.6); display:flex; align-items:center; justify-content:center; z-index:90; padding:20px; }
-    .modal-card { background:white; border-radius:12px; max-width:420px; width:100%; padding:22px; box-shadow:0 22px 60px rgba(0,0,0,.28); } .modal-card p { color:#64748b; white-space:pre-line; } .modal-actions { display:flex; justify-content:flex-end; gap:10px; }
+    .modal-card { background:white; border-radius:12px; max-width:420px; width:100%; max-height:calc(100vh - 32px); overflow-y:auto; padding:22px; box-shadow:0 22px 60px rgba(0,0,0,.28); } .modal-card p { color:#64748b; white-space:pre-line; } .modal-actions { display:flex; justify-content:flex-end; gap:10px; flex-wrap:wrap; }
     .breadcrumb { display:flex; gap:8px; align-items:center; font-size:13px; color:#64748b; margin-bottom:16px; } .breadcrumb button { border:0; background:transparent; padding:0; color:#3b82f6; cursor:pointer; } .breadcrumb strong { color:#0f172a; }
     .admin-tabs { display:flex; gap:16px; border-bottom:1px solid #e2e8f0; margin-bottom:18px; }
     .admin-tabs button { border:0; border-bottom:2px solid transparent; background:transparent; padding:12px 4px; cursor:pointer; color:#64748b; font-weight:400; }
@@ -1960,9 +1962,43 @@ function AppStyles() {
     .filter-card input, .filter-card select, .filter-card textarea { width:100%; box-sizing:border-box; padding:10px 12px; border:1px solid #d1d5db; border-radius:8px; font-size:14px; color:#0f172a; background:white; }
     .filter-card input:focus, .filter-card select:focus, .filter-card textarea:focus { outline:2px solid #3b82f6; outline-offset:0; border-color:#3b82f6; }
     .transactions-actions { display:flex; justify-content:space-between; gap:12px; align-items:center; flex-wrap:wrap; margin-top:14px; }
+    .table-scroll { -webkit-overflow-scrolling: touch; }
     .more-actions { position:relative; display:inline-flex; } .more-actions-menu { position:absolute; right:0; top:38px; background:white; border:1px solid #e2e8f0; border-radius:10px; box-shadow:0 12px 28px rgba(15,23,42,.16); padding:8px; display:grid; gap:4px; min-width:240px; z-index:10; }
     .kpi-card { position: relative; overflow: hidden; } .kpi-icon { position:absolute; right:14px; top:14px; font-size:18px; opacity:.5; user-select:none; }
-    @media (max-width: 767px) { .sidebar { width:60px; } .sidebar-label, .sidebar-brand strong { display:none; } .app-content { margin-left:60px; width:calc(100% - 60px); } .page-container { padding:12px; } }
+    @media (max-width: 767px) {
+      .app-layout { display:block; }
+      .app-content { margin-left:0; width:100%; }
+      .page-container { padding:12px !important; max-width:100%; box-sizing:border-box; }
+      .sidebar { width:260px; max-width:82vw; transform:translateX(-100%); z-index:80; box-shadow:18px 0 45px rgba(15,23,42,.28); }
+      .sidebar.open { transform:translateX(0); }
+      .sidebar.open .sidebar-label, .sidebar.open .sidebar-brand strong { display:inline; }
+      .sidebar-close { display:inline-flex; margin-left:auto; background:transparent; border:0; color:#94a3b8; font-size:22px; cursor:pointer; }
+      .sidebar-overlay { display:block; position:fixed; inset:0; background:rgba(15,23,42,.5); z-index:70; border:0; padding:0; }
+      .mobile-menu-button { display:inline-flex; align-items:center; justify-content:center; width:38px; height:38px; border:1px solid #e2e8f0; border-radius:10px; background:white; color:#0f172a; font-size:20px; cursor:pointer; }
+      .top-header { padding:12px; position:sticky; top:0; z-index:50; }
+      .top-header h1 { font-size:18px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+      .top-header p, .avatar-name { display:none; }
+      .top-actions { gap:8px; flex-shrink:0; }
+      .avatar-button { padding:4px; }
+      .avatar-dropdown { right:0; width:min(240px, calc(100vw - 24px)); }
+      .page-header { padding:18px; margin-bottom:16px; }
+      .page-header-title-row { align-items:flex-start; }
+      .page-header h1 { font-size:20px; }
+      .filter-card { padding:14px; }
+      .filter-grid { grid-template-columns:1fr; gap:12px; }
+      .transactions-actions { align-items:stretch; }
+      .transactions-actions > div { width:100%; display:flex; flex-wrap:wrap; gap:8px; }
+      .transactions-actions .btn { flex:1 1 150px; }
+      .modal-overlay { align-items:flex-end; padding:10px; }
+      .modal-card { max-width:none; border-radius:16px 16px 12px 12px; padding:18px; }
+      .modal-actions .btn { flex:1 1 130px; }
+      .toast { left:12px; right:12px; bottom:12px; max-width:none; }
+      .admin-tabs { overflow-x:auto; white-space:nowrap; padding-bottom:2px; }
+    }
+    @media (max-width: 480px) {
+      .btn-md, .btn-lg { width:100%; }
+      .page-header-main { align-items:flex-start; }
+    }
   `}</style>;
 }
 
@@ -1980,7 +2016,7 @@ function ModalConfirmacao({ config, onCancelar }) {
   return <div className="modal-overlay" onClick={onCancelar}><div className="modal-card" onClick={(e) => e.stopPropagation()}><h3>{config.titulo}</h3><p>{config.mensagem}</p><div className="modal-actions"><button className="btn-secondary" onClick={onCancelar}>Cancelar</button><button className="btn-confirm" style={{ background: config.corConfirmar || '#3b82f6' }} onClick={confirmar}>{config.labelConfirmar || 'Confirmar'}</button></div></div></div>;
 }
 
-function Sidebar({ modo, onNavegar, usuario, onLogout }) {
+function Sidebar({ modo, onNavegar, usuario, onLogout, aberta = false, onFechar }) {
   const itens = [
     ['home', '📊', 'Dashboard'],
     ['transacoes', '💸', 'Transações'],
@@ -1988,13 +2024,13 @@ function Sidebar({ modo, onNavegar, usuario, onLogout }) {
     ['provisoes', '📌', 'Provisões'],
     ['conferencia-saldos', '🏦', 'Conferência'],
   ];
-  return <aside className="sidebar"><div className="sidebar-brand"><span>💰</span><strong>Finanças</strong></div><div className="sidebar-sep" /> <nav>{itens.map(([id, icone, label]) => <button key={id} className={`sidebar-item ${modo === id ? 'active' : ''}`} onClick={() => onNavegar(id)}><span>{icone}</span><span className="sidebar-label">{label}</span></button>)}<div className="sidebar-sep" /><button className={`sidebar-item admin ${modo === 'admin' ? 'active' : ''}`} onClick={() => onNavegar('admin')}><span>⚙️</span><span className="sidebar-label">Admin</span></button></nav><div className="sidebar-footer"><img src={usuario?.foto_url || usuario?.picture || 'https://ui-avatars.com/api/?name=Financas'} alt="Usuário" /><span className="sidebar-label">{(usuario?.nome || usuario?.email || 'Usuário').split(' ')[0]}</span><button onClick={onLogout}>→ Sair</button></div></aside>;
+  return <aside className={`sidebar ${aberta ? 'open' : ''}`}><div className="sidebar-brand"><span>💰</span><strong>Finanças</strong><button type="button" className="sidebar-close" onClick={onFechar} aria-label="Fechar menu">×</button></div><div className="sidebar-sep" /> <nav>{itens.map(([id, icone, label]) => <button key={id} className={`sidebar-item ${modo === id ? 'active' : ''}`} onClick={() => onNavegar(id)}><span>{icone}</span><span className="sidebar-label">{label}</span></button>)}<div className="sidebar-sep" /><button className={`sidebar-item admin ${modo === 'admin' ? 'active' : ''}`} onClick={() => onNavegar('admin')}><span>⚙️</span><span className="sidebar-label">Admin</span></button></nav><div className="sidebar-footer"><img src={usuario?.foto_url || usuario?.picture || 'https://ui-avatars.com/api/?name=Financas'} alt="Usuário" /><span className="sidebar-label">{(usuario?.nome || usuario?.email || 'Usuário').split(' ')[0]}</span><button onClick={onLogout}>→ Sair</button></div></aside>;
 }
 
-function HeaderPrincipal({ usuario, token, onLogout }) {
+function HeaderPrincipal({ usuario, token, onLogout, onAbrirMenu }) {
   const [aberto, setAberto] = useState(false);
   const nome = usuario?.nome || usuario?.email || 'Usuário';
-  return <header className="top-header"><div><h1>💰 Finanças Pessoais</h1><p>Olá, {nome}</p></div><div className="top-actions"><NotificacoesBell token={token} /><div className="avatar-menu"><button className="avatar-button" onClick={() => setAberto(!aberto)}><img src={usuario?.foto_url || usuario?.picture || 'https://ui-avatars.com/api/?name=Financas'} alt="Avatar" /><span>{nome.split(' ')[0]}</span><span>▾</span></button>{aberto && <div className="avatar-dropdown"><strong>{nome}</strong><small>{usuario?.email}</small><button onClick={onLogout}>Sair</button></div>}</div></div></header>;
+  return <header className="top-header"><div className="top-header-left"><button type="button" className="mobile-menu-button" onClick={onAbrirMenu} aria-label="Abrir menu">☰</button><div><h1>💰 Finanças Pessoais</h1><p>Olá, {nome}</p></div></div><div className="top-actions"><NotificacoesBell token={token} /><div className="avatar-menu"><button className="avatar-button" onClick={() => setAberto(!aberto)}><img src={usuario?.foto_url || usuario?.picture || 'https://ui-avatars.com/api/?name=Financas'} alt="Avatar" /><span className="avatar-name">{nome.split(' ')[0]}</span><span>▾</span></button>{aberto && <div className="avatar-dropdown"><strong>{nome}</strong><small>{usuario?.email}</small><button onClick={onLogout}>Sair</button></div>}</div></div></header>;
 }
 
 function ModalCategoria({ aberta, categoria, categorias, onFechar, onSalvar }) {
@@ -2127,6 +2163,7 @@ function Dashboard({ usuario, token, onLogout }) {
   const [carregandoDashboard, setCarregandoDashboard] = useState(false);
   const [toast, setToast] = useState(null);
   const [confirmacao, setConfirmacao] = useState(null);
+  const [menuMobileAberto, setMenuMobileAberto] = useState(false);
 
   useEffect(() => {
     carregarContas();
@@ -2274,12 +2311,13 @@ function Dashboard({ usuario, token, onLogout }) {
   return (
     <div className="app-layout">
       <AppStyles />
-      <Sidebar modo={modo} onNavegar={(novoModo) => { setContaSelecionada(null); setModo(novoModo); }} usuario={usuario} onLogout={onLogout} />
+      {menuMobileAberto && <button type="button" className="sidebar-overlay" aria-label="Fechar menu" onClick={() => setMenuMobileAberto(false)} />}
+      <Sidebar modo={modo} onNavegar={(novoModo) => { setContaSelecionada(null); setModo(novoModo); setMenuMobileAberto(false); }} usuario={usuario} onLogout={onLogout} aberta={menuMobileAberto} onFechar={() => setMenuMobileAberto(false)} />
       <div className="app-content">
-        <HeaderPrincipal usuario={usuario} token={token} onLogout={onLogout} />
+        <HeaderPrincipal usuario={usuario} token={token} onLogout={onLogout} onAbrirMenu={() => setMenuMobileAberto(true)} />
         <Toast toast={toast} onFechar={() => setToast(null)} />
         <ModalConfirmacao config={confirmacao} onCancelar={() => setConfirmacao(null)} />
-      <div className="page-container" style={{ padding: '20px', maxWidth: '1200px', margin: '0 auto' }}>
+      <div className="page-container">
         {modo === 'home' && (
           <>
             {contas.length === 0 ? (
