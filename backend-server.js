@@ -2913,8 +2913,9 @@ async function materializarRecorrenciasMensaisUsuario(usuarioId, mes, ano) {
        AND ativa = true
        AND recorrencia_id IS NOT NULL
        AND (ano_inicio * 12 + mes_inicio) <= ($3::int * 12 + $2::int)
+       AND (ano * 12 + mes) <= ($3::int * 12 + $2::int)
        AND (ano_fim IS NULL OR mes_fim IS NULL OR (ano_fim * 12 + mes_fim) >= ($3::int * 12 + $2::int))
-     ORDER BY recorrencia_id, ano ASC, mes ASC, criado_em ASC`,
+     ORDER BY recorrencia_id, ano DESC, mes DESC, criado_em DESC`,
     [usuarioId, mes, ano]
   );
 
@@ -3209,17 +3210,61 @@ app.post('/api/planejamento', verificarToken, async (req, res) => {
 app.put('/api/planejamento/:id', verificarToken, async (req, res) => {
   try {
     const p = validarPayloadPlanejamento(req.body);
+    const escopoEdicao = String(req.body.escopo_edicao || req.body.escopoEdicao || 'APENAS_ESTE').trim().toUpperCase();
+    if (!['APENAS_ESTE', 'ESTE_E_PROXIMOS', 'TODA_RECORRENCIA'].includes(escopoEdicao)) throw new Error('Escopo de edição inválido.');
     if (p.categoriaId) {
       const categoria = await validarCategoriaPlanejamentoUsuario(req.usuario.usuario_id, p.categoriaId);
       p.categoria = p.categoria || categoria.nome;
     }
-    const result = await pool.query(
-      `UPDATE planejamentos_mensais SET mes=$1, ano=$2, descricao=$3, categoria=$4, categoria_id=$5, tipo_despesa=$6, valor_previsto=$7, dia_previsto=$8, observacao=$9, recorrencia_tipo=$10, quantidade_parcelas=$11, parcela_atual=$12, mes_inicio=$13, ano_inicio=$14, mes_fim=$15, ano_fim=$16, atualizado_em=NOW()
-       WHERE id=$17 AND usuario_id=$18 RETURNING *`,
-      [p.mes, p.ano, p.descricao, p.categoria || null, p.categoriaId || null, p.tipoDespesa, p.valorPrevisto, p.diaPrevisto ?? null, p.observacao || null, p.recorrenciaTipo, p.quantidadeParcelas, p.parcelaInicial, p.mes, p.ano, p.mesFim, p.anoFim, req.params.id, req.usuario.usuario_id]
+
+    const atualResult = await pool.query(
+      `SELECT * FROM planejamentos_mensais WHERE id = $1 AND usuario_id = $2 LIMIT 1`,
+      [req.params.id, req.usuario.usuario_id]
     );
-    if (result.rows.length === 0) return res.status(404).json({ erro: 'Planejamento não encontrado.' });
-    res.json({ planejamento: result.rows[0] });
+    if (atualResult.rows.length === 0) return res.status(404).json({ erro: 'Planejamento não encontrado.' });
+    const atual = atualResult.rows[0];
+    const escopoEfetivo = atual.recorrencia_tipo && atual.recorrencia_tipo !== 'UNICA' ? escopoEdicao : 'APENAS_ESTE';
+    if (escopoEfetivo !== 'APENAS_ESTE' && !atual.recorrencia_id) throw new Error('Este lançamento não possui identificador de recorrência.');
+
+    const valoresComuns = [
+      p.descricao,
+      p.categoria || null,
+      p.categoriaId || null,
+      p.tipoDespesa,
+      p.valorPrevisto,
+      p.diaPrevisto ?? null,
+      p.observacao || null,
+      p.recorrenciaTipo,
+      p.quantidadeParcelas,
+      p.mesFim,
+      p.anoFim,
+    ];
+
+    let result;
+    if (escopoEfetivo === 'APENAS_ESTE') {
+      result = await pool.query(
+        `UPDATE planejamentos_mensais
+         SET mes=$1, ano=$2, descricao=$3, categoria=$4, categoria_id=$5, tipo_despesa=$6, valor_previsto=$7, dia_previsto=$8, observacao=$9, recorrencia_tipo=$10, quantidade_parcelas=$11, parcela_atual=$12, mes_inicio=$13, ano_inicio=$14, mes_fim=$15, ano_fim=$16, atualizado_em=NOW()
+         WHERE id=$17 AND usuario_id=$18 RETURNING *`,
+        [p.mes, p.ano, p.descricao, p.categoria || null, p.categoriaId || null, p.tipoDespesa, p.valorPrevisto, p.diaPrevisto ?? null, p.observacao || null, p.recorrenciaTipo, p.quantidadeParcelas, p.parcelaInicial, p.mes, p.ano, p.mesFim, p.anoFim, req.params.id, req.usuario.usuario_id]
+      );
+    } else {
+      const condicaoEscopo = escopoEfetivo === 'ESTE_E_PROXIMOS'
+        ? `AND (ano * 12 + mes) >= ($15::int * 12 + $14::int)`
+        : '';
+      const valoresEscopo = [...valoresComuns, req.usuario.usuario_id, atual.recorrencia_id];
+      if (escopoEfetivo === 'ESTE_E_PROXIMOS') valoresEscopo.push(atual.mes, atual.ano);
+      result = await pool.query(
+        `UPDATE planejamentos_mensais
+         SET descricao=$1, categoria=$2, categoria_id=$3, tipo_despesa=$4, valor_previsto=$5, dia_previsto=$6, observacao=$7, recorrencia_tipo=$8, quantidade_parcelas=$9, mes_fim=$10, ano_fim=$11, atualizado_em=NOW()
+         WHERE usuario_id=$12 AND recorrencia_id=$13 ${condicaoEscopo}
+         RETURNING *`,
+        valoresEscopo
+      );
+    }
+
+    if (result.rows.length === 0) return res.status(404).json({ erro: 'Nenhum lançamento encontrado para o escopo selecionado.' });
+    res.json({ planejamento: result.rows[0], planejamentos: result.rows, escopo_edicao: escopoEfetivo, quantidade_alterada: result.rowCount });
   } catch (error) { res.status(400).json({ erro: error.message }); }
 });
 
@@ -3624,6 +3669,9 @@ function montarTransacaoTransferencia(tx) {
 async function buscarTransacoesUsuario(usuarioId, filtros = {}) {
   const valores = [usuarioId];
   const where = ['conta.usuario_id = $1', 't.deletado_em IS NULL'];
+  const limite = Math.min(Math.max(parseInt(filtros.limite, 10) || 50, 1), 500);
+  const pagina = Math.max(parseInt(filtros.pagina, 10) || 1, 1);
+  const offset = (pagina - 1) * limite;
 
   if (filtros.contaId) {
     valores.push(filtros.contaId);
@@ -3659,6 +3707,19 @@ async function buscarTransacoesUsuario(usuarioId, filtros = {}) {
     valores.push(`%${String(filtros.busca).trim()}%`);
     where.push(`t.descricao ILIKE $${valores.length}`);
   }
+
+  const countResult = await pool.query(
+    `SELECT COUNT(*)::int AS total
+     FROM transacoes t
+     JOIN contas conta ON conta.id = t.conta_id
+     LEFT JOIN categorias cat ON cat.id = t.categoria_id
+     WHERE ${where.join(' AND ')}`,
+    valores
+  );
+  const total = Number(countResult.rows[0]?.total || 0);
+  const valoresPaginados = [...valores, limite, offset];
+  const limiteParam = valoresPaginados.length - 1;
+  const offsetParam = valoresPaginados.length;
 
   const result = await pool.query(
     `SELECT t.*,
@@ -3706,11 +3767,19 @@ async function buscarTransacoesUsuario(usuarioId, filtros = {}) {
      LEFT JOIN provisoes p ON p.id = ca.provisao_id
      WHERE ${where.join(' AND ')}
      ORDER BY t.data DESC, t.criado_em DESC
-     LIMIT 1000`,
-    valores
+     LIMIT $${limiteParam} OFFSET $${offsetParam}`,
+    valoresPaginados
   );
 
-  return result.rows;
+  return {
+    transacoes: result.rows,
+    paginacao: {
+      total,
+      pagina,
+      limite,
+      totalPaginas: Math.max(1, Math.ceil(total / limite)),
+    },
+  };
 }
 
 app.get('/api/transacoes', verificarToken, async (req, res) => {
@@ -3726,9 +3795,11 @@ app.get('/api/transacoes', verificarToken, async (req, res) => {
       dataInicial: req.query.dataInicial,
       dataFinal: req.query.dataFinal,
       busca: req.query.busca,
+      limite: req.query.limite,
+      pagina: req.query.pagina,
     });
 
-    res.json({ transacoes });
+    res.json(transacoes);
   } catch (error) {
     res.status(500).json({ erro: error.message });
   }
@@ -3871,30 +3942,12 @@ app.post('/api/transferencias-internas/desmarcar', verificarToken, async (req, r
 app.get('/api/transacoes/:contaId', verificarToken, async (req, res) => {
   try {
     await aplicarRegrasAtivasEmTransacoesSemCategoria(req.usuario.usuario_id);
-
-    const result = await pool.query(
-      `SELECT t.*,
-              COALESCE(t.categoria_macro_id, CASE WHEN c.categoria_pai_id IS NULL THEN t.categoria_id ELSE c.categoria_pai_id END) AS categoria_macro_id,
-              COALESCE(t.categoria_detalhada_id, CASE WHEN c.categoria_pai_id IS NOT NULL THEN t.categoria_id ELSE NULL END) AS categoria_detalhada_id,
-              c.nome as categoria_nome,
-              COALESCE(cm.nome, c_macro.nome, CASE WHEN c.categoria_pai_id IS NULL THEN c.nome ELSE NULL END) AS categoria_macro_nome,
-              COALESCE(cd.nome, CASE WHEN c.categoria_pai_id IS NOT NULL THEN c.nome ELSE NULL END) AS categoria_detalhada_nome,
-              ca.id AS conciliacao_id, ca.provisao_id AS provisao_conciliada_id, p.descricao AS provisao_conciliada_descricao
-       FROM transacoes t
-       JOIN contas conta ON conta.id = t.conta_id
-       LEFT JOIN categorias c ON t.categoria_id = c.id
-       LEFT JOIN categorias c_macro ON c_macro.id = c.categoria_pai_id
-       LEFT JOIN categorias cm ON t.categoria_macro_id = cm.id
-       LEFT JOIN categorias cd ON t.categoria_detalhada_id = cd.id
-       LEFT JOIN conciliacoes ca ON ca.transacao_id = t.id AND ca.status = 'CONFIRMADA'
-       LEFT JOIN provisoes p ON p.id = ca.provisao_id
-       WHERE t.conta_id = $1 AND conta.usuario_id = $2 AND t.deletado_em IS NULL
-       ORDER BY t.data DESC
-       LIMIT 500`,
-      [req.params.contaId, req.usuario.usuario_id]
-    );
-
-    res.json({ transacoes: result.rows });
+    const resultado = await buscarTransacoesUsuario(req.usuario.usuario_id, {
+      contaId: req.params.contaId,
+      limite: req.query.limite,
+      pagina: req.query.pagina,
+    });
+    res.json(resultado);
   } catch (error) {
     res.status(500).json({ erro: error.message });
   }
@@ -4504,9 +4557,9 @@ app.get('/api/categorias', verificarToken, async (req, res) => {
     const result = await pool.query(
       `SELECT DISTINCT ON (COALESCE(usuario_id::text, 'padrao'), nome, tipo, COALESCE(nivel, CASE WHEN categoria_pai_id IS NULL THEN 'MACRO' ELSE 'DETALHADA' END), COALESCE(categoria_pai_id::text, 'raiz')) *
        FROM categorias
-       WHERE (usuario_id = $1 OR usuario_id IS NULL) AND ativa = true
+       WHERE (usuario_id = $1 OR usuario_id IS NULL) AND ($2::boolean = true OR ativa = true)
        ORDER BY COALESCE(usuario_id::text, 'padrao'), nome, tipo, COALESCE(nivel, CASE WHEN categoria_pai_id IS NULL THEN 'MACRO' ELSE 'DETALHADA' END), COALESCE(categoria_pai_id::text, 'raiz'), criado_em`,
-      [req.usuario.usuario_id]
+      [req.usuario.usuario_id, req.query.incluirInativas === 'true']
     );
 
     const categorias = result.rows.sort((a, b) => {
@@ -4516,6 +4569,111 @@ app.get('/api/categorias', verificarToken, async (req, res) => {
       return a.nome.localeCompare(b.nome, 'pt-BR');
     });
     res.json({ categorias });
+  } catch (error) {
+    res.status(500).json({ erro: error.message });
+  }
+});
+
+
+app.post('/api/categorias', verificarToken, async (req, res) => {
+  try {
+    const { nome, tipo, emoji = '', cor = '#999999', nivel, categoria_pai_id = null } = req.body || {};
+    const nomeLimpo = String(nome || '').trim();
+    const tipoFinal = String(tipo || '').toUpperCase();
+    const nivelFinal = String(nivel || '').toUpperCase();
+    if (!nomeLimpo) return res.status(400).json({ erro: 'Nome é obrigatório.' });
+    if (!['DESPESA', 'RECEITA'].includes(tipoFinal)) return res.status(400).json({ erro: 'Tipo inválido.' });
+    if (!['MACRO', 'DETALHADA'].includes(nivelFinal)) return res.status(400).json({ erro: 'Nível inválido.' });
+    if (nivelFinal === 'MACRO' && categoria_pai_id) return res.status(400).json({ erro: 'Categoria macro não pode ter categoria pai.' });
+    if (nivelFinal === 'DETALHADA' && !categoria_pai_id) return res.status(400).json({ erro: 'Categoria detalhada exige uma categoria macro pai.' });
+    if (nivelFinal === 'DETALHADA') {
+      const pai = await pool.query(
+        `SELECT id FROM categorias WHERE id = $1 AND (usuario_id = $2 OR usuario_id IS NULL) AND COALESCE(nivel, CASE WHEN categoria_pai_id IS NULL THEN 'MACRO' ELSE 'DETALHADA' END) = 'MACRO' LIMIT 1`,
+        [categoria_pai_id, req.usuario.usuario_id]
+      );
+      if (pai.rows.length === 0) return res.status(400).json({ erro: 'Categoria pai macro não encontrada.' });
+    }
+    const result = await pool.query(
+      `INSERT INTO categorias (usuario_id, nome, tipo, emoji, cor, nivel, categoria_pai_id, ativa)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, true)
+       RETURNING *`,
+      [req.usuario.usuario_id, nomeLimpo, tipoFinal, emoji || null, cor || '#999999', nivelFinal, nivelFinal === 'DETALHADA' ? categoria_pai_id : null]
+    );
+    res.status(201).json({ categoria: result.rows[0] });
+  } catch (error) {
+    res.status(500).json({ erro: error.message });
+  }
+});
+
+app.put('/api/categorias/:id', verificarToken, async (req, res) => {
+  try {
+    const { nome, tipo, emoji = '', cor = '#999999', nivel, categoria_pai_id = null } = req.body || {};
+    const nomeLimpo = String(nome || '').trim();
+    const tipoFinal = String(tipo || '').toUpperCase();
+    const nivelFinal = String(nivel || '').toUpperCase();
+    if (!nomeLimpo) return res.status(400).json({ erro: 'Nome é obrigatório.' });
+    if (!['DESPESA', 'RECEITA'].includes(tipoFinal)) return res.status(400).json({ erro: 'Tipo inválido.' });
+    if (!['MACRO', 'DETALHADA'].includes(nivelFinal)) return res.status(400).json({ erro: 'Nível inválido.' });
+    const atual = await pool.query('SELECT * FROM categorias WHERE id = $1 AND usuario_id = $2 LIMIT 1', [req.params.id, req.usuario.usuario_id]);
+    if (atual.rows.length === 0) return res.status(404).json({ erro: 'Categoria personalizada não encontrada.' });
+    if (nivelFinal === 'MACRO' && categoria_pai_id) return res.status(400).json({ erro: 'Categoria macro não pode ter categoria pai.' });
+    if (nivelFinal === 'DETALHADA') {
+      if (!categoria_pai_id) return res.status(400).json({ erro: 'Categoria detalhada exige uma categoria macro pai.' });
+      if (categoria_pai_id === req.params.id) return res.status(400).json({ erro: 'Categoria pai não pode ser a própria categoria.' });
+      const pai = await pool.query(
+        `SELECT id FROM categorias WHERE id = $1 AND (usuario_id = $2 OR usuario_id IS NULL) AND COALESCE(nivel, CASE WHEN categoria_pai_id IS NULL THEN 'MACRO' ELSE 'DETALHADA' END) = 'MACRO' LIMIT 1`,
+        [categoria_pai_id, req.usuario.usuario_id]
+      );
+      if (pai.rows.length === 0) return res.status(400).json({ erro: 'Categoria pai macro não encontrada.' });
+    }
+    const result = await pool.query(
+      `UPDATE categorias
+       SET nome=$1, tipo=$2, emoji=$3, cor=$4, nivel=$5, categoria_pai_id=$6, atualizado_em=NOW()
+       WHERE id=$7 AND usuario_id=$8
+       RETURNING *`,
+      [nomeLimpo, tipoFinal, emoji || null, cor || '#999999', nivelFinal, nivelFinal === 'DETALHADA' ? categoria_pai_id : null, req.params.id, req.usuario.usuario_id]
+    );
+    res.json({ categoria: result.rows[0] });
+  } catch (error) {
+    res.status(500).json({ erro: error.message });
+  }
+});
+
+app.patch('/api/categorias/:id/desativar', verificarToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `UPDATE categorias SET ativa = false, atualizado_em = NOW()
+       WHERE id = $1 AND (usuario_id = $2 OR usuario_id IS NULL)
+       RETURNING *`,
+      [req.params.id, req.usuario.usuario_id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ erro: 'Categoria não encontrada.' });
+    res.json({ categoria: result.rows[0] });
+  } catch (error) {
+    res.status(500).json({ erro: error.message });
+  }
+});
+
+app.patch('/api/categorias/:id/ativar', verificarToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `UPDATE categorias SET ativa = true, atualizado_em = NOW()
+       WHERE id = $1 AND (usuario_id = $2 OR usuario_id IS NULL)
+       RETURNING *`,
+      [req.params.id, req.usuario.usuario_id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ erro: 'Categoria não encontrada.' });
+    res.json({ categoria: result.rows[0] });
+  } catch (error) {
+    res.status(500).json({ erro: error.message });
+  }
+});
+
+app.delete('/api/categorias/:id', verificarToken, async (req, res) => {
+  try {
+    const result = await pool.query('DELETE FROM categorias WHERE id = $1 AND usuario_id = $2 RETURNING id', [req.params.id, req.usuario.usuario_id]);
+    if (result.rows.length === 0) return res.status(404).json({ erro: 'Categoria personalizada não encontrada ou não pode ser excluída.' });
+    res.json({ sucesso: true });
   } catch (error) {
     res.status(500).json({ erro: error.message });
   }
