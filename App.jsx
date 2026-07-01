@@ -3356,9 +3356,6 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
     tx.eh_transferencia_interna ? 'Transferência interna' : '',
     tx.conciliacao_id ? 'Conciliada' : '',
   ].filter(Boolean).join(' ') || '-';
-  const totalTransacoesPaginacao = Number(paginacao.total || transacoesOrdenadas.length || 0);
-  const inicioPaginacao = totalTransacoesPaginacao === 0 ? 0 : ((Number(paginacao.pagina || pagina) - 1) * Number(paginacao.limite || limite)) + 1;
-  const fimPaginacao = totalTransacoesPaginacao === 0 ? 0 : Math.min(totalTransacoesPaginacao, inicioPaginacao + transacoesOrdenadas.length - 1);
   const contaSelecionadaFiltro = filtros.conta !== 'todas' ? contas.find((conta) => conta.id === filtros.conta) : null;
   const atualizarFiltroTransacoes = (patch) => { setFiltros((atuais) => ({ ...atuais, ...patch })); setPagina(1); };
   const alterarDataInicialTransacoes = (valor) => { setDataInicial(valor); setPagina(1); };
