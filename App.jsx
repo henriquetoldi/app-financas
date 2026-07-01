@@ -3394,6 +3394,11 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
 
   const idsFiltrados = transacoesFiltradas.map((tx) => tx.id);
   const todasFiltradasSelecionadas = idsFiltrados.length > 0 && idsFiltrados.every((id) => selecionadas.includes(id));
+  const pendenciasCategorizacao = useMemo(() => {
+    const semMacro = transacoesFiltradas.filter((tx) => !tx.categoria_macro_id && !tx.categoria_id).length;
+    const semDetalhada = transacoesFiltradas.filter((tx) => !tx.categoria_detalhada_id).length;
+    return { semMacro, semDetalhada, total: semMacro + semDetalhada };
+  }, [transacoesFiltradas]);
   const categoriasMacro = categorias.filter((cat) => (cat.nivel || (cat.categoria_pai_id ? 'DETALHADA' : 'MACRO')) === 'MACRO');
   const categoriasDetalhadasModal = categorias.filter((cat) => (cat.nivel || (cat.categoria_pai_id ? 'DETALHADA' : 'MACRO')) === 'DETALHADA' && cat.categoria_pai_id === categoriaMacroEscolhida);
   const categoriasDetalhadasFiltro = categorias.filter((cat) => (cat.nivel || (cat.categoria_pai_id ? 'DETALHADA' : 'MACRO')) === 'DETALHADA' && (filtros.categoriaMacro === 'todas' || cat.categoria_pai_id === filtros.categoriaMacro));
@@ -3864,6 +3869,22 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
               </div>
             </div>
           </div>
+
+          {(pendenciasCategorizacao.semMacro > 0 || pendenciasCategorizacao.semDetalhada > 0) && (
+            <div style={{ marginTop: '14px', background: '#fffbeb', border: '1px solid #f59e0b', borderRadius: '10px', padding: '12px', display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'center', flexWrap: 'wrap' }}>
+              <div style={{ color: '#92400e', fontSize: '14px' }}>
+                <strong>⚠️ Pendências de categorização:</strong>{' '}
+                {pendenciasCategorizacao.semMacro > 0 && <span>{pendenciasCategorizacao.semMacro} sem categoria macro</span>}
+                {pendenciasCategorizacao.semMacro > 0 && pendenciasCategorizacao.semDetalhada > 0 && <span> · </span>}
+                {pendenciasCategorizacao.semDetalhada > 0 && <span>{pendenciasCategorizacao.semDetalhada} sem categoria detalhada</span>}
+                <span style={{ color: '#b45309' }}> nos registros exibidos.</span>
+              </div>
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                {pendenciasCategorizacao.semMacro > 0 && <Btn variant="secondary" size="sm" onClick={() => atualizarFiltroTransacoes({ categoriaMacro: 'sem', categoriaDetalhada: 'todas' })}>Ver sem macro</Btn>}
+                {pendenciasCategorizacao.semDetalhada > 0 && <Btn variant="secondary" size="sm" onClick={() => atualizarFiltroTransacoes({ categoriaDetalhada: 'sem' })}>Ver sem detalhada</Btn>}
+              </div>
+            </div>
+          )}
 
           <div style={{ marginTop: '14px', display: 'flex', justifyContent: 'space-between', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
             <span style={{ color: '#4b5563', fontSize: '14px' }}>Mostrando {inicioPaginacao}–{fimPaginacao} de {totalTransacoesPaginacao.toLocaleString('pt-BR')} transações • {selecionadas.length} selecionada(s)</span>
