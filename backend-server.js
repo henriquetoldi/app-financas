@@ -4614,8 +4614,8 @@ app.put('/api/categorias/:id', verificarToken, async (req, res) => {
     if (!nomeLimpo) return res.status(400).json({ erro: 'Nome é obrigatório.' });
     if (!['DESPESA', 'RECEITA'].includes(tipoFinal)) return res.status(400).json({ erro: 'Tipo inválido.' });
     if (!['MACRO', 'DETALHADA'].includes(nivelFinal)) return res.status(400).json({ erro: 'Nível inválido.' });
-    const atual = await pool.query('SELECT * FROM categorias WHERE id = $1 AND usuario_id = $2 LIMIT 1', [req.params.id, req.usuario.usuario_id]);
-    if (atual.rows.length === 0) return res.status(404).json({ erro: 'Categoria personalizada não encontrada.' });
+    const atual = await pool.query('SELECT * FROM categorias WHERE id = $1 AND (usuario_id = $2 OR usuario_id IS NULL) LIMIT 1', [req.params.id, req.usuario.usuario_id]);
+    if (atual.rows.length === 0) return res.status(404).json({ erro: 'Categoria não encontrada.' });
     if (nivelFinal === 'MACRO' && categoria_pai_id) return res.status(400).json({ erro: 'Categoria macro não pode ter categoria pai.' });
     if (nivelFinal === 'DETALHADA') {
       if (!categoria_pai_id) return res.status(400).json({ erro: 'Categoria detalhada exige uma categoria macro pai.' });
@@ -4629,7 +4629,7 @@ app.put('/api/categorias/:id', verificarToken, async (req, res) => {
     const result = await pool.query(
       `UPDATE categorias
        SET nome=$1, tipo=$2, emoji=$3, cor=$4, nivel=$5, categoria_pai_id=$6, atualizado_em=NOW()
-       WHERE id=$7 AND usuario_id=$8
+       WHERE id=$7 AND (usuario_id=$8 OR usuario_id IS NULL)
        RETURNING *`,
       [nomeLimpo, tipoFinal, emoji || null, cor || '#999999', nivelFinal, nivelFinal === 'DETALHADA' ? categoria_pai_id : null, req.params.id, req.usuario.usuario_id]
     );

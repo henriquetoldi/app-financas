@@ -1998,6 +1998,12 @@ function AppStyles() {
     .filter-card input:focus, .filter-card select:focus, .filter-card textarea:focus { outline:2px solid #3b82f6; outline-offset:0; border-color:#3b82f6; }
     .transactions-actions { display:flex; justify-content:space-between; gap:12px; align-items:center; flex-wrap:wrap; margin-top:14px; }
     .table-scroll { -webkit-overflow-scrolling: touch; }
+    .transactions-table { width:100%; border-collapse:collapse; table-layout:fixed; font-size:13px; }
+    .transactions-table th, .transactions-table td { padding:8px 6px; vertical-align:middle; overflow-wrap:anywhere; }
+    .transactions-table .tx-cell-compact { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .transactions-table .tx-actions { display:flex; justify-content:center; gap:6px; flex-wrap:wrap; }
+    .transactions-table .tx-actions .btn { padding:6px 8px; font-size:12px; }
+    .transactions-table .tx-description { line-height:1.3; }
     .more-actions { position:relative; display:inline-flex; } .more-actions-menu { position:absolute; right:0; top:38px; background:white; border:1px solid #e2e8f0; border-radius:10px; box-shadow:0 12px 28px rgba(15,23,42,.16); padding:8px; display:grid; gap:4px; min-width:240px; z-index:10; }
     .kpi-card { position: relative; overflow: hidden; } .kpi-icon { position:absolute; right:14px; top:14px; font-size:18px; opacity:.5; user-select:none; }
     @media (max-width: 767px) {
@@ -2068,6 +2074,9 @@ function HeaderPrincipal({ usuario, token, onLogout, onAbrirMenu }) {
   return <header className="top-header"><div className="top-header-left"><button type="button" className="mobile-menu-button" onClick={onAbrirMenu} aria-label="Abrir menu">☰</button><div><h1>💰 Finanças Pessoais</h1><p>Olá, {nome}</p></div></div><div className="top-actions"><NotificacoesBell token={token} /><div className="avatar-menu"><button className="avatar-button" onClick={() => setAberto(!aberto)}><img src={usuario?.foto_url || usuario?.picture || 'https://ui-avatars.com/api/?name=Financas'} alt="Avatar" /><span className="avatar-name">{nome.split(' ')[0]}</span><span>▾</span></button>{aberto && <div className="avatar-dropdown"><strong>{nome}</strong><small>{usuario?.email}</small><button onClick={onLogout}>Sair</button></div>}</div></div></header>;
 }
 
+const emojisCategorias = ['🍔', '🛒', '🛍️', '🎮', '🎬', '🏠', '🚗', '🚌', '✈️', '💡', '📱', '💊', '🎓', '💼', '💰', '📈', '🎁', '🐶', '🏋️', '☕', '🍕', '🧾', '🔧', '✨'];
+const coresCategorias = ['#ef4444', '#f97316', '#f59e0b', '#eab308', '#22c55e', '#10b981', '#14b8a6', '#06b6d4', '#3b82f6', '#6366f1', '#8b5cf6', '#a855f7', '#d946ef', '#ec4899', '#64748b', '#111827'];
+
 function ModalCategoria({ aberta, categoria, categorias, onFechar, onSalvar }) {
   const [form, setForm] = useState({ nome: '', tipo: 'DESPESA', nivel: 'MACRO', categoria_pai_id: '', emoji: '', cor: '#999999' });
   useEffect(() => {
@@ -2087,7 +2096,44 @@ function ModalCategoria({ aberta, categoria, categorias, onFechar, onSalvar }) {
     if (form.nivel === 'DETALHADA' && !form.categoria_pai_id) return mostrarToast('Selecione a categoria macro pai.', 'aviso');
     onSalvar({ ...form, categoria_pai_id: form.nivel === 'DETALHADA' ? form.categoria_pai_id : null });
   };
-  return <div className="modal-overlay" onClick={onFechar}><div className="modal-card" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '520px' }}><h3>{categoria?.id ? 'Editar categoria' : 'Nova categoria'}</h3><div className="filter-card" style={{ boxShadow: 'none', marginBottom: 0 }}><label>Nome *<input value={form.nome} onChange={(e) => setForm({ ...form, nome: e.target.value })} placeholder="Ex.: Alimentação" /></label><div className="filter-grid" style={{ marginTop: '12px' }}><label>Tipo *<select value={form.tipo} onChange={(e) => setForm({ ...form, tipo: e.target.value })}><option value="DESPESA">DESPESA</option><option value="RECEITA">RECEITA</option></select></label><label>Nível *<select value={form.nivel} onChange={(e) => setForm({ ...form, nivel: e.target.value, categoria_pai_id: '' })}><option value="MACRO">MACRO</option><option value="DETALHADA">DETALHADA</option></select></label></div>{form.nivel === 'DETALHADA' && <label style={{ marginTop: '12px' }}>Categoria pai *<select value={form.categoria_pai_id} onChange={(e) => setForm({ ...form, categoria_pai_id: e.target.value })}><option value="">Selecionar macro...</option>{macros.map((macro) => <option key={macro.id} value={macro.id}>{macro.emoji || ''} {macro.nome}</option>)}</select></label>}<div className="filter-grid" style={{ marginTop: '12px' }}><label>Emoji<input value={form.emoji} onChange={(e) => setForm({ ...form, emoji: e.target.value })} placeholder="🍔" /></label><label>Cor<input value={form.cor} onChange={(e) => setForm({ ...form, cor: e.target.value })} placeholder="#999999" /></label></div></div><div className="modal-actions" style={{ marginTop: '16px' }}><Btn variant="secondary" onClick={onFechar}>Cancelar</Btn><Btn variant="primary" onClick={salvar}>Salvar categoria</Btn></div></div></div>;
+  const corSelecionada = /^#[0-9A-Fa-f]{6}$/.test(form.cor || '') ? form.cor : '#999999';
+  return (
+    <div className="modal-overlay" onClick={onFechar}>
+      <div className="modal-card" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '560px' }}>
+        <h3>{categoria?.id ? 'Editar categoria' : 'Nova categoria'}</h3>
+        <div className="filter-card" style={{ boxShadow: 'none', marginBottom: 0 }}>
+          <label>Nome *<input value={form.nome} onChange={(e) => setForm({ ...form, nome: e.target.value })} placeholder="Ex.: Alimentação" /></label>
+          <div className="filter-grid" style={{ marginTop: '12px' }}>
+            <label>Tipo *<select value={form.tipo} onChange={(e) => setForm({ ...form, tipo: e.target.value })}><option value="DESPESA">DESPESA</option><option value="RECEITA">RECEITA</option></select></label>
+            <label>Nível *<select value={form.nivel} onChange={(e) => setForm({ ...form, nivel: e.target.value, categoria_pai_id: '' })}><option value="MACRO">MACRO</option><option value="DETALHADA">DETALHADA</option></select></label>
+          </div>
+          {form.nivel === 'DETALHADA' && <label style={{ marginTop: '12px' }}>Categoria pai *<select value={form.categoria_pai_id} onChange={(e) => setForm({ ...form, categoria_pai_id: e.target.value })}><option value="">Selecionar macro...</option>{macros.map((macro) => <option key={macro.id} value={macro.id}>{macro.emoji || ''} {macro.nome}</option>)}</select></label>}
+          <div style={{ marginTop: '12px' }}>
+            <strong style={{ display: 'block', color: '#64748b', fontSize: '12px', marginBottom: '8px' }}>Emoji</strong>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(40px, 1fr))', gap: '8px' }}>
+              {emojisCategorias.map((emoji) => (
+                <button key={emoji} type="button" onClick={() => setForm({ ...form, emoji })} aria-label={`Selecionar emoji ${emoji}`} style={{ border: form.emoji === emoji ? '2px solid #3b82f6' : '1px solid #cbd5e1', background: form.emoji === emoji ? '#eff6ff' : '#ffffff', borderRadius: '10px', padding: '8px', fontSize: '20px', cursor: 'pointer' }}>{emoji}</button>
+              ))}
+            </div>
+            <input value={form.emoji} onChange={(e) => setForm({ ...form, emoji: e.target.value })} placeholder="Ou cole outro emoji aqui" style={{ marginTop: '8px' }} />
+          </div>
+          <div style={{ marginTop: '12px' }}>
+            <strong style={{ display: 'block', color: '#64748b', fontSize: '12px', marginBottom: '8px' }}>Cor</strong>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap', marginBottom: '10px' }}>
+              <input type="color" value={corSelecionada} onChange={(e) => setForm({ ...form, cor: e.target.value })} aria-label="Escolher cor da categoria" style={{ width: '56px', height: '42px', padding: '4px', borderRadius: '10px', cursor: 'pointer' }} />
+              <span style={{ color: '#64748b', fontSize: '13px' }}>Clique no quadrado para escolher sem decorar código.</span>
+            </div>
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+              {coresCategorias.map((cor) => (
+                <button key={cor} type="button" onClick={() => setForm({ ...form, cor })} aria-label={`Selecionar cor ${cor}`} title={cor} style={{ width: '30px', height: '30px', borderRadius: '999px', background: cor, border: corSelecionada === cor ? '3px solid #0f172a' : '2px solid #ffffff', boxShadow: '0 0 0 1px #cbd5e1', cursor: 'pointer' }} />
+              ))}
+            </div>
+          </div>
+        </div>
+        <div className="modal-actions" style={{ marginTop: '16px' }}><Btn variant="secondary" onClick={onFechar}>Cancelar</Btn><Btn variant="primary" onClick={salvar}>Salvar categoria</Btn></div>
+      </div>
+    </div>
+  );
 }
 
 function TelaAdminCategorias({ token }) {
@@ -2161,7 +2207,7 @@ function TelaAdminCategorias({ token }) {
     const ehPadrao = !cat.usuario_id;
     const inativa = cat.ativa === false;
     const nivel = cat.nivel || (cat.categoria_pai_id ? 'DETALHADA' : 'MACRO');
-    return <tr key={cat.id} style={{ opacity: inativa ? 0.5 : 1 }}><td style={{ padding: '10px', paddingLeft: cat.categoria_pai_id ? '32px' : '12px' }}>{cat.categoria_pai_id ? '── ' : ''}{cat.emoji || ''} {cat.nome}{inativa && <span style={{ marginLeft: '8px', fontSize: '11px', color: '#ef4444' }}>inativa</span>}</td><td style={{ padding: '10px' }}><span style={{ padding: '2px 8px', borderRadius: '999px', fontSize: '11px', fontWeight: 600, background: cat.tipo === 'RECEITA' ? '#dcfce7' : '#fee2e2', color: cat.tipo === 'RECEITA' ? '#166534' : '#991b1b' }}>{cat.tipo}</span></td><td style={{ padding: '10px', color: '#64748b' }}>{nivel === 'MACRO' ? 'Macro' : 'Detalhada'}</td><td style={{ padding: '10px' }}><span style={{ fontSize: '11px', color: ehPadrao ? '#94a3b8' : '#3b82f6' }}>{ehPadrao ? 'Padrão' : 'Personalizada'}</span></td><td style={{ padding: '10px', display: 'flex', gap: '6px', flexWrap: 'wrap' }}>{!ehPadrao && !inativa && <Btn size="sm" variant="secondary" onClick={() => { setCategoriaEditando(cat); setModalAberto(true); }}>✏️ Editar</Btn>}<Btn size="sm" variant="ghost" onClick={() => alternarAtiva(cat)}>{inativa ? '✅ Reativar' : '🚫 Desativar'}</Btn>{!ehPadrao && <Btn size="sm" variant="danger" onClick={() => excluirCategoria(cat)}>🗑️ Excluir</Btn>}</td></tr>;
+    return <tr key={cat.id} style={{ opacity: inativa ? 0.5 : 1 }}><td style={{ padding: '10px', paddingLeft: cat.categoria_pai_id ? '32px' : '12px' }}>{cat.categoria_pai_id ? '── ' : ''}{cat.emoji || ''} {cat.nome}{inativa && <span style={{ marginLeft: '8px', fontSize: '11px', color: '#ef4444' }}>inativa</span>}</td><td style={{ padding: '10px' }}><span style={{ padding: '2px 8px', borderRadius: '999px', fontSize: '11px', fontWeight: 600, background: cat.tipo === 'RECEITA' ? '#dcfce7' : '#fee2e2', color: cat.tipo === 'RECEITA' ? '#166534' : '#991b1b' }}>{cat.tipo}</span></td><td style={{ padding: '10px', color: '#64748b' }}>{nivel === 'MACRO' ? 'Macro' : 'Detalhada'}</td><td style={{ padding: '10px' }}><span style={{ fontSize: '11px', color: ehPadrao ? '#94a3b8' : '#3b82f6' }}>{ehPadrao ? 'Padrão' : 'Personalizada'}</span></td><td style={{ padding: '10px', display: 'flex', gap: '6px', flexWrap: 'wrap' }}>{!inativa && <Btn size="sm" variant="secondary" onClick={() => { setCategoriaEditando(cat); setModalAberto(true); }}>✏️ Editar</Btn>}<Btn size="sm" variant="ghost" onClick={() => alternarAtiva(cat)}>{inativa ? '✅ Reativar' : '🚫 Desativar'}</Btn>{!ehPadrao && <Btn size="sm" variant="danger" onClick={() => excluirCategoria(cat)}>🗑️ Excluir</Btn>}</td></tr>;
   };
   return <section><div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap', marginBottom: '16px' }}><div><h3 style={{ margin: '0 0 4px' }}>🏷️ Gerenciar Categorias</h3><p style={{ margin: 0, color: '#64748b' }}>Cadastre categorias macro e detalhadas para transações e planejamento. Ao desativar, o histórico continua categorizado; a categoria só deixa de aparecer em novas seleções.</p></div><div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}><Btn variant="primary" onClick={() => abrirNova('MACRO')}>+ Nova categoria macro</Btn><Btn variant="secondary" onClick={() => abrirNova('DETALHADA')}>+ Nova subcategoria</Btn></div></div><div className="filter-card"><div className="filter-grid"><label>Tipo<select value={filtros.tipo} onChange={(e) => setFiltros({ ...filtros, tipo: e.target.value })}><option value="TODAS">Todas</option><option value="DESPESA">Despesa</option><option value="RECEITA">Receita</option></select></label><label>Nível<select value={filtros.nivel} onChange={(e) => setFiltros({ ...filtros, nivel: e.target.value })}><option value="TODOS">Todas</option><option value="MACRO">Macro</option><option value="DETALHADA">Detalhada</option></select></label><label>Origem<select value={filtros.origem} onChange={(e) => setFiltros({ ...filtros, origem: e.target.value })}><option value="TODAS">Todas</option><option value="PADRAO">Padrão</option><option value="PERSONALIZADA">Personalizadas</option></select></label><label style={{ alignSelf: 'center' }}><span><input type="checkbox" checked={filtros.inativas} onChange={(e) => setFiltros({ ...filtros, inativas: e.target.checked })} /> Mostrar inativas</span></label></div></div><div style={{ overflowX: 'auto' }}><table style={{ width: '100%', borderCollapse: 'collapse' }}><thead><tr><th style={{ padding: '10px', textAlign: 'left' }}>Categoria</th><th style={{ padding: '10px', textAlign: 'left' }}>Tipo</th><th style={{ padding: '10px', textAlign: 'left' }}>Nível</th><th style={{ padding: '10px', textAlign: 'left' }}>Origem</th><th style={{ padding: '10px', textAlign: 'left' }}>Ações</th></tr></thead><tbody>{linhasCategoriasAdmin.map(renderLinha)}</tbody></table></div><ModalCategoria aberta={modalAberto} categoria={categoriaEditando} categorias={categorias} onFechar={() => { setModalAberto(false); setCategoriaEditando(null); }} onSalvar={salvarCategoria} /></section>;
 }
@@ -2594,7 +2640,7 @@ function Dashboard({ usuario, token, onLogout }) {
         {modo === 'conferencia-saldos' && <TelaConferenciaSaldos contas={contas} token={token} onVoltar={() => setModo('home')} onAtualizarContas={carregarContas} />}
         {modo === 'provisoes' && <TelaProvisoes contas={contas} token={token} onVoltar={() => setModo('home')} />}
         {modo === 'planejamento' && <TelaPlanejamentoMensal token={token} onVoltar={() => setModo('home')} />}
-        {modo === 'transacoes' && <TelaTransacoes contaInicial={contaSelecionada} contas={contas} token={token} onVoltar={() => setModo('home')} onAtualizarContas={carregarContas} />}
+        {modo === 'transacoes' && <TelaTransacoes contaInicial={contaSelecionada} contas={contas} token={token} onVoltar={() => setModo('home')} onAtualizarContas={carregarContas} onImportar={() => setModo('importar')} />}
       </div>
       </div>
     </div>
@@ -3172,7 +3218,7 @@ function TelaProvisoes({ contas = [], token, onVoltar }) {
 // TELA DE TRANSAÇÕES
 // ============================================================================
 
-function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualizarContas }) {
+function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualizarContas, onImportar }) {
   const [transacoes, setTransacoes] = useState([]);
   const [categorias, setCategorias] = useState([]);
   const [carregando, setCarregando] = useState(true);
@@ -3356,9 +3402,6 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
     tx.eh_transferencia_interna ? 'Transferência interna' : '',
     tx.conciliacao_id ? 'Conciliada' : '',
   ].filter(Boolean).join(' ') || '-';
-  const totalTransacoesPaginacao = Number(paginacao.total || transacoesOrdenadas.length || 0);
-  const inicioPaginacao = totalTransacoesPaginacao === 0 ? 0 : ((Number(paginacao.pagina || pagina) - 1) * Number(paginacao.limite || limite)) + 1;
-  const fimPaginacao = totalTransacoesPaginacao === 0 ? 0 : Math.min(totalTransacoesPaginacao, inicioPaginacao + transacoesOrdenadas.length - 1);
   const contaSelecionadaFiltro = filtros.conta !== 'todas' ? contas.find((conta) => conta.id === filtros.conta) : null;
   const atualizarFiltroTransacoes = (patch) => { setFiltros((atuais) => ({ ...atuais, ...patch })); setPagina(1); };
   const alterarDataInicialTransacoes = (valor) => { setDataInicial(valor); setPagina(1); };
@@ -3485,7 +3528,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
   };
 
   const rotuloOrdenacao = (label, field) => `${label}${sortField === field ? (sortDirection === 'asc' ? ' ▲' : ' ▼') : ''}`;
-  const estiloCabecalhoOrdenavel = (align = 'left') => ({ padding: '12px', textAlign: align, cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap' });
+  const estiloCabecalhoOrdenavel = (align = 'left') => ({ padding: '8px 6px', textAlign: align, cursor: 'pointer', userSelect: 'none', lineHeight: 1.2 });
   const textoSaldoAcumulado = (tx) => {
     if (!tx.saldo_acumulado_configurado) return 'Não configurado';
     return Number.isFinite(tx.saldo_acumulado_calculado) ? formatarMoeda(tx.saldo_acumulado_calculado) : '-';
@@ -3799,6 +3842,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
             </div>
             <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
               {resumoBase && <span style={{ color: '#64748b', fontSize: '13px' }}>Início da base: {formatarData(resumoBase.data_inicio || resumoBase.dataInicio || resumoBase.primeira_data || resumoBase.primeiraData)}</span>}
+              <Btn variant="primary" size="sm" onClick={onImportar}>📥 Importar dados / conciliar</Btn>
               {contaSelecionadaFiltro && primeiraTransacaoBase && <Btn variant="ghost" size="sm" onClick={abrirModalSaldoInicial}>Configurar saldo inicial</Btn>}
               <div className="more-actions">
                 <Btn variant="secondary" size="sm" onClick={() => setMaisAcoesAberto((aberto) => !aberto)}>⬇️ Exportar Excel ▾</Btn>
@@ -3863,48 +3907,61 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
             <h2>Nenhuma transação encontrada</h2>
           </div>
         ) : (
-          <div ref={tabelaRef} className="table-scroll" style={{ background: 'white', borderRadius: '12px', overflowX: 'auto', boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }}>
-            <table style={{ width: '100%', minWidth: '1240px', borderCollapse: 'collapse' }}>
+          <div ref={tabelaRef} className="table-scroll" style={{ background: 'white', borderRadius: '12px', overflowX: 'hidden', boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }}>
+            <table className="transactions-table">
+              <colgroup>
+                <col style={{ width: '3%' }} />
+                <col style={{ width: '7%' }} />
+                <col style={{ width: '8%' }} />
+                <col style={{ width: '20%' }} />
+                <col style={{ width: '8%' }} />
+                <col style={{ width: '9%' }} />
+                <col style={{ width: '6%' }} />
+                <col style={{ width: '10%' }} />
+                <col style={{ width: '10%' }} />
+                <col style={{ width: '8%' }} />
+                <col style={{ width: '11%' }} />
+              </colgroup>
               <thead>
                 <tr style={{ background: '#f9fafb' }}>
-                  <th style={{ padding: '12px', textAlign: 'center' }}>
+                  <th style={{ textAlign: 'center' }}>
                     <input type="checkbox" checked={todasFiltradasSelecionadas} onChange={alternarTodasFiltradas} />
                   </th>
                   <th onClick={() => handleSort('data')} style={estiloCabecalhoOrdenavel('left')}>{rotuloOrdenacao('Data', 'data')}</th>
                   <th onClick={() => handleSort('conta')} style={estiloCabecalhoOrdenavel('left')}>{rotuloOrdenacao('Conta', 'conta')}</th>
                   <th onClick={() => handleSort('descricao')} style={estiloCabecalhoOrdenavel('left')}>{rotuloOrdenacao('Descrição', 'descricao')}</th>
                   <th onClick={() => handleSort('valor')} style={estiloCabecalhoOrdenavel('right')}>{rotuloOrdenacao('Valor', 'valor')}</th>
-                  <th style={{ padding: '12px', textAlign: 'right', whiteSpace: 'nowrap' }}>Saldo acumulado</th>
+                  <th style={{ textAlign: 'right' }}>Saldo acum.</th>
                   <th onClick={() => handleSort('tipo')} style={estiloCabecalhoOrdenavel('left')}>{rotuloOrdenacao('Tipo', 'tipo')}</th>
                   <th onClick={() => handleSort('categoriaMacro')} style={estiloCabecalhoOrdenavel('left')}>{rotuloOrdenacao('Categoria macro', 'categoriaMacro')}</th>
                   <th onClick={() => handleSort('categoriaDetalhada')} style={estiloCabecalhoOrdenavel('left')}>{rotuloOrdenacao('Categoria detalhada', 'categoriaDetalhada')}</th>
                   <th onClick={() => handleSort('status')} style={estiloCabecalhoOrdenavel('left')}>{rotuloOrdenacao('Status/flags', 'status')}</th>
-                  <th style={{ padding: '12px', textAlign: 'center' }}>Ações</th>
+                  <th style={{ textAlign: 'center' }}>Ações</th>
                 </tr>
               </thead>
               <tbody>
                 {transacoesOrdenadas.map((tx) => (
                   <tr key={tx.id} style={{ borderTop: '1px solid #e5e7eb', background: destacarInicioBase && primeiraTransacaoBase?.id === tx.id ? '#fef3c7' : 'white' }}>
-                    <td style={{ padding: '12px', textAlign: 'center' }}>
+                    <td style={{ textAlign: 'center' }}>
                       <input type="checkbox" checked={selecionadas.includes(tx.id)} onChange={() => alternarSelecionada(tx.id)} />
                     </td>
-                    <td style={{ padding: '12px' }}>{formatarData(tx.data)}</td>
-                    <td style={{ padding: '12px', color: '#475569', fontSize: '13px' }}>{tx.conta_nome || 'Conta'}</td>
-                    <td style={{ padding: '12px' }}>{tx.descricao}</td>
-                    <td style={{ padding: '12px', textAlign: 'right', color: tx.tipo === 'CREDITO' ? '#10b981' : '#ef4444', fontWeight: 'bold' }}>
+                    <td className="tx-cell-compact">{formatarData(tx.data)}</td>
+                    <td style={{ color: '#475569', fontSize: '12px' }}>{tx.conta_nome || 'Conta'}</td>
+                    <td className="tx-description">{tx.descricao}</td>
+                    <td className="tx-cell-compact" style={{ textAlign: 'right', color: tx.tipo === 'CREDITO' ? '#10b981' : '#ef4444', fontWeight: 'bold' }}>
                       {tx.tipo === 'CREDITO' ? '+' : '-'}{formatarMoeda(tx.valor)}
                     </td>
-                    <td style={{ padding: '12px', textAlign: 'right', color: Number(tx.saldo_acumulado_calculado || 0) >= 0 ? '#0f766e' : '#dc2626', fontWeight: Number.isFinite(tx.saldo_acumulado_calculado) ? 'bold' : 'normal', fontSize: tx.saldo_acumulado_configurado ? '14px' : '12px' }}>
+                    <td className="tx-cell-compact" style={{ textAlign: 'right', color: Number(tx.saldo_acumulado_calculado || 0) >= 0 ? '#0f766e' : '#dc2626', fontWeight: Number.isFinite(tx.saldo_acumulado_calculado) ? 'bold' : 'normal', fontSize: tx.saldo_acumulado_configurado ? '13px' : '12px' }}>
                       {textoSaldoAcumulado(tx)}
                     </td>
-                    <td style={{ padding: '12px' }}>{tx.tipo === 'CREDITO' ? 'Crédito' : 'Débito'}</td>
-                    <td style={{ padding: '12px' }}>
+                    <td>{tx.tipo === 'CREDITO' ? 'Créd.' : 'Déb.'}</td>
+                    <td>
                       <span style={estiloBadgeCategoria(tx.categoria_origem)}>{nomeCategoriaMacro(tx)}{tx.categoria_origem === 'AUTO' ? ' • auto' : ''}</span>
                     </td>
-                    <td style={{ padding: '12px' }}>
+                    <td>
                       <span style={estiloBadgeCategoria(tx.categoria_origem)}>{nomeCategoriaDetalhada(tx)}</span>
                     </td>
-                    <td style={{ padding: '12px' }}>
+                    <td>
                       <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
                         {tx.eh_transferencia_interna && (
                           <span style={{ background: '#ccfbf1', color: '#0f766e', padding: '3px 7px', borderRadius: '999px', fontSize: '11px', fontWeight: 'bold' }}>
@@ -3919,8 +3976,8 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
                         {!tx.eh_transferencia_interna && !tx.conciliacao_id && <span style={{ color: '#9ca3af' }}>-</span>}
                       </div>
                     </td>
-                    <td style={{ padding: '12px', textAlign: 'center' }}>
-                      <div style={{ display: 'flex', justifyContent: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                    <td style={{ textAlign: 'center' }}>
+                      <div className="tx-actions">
                         <Btn variant="secondary" size="sm" onClick={() => abrirModalIndividual(tx)}>Categorizar</Btn>
                         {tx.eh_transferencia_interna && (
                           <Btn variant="secondary" size="sm" onClick={() => desmarcarTransferenciaInterna(tx)}>Desmarcar transferência</Btn>
