@@ -4040,6 +4040,95 @@ app.patch('/api/transacoes/categorizar-lote', verificarToken, async (req, res) =
   }
 });
 
+app.patch('/api/transacoes/:id', verificarToken, async (req, res) => {
+  try {
+    const {
+      data,
+      descricao,
+      valor,
+      tipo,
+      conta_id,
+      contaId,
+      nota_usuario = '',
+      categoriaId,
+      categoriaMacroId,
+      categoriaDetalhadaId,
+      criarRegra = false,
+      termoRegra,
+    } = req.body || {};
+    const dataFinal = normalizarDataImportacao(data);
+    const descricaoFinal = String(descricao || '').trim();
+    const valorParse = parseValorMonetario(valor);
+    const valorFinal = Math.abs(Number(valorParse.valor));
+    const tipoFinal = String(tipo || '').trim().toUpperCase();
+    const contaFinal = conta_id || contaId;
+
+    if (!dataFinal) return res.status(400).json({ erro: 'Data inválida.' });
+    if (!descricaoFinal) return res.status(400).json({ erro: 'Descrição é obrigatória.' });
+    if (valorParse.erro || !Number.isFinite(valorFinal) || valorFinal <= 0) return res.status(400).json({ erro: valorParse.erro || 'Valor inválido.' });
+    if (!['CREDITO', 'DEBITO'].includes(tipoFinal)) return res.status(400).json({ erro: 'Tipo inválido.' });
+    if (!contaFinal) return res.status(400).json({ erro: 'Conta é obrigatória.' });
+
+    const conta = await pool.query('SELECT id FROM contas WHERE id = $1 AND usuario_id = $2 LIMIT 1', [contaFinal, req.usuario.usuario_id]);
+    if (conta.rows.length === 0) return res.status(404).json({ erro: 'Conta não encontrada para este usuário.' });
+
+    const atual = await pool.query(
+      `SELECT t.*
+       FROM transacoes t
+       JOIN contas c ON c.id = t.conta_id
+       WHERE t.id = $1 AND c.usuario_id = $2 AND t.deletado_em IS NULL
+       LIMIT 1`,
+      [req.params.id, req.usuario.usuario_id]
+    );
+    if (atual.rows.length === 0) return res.status(404).json({ erro: 'Transação não encontrada para este usuário.' });
+
+    const categorias = await validarParCategoriasDoUsuario(req.usuario.usuario_id, categoriaMacroId || categoriaId, categoriaDetalhadaId);
+    const hashTransacao = gerarHashTransacao({ data: dataFinal, descricao: descricaoFinal, valor: valorFinal, tipo: tipoFinal }, contaFinal);
+
+    let regra = null;
+    let atualizadasPorRegra = 0;
+    if (criarRegra) {
+      regra = await criarOuAtualizarRegraCategorizacao(req.usuario.usuario_id, categorias.categoriaId, termoRegra || descricaoFinal);
+      atualizadasPorRegra = await aplicarRegraEmTransacoesSemCategoria(req.usuario.usuario_id, regra);
+    }
+
+    const result = await pool.query(
+      `UPDATE transacoes t
+       SET conta_id = $1,
+           data = $2,
+           descricao = $3,
+           valor = $4,
+           tipo = $5,
+           nota_usuario = $6,
+           categoria_id = $7,
+           categoria_macro_id = $8,
+           categoria_detalhada_id = $9,
+           categoria_origem = $10,
+           regra_categorizacao_id = $11,
+           hash_transacao = $12,
+           atualizado_em = NOW()
+       FROM contas c
+       WHERE t.id = $13
+         AND c.id = t.conta_id
+         AND c.usuario_id = $14
+         AND t.deletado_em IS NULL
+       RETURNING t.*`,
+      [contaFinal, dataFinal, descricaoFinal, valorFinal, tipoFinal, nota_usuario || null, categorias.categoriaId, categorias.macroId, categorias.detalhadaId, 'MANUAL', regra?.id || null, hashTransacao, req.params.id, req.usuario.usuario_id]
+    );
+
+    res.json({
+      sucesso: true,
+      atualizadas: result.rows.length,
+      atualizadasPorRegra,
+      regra,
+      transacao: (await montarRespostaTransacoes(result.rows))[0],
+    });
+  } catch (error) {
+    if (error.code === '23505') return res.status(409).json({ erro: 'Já existe uma transação igual para esta conta, data, descrição, valor e tipo.' });
+    res.status(500).json({ erro: error.message });
+  }
+});
+
 app.patch('/api/transacoes/:id/categorizar', verificarToken, async (req, res) => {
   try {
     const { categoriaId, categoriaMacroId, categoriaDetalhadaId, criarRegra = false, termoRegra } = req.body;

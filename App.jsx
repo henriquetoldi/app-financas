@@ -3230,6 +3230,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
   const [dataFinal, setDataFinal] = useState('');
   const [categoriaMacroEscolhida, setCategoriaMacroEscolhida] = useState('');
   const [categoriaDetalhadaEscolhida, setCategoriaDetalhadaEscolhida] = useState('');
+  const [formEdicaoTransacao, setFormEdicaoTransacao] = useState({ data: '', descricao: '', valor: '', tipo: 'DEBITO', conta_id: '', nota_usuario: '' });
   const [criarRegra, setCriarRegra] = useState(false);
   const [termoRegra, setTermoRegra] = useState('');
   const [salvandoCategoria, setSalvandoCategoria] = useState(false);
@@ -3599,6 +3600,14 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
 
   const abrirModalIndividual = (tx) => {
     setTransacaoSelecionada(tx);
+    setFormEdicaoTransacao({
+      data: normalizarDataFiltro(tx.data),
+      descricao: tx.descricao || '',
+      valor: String(Number(tx.valor || 0).toFixed(2)).replace('.', ','),
+      tipo: tx.tipo || 'DEBITO',
+      conta_id: tx.conta_id || '',
+      nota_usuario: tx.nota_usuario || '',
+    });
     setCategoriaMacroEscolhida(tx.categoria_macro_id || (tx.categoria_detalhada_id ? '' : tx.categoria_id) || '');
     setCategoriaDetalhadaEscolhida(tx.categoria_detalhada_id || '');
     setCriarRegra(false);
@@ -3616,6 +3625,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
     setTransacaoSelecionada(null);
     setCategoriaMacroEscolhida('');
     setCategoriaDetalhadaEscolhida('');
+    setFormEdicaoTransacao({ data: '', descricao: '', valor: '', tipo: 'DEBITO', conta_id: '', nota_usuario: '' });
     setCriarRegra(false);
     setTermoRegra(sugerirTermoRegra(filtros.busca || primeira?.descricao || ''));
     setCategoriaModalAberta(true);
@@ -3652,7 +3662,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
       };
 
       const response = transacaoSelecionada
-        ? await axios.patch(`${API_URL}/transacoes/${transacaoSelecionada.id}/categorizar`, payload, { headers: authHeaders })
+        ? await axios.patch(`${API_URL}/transacoes/${transacaoSelecionada.id}`, { ...payload, ...formEdicaoTransacao }, { headers: authHeaders })
         : await axios.patch(`${API_URL}/transacoes/categorizar-lote`, { ...payload, transacaoIds: selecionadas }, { headers: authHeaders });
 
       const atualizadas = response.data.atualizadas || 0;
@@ -3978,7 +3988,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
                     </td>
                     <td style={{ textAlign: 'center' }}>
                       <div className="tx-actions">
-                        <Btn variant="secondary" size="sm" onClick={() => abrirModalIndividual(tx)}>Categorizar</Btn>
+                        <Btn variant="secondary" size="sm" onClick={() => abrirModalIndividual(tx)}>Editar</Btn>
                         {tx.eh_transferencia_interna && (
                           <Btn variant="secondary" size="sm" onClick={() => desmarcarTransferenciaInterna(tx)}>Desmarcar transferência</Btn>
                         )}
@@ -4062,9 +4072,44 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
 
       {categoriaModalAberta && (
         <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
-          <div style={{ background: 'white', borderRadius: '12px', padding: '30px', maxWidth: '520px', width: '90%' }}>
-            <h3 style={{ marginTop: 0 }}>{transacaoSelecionada ? `Categorizar: ${transacaoSelecionada.descricao.substring(0, 45)}` : `Categorizar ${selecionadas.length} transação(ões)`}</h3>
+          <div style={{ background: 'white', borderRadius: '12px', padding: '30px', maxWidth: '680px', width: '90%', maxHeight: '90vh', overflowY: 'auto' }}>
+            <h3 style={{ marginTop: 0 }}>{transacaoSelecionada ? `Editar registro: ${transacaoSelecionada.descricao.substring(0, 45)}` : `Categorizar ${selecionadas.length} transação(ões)`}</h3>
             {transacaoSelecionada && <p style={{ color: '#666', marginBottom: '20px' }}>{formatarMoeda(transacaoSelecionada.valor)}</p>}
+
+            {transacaoSelecionada && (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '12px', marginBottom: '18px' }}>
+                <label style={{ display: 'grid', gap: '6px', fontSize: '14px' }}>
+                  Data
+                  <input type="date" value={formEdicaoTransacao.data} onChange={(event) => setFormEdicaoTransacao({ ...formEdicaoTransacao, data: event.target.value })} style={{ padding: '12px', borderRadius: '8px', border: '1px solid #d1d5db' }} />
+                </label>
+                <label style={{ display: 'grid', gap: '6px', fontSize: '14px' }}>
+                  Conta
+                  <select value={formEdicaoTransacao.conta_id} onChange={(event) => setFormEdicaoTransacao({ ...formEdicaoTransacao, conta_id: event.target.value })} style={{ padding: '12px', borderRadius: '8px', border: '1px solid #d1d5db' }}>
+                    <option value="">Selecionar conta</option>
+                    {contas.map((conta) => <option key={conta.id} value={conta.id}>{conta.nome}</option>)}
+                  </select>
+                </label>
+                <label style={{ display: 'grid', gap: '6px', fontSize: '14px' }}>
+                  Tipo
+                  <select value={formEdicaoTransacao.tipo} onChange={(event) => setFormEdicaoTransacao({ ...formEdicaoTransacao, tipo: event.target.value })} style={{ padding: '12px', borderRadius: '8px', border: '1px solid #d1d5db' }}>
+                    <option value="DEBITO">Débito</option>
+                    <option value="CREDITO">Crédito</option>
+                  </select>
+                </label>
+                <label style={{ display: 'grid', gap: '6px', fontSize: '14px' }}>
+                  Valor
+                  <input value={formEdicaoTransacao.valor} onChange={(event) => setFormEdicaoTransacao({ ...formEdicaoTransacao, valor: event.target.value })} placeholder="19,66" style={{ padding: '12px', borderRadius: '8px', border: '1px solid #d1d5db' }} />
+                </label>
+                <label style={{ display: 'grid', gap: '6px', fontSize: '14px', gridColumn: '1 / -1' }}>
+                  Descrição
+                  <textarea value={formEdicaoTransacao.descricao} onChange={(event) => setFormEdicaoTransacao({ ...formEdicaoTransacao, descricao: event.target.value })} rows={3} style={{ padding: '12px', borderRadius: '8px', border: '1px solid #d1d5db' }} />
+                </label>
+                <label style={{ display: 'grid', gap: '6px', fontSize: '14px', gridColumn: '1 / -1' }}>
+                  Observação
+                  <textarea value={formEdicaoTransacao.nota_usuario} onChange={(event) => setFormEdicaoTransacao({ ...formEdicaoTransacao, nota_usuario: event.target.value })} rows={2} placeholder="Anotação opcional sobre este registro" style={{ padding: '12px', borderRadius: '8px', border: '1px solid #d1d5db' }} />
+                </label>
+              </div>
+            )}
 
             <label style={{ display: 'grid', gap: '6px', marginBottom: '14px', fontSize: '14px' }}>
               Categoria macro
@@ -4097,7 +4142,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
             )}
 
             <div style={{ display: 'flex', gap: '10px' }}>
-              <Btn variant="primary" onClick={handleCategorizar} disabled={salvandoCategoria} style={{ flex: 1 }}>{salvandoCategoria ? 'Salvando...' : 'Salvar categorização'}</Btn>
+              <Btn variant="primary" onClick={handleCategorizar} disabled={salvandoCategoria} style={{ flex: 1 }}>{salvandoCategoria ? 'Salvando...' : (transacaoSelecionada ? 'Salvar registro' : 'Salvar categorização')}</Btn>
               <Btn variant="secondary" onClick={fecharModal} disabled={salvandoCategoria} style={{ flex: 1 }}>Cancelar</Btn>
             </div>
           </div>
