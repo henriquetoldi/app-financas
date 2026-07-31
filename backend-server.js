@@ -4784,6 +4784,64 @@ app.get('/api/health', (req, res) => {
 });
 
 // ============================================================================
+// AJUSTE ADMIN: reclassificar movimentações internas que caíram em "Outros" — temporário
+// GET /api/admin/ajuste-transferencias?chave=CHAVE&acao=listar|aplicar
+// ============================================================================
+const TI_CHAVE = process.env.TI_CHAVE || '4yj53X4rmKPGZ8E2QCJTMUGdrBZZkidI';
+const TI_EMAIL = process.env.MIGRACAO_EMAIL || 'henriquetoldi@gmail.com';
+
+function ehMovimentacaoInterna(descricao) {
+  const s = normalizarDescricaoCategorizacao(descricao);
+  return /VALOR ADICIONADO NA CONTA POR CARTAO|PAGAMENTO DE FATURA|FATURA PICPAY|PICPAY INSTITUICAO DE PAGAMENTO|PIX CARTAO DE CREDITO|PAGAMENTO REALIZADO FATURA/.test(s);
+}
+
+app.get('/api/admin/ajuste-transferencias', async (req, res) => {
+  if (req.query.chave !== TI_CHAVE) return res.status(403).json({ erro: 'Chave inválida.' });
+  const acao = req.query.acao || 'listar';
+  try {
+    const u = await pool.query('SELECT id FROM usuarios WHERE email = $1', [TI_EMAIL]);
+    if (!u.rows[0]) return res.status(404).json({ erro: 'Usuário não encontrado.' });
+    const usuarioId = u.rows[0].id;
+
+    const alvo = await pool.query(
+      `SELECT t.id, t.descricao, t.tipo FROM transacoes t JOIN contas c ON c.id = t.conta_id
+       LEFT JOIN categorias cm ON cm.id = t.categoria_macro_id
+       WHERE c.usuario_id = $1 AND t.deletado_em IS NULL
+         AND (cm.nome = 'Outros' OR t.categoria_macro_id IS NULL)`,
+      [usuarioId]
+    );
+    const candidatos = alvo.rows.filter(t => ehMovimentacaoInterna(t.descricao));
+
+    if (acao === 'listar') {
+      const amostra = candidatos.slice(0, 20).map(t => ({ descricao: t.descricao, tipo: t.tipo }));
+      return res.json({ candidatos: candidatos.length, amostra });
+    }
+    if (acao === 'aplicar') {
+      const client = await pool.connect();
+      let entrada = 0, saida = 0;
+      try {
+        await client.query('BEGIN');
+        for (const t of candidatos) {
+          const macro = t.tipo === 'CREDITO' ? 'Transferência Interna - Entrada' : 'Transferência Interna - Saída';
+          const cats = await resolverCategoriasImportacao(usuarioId, { categoria_macro: macro, categoria_detalhada: '', tipo: t.tipo }, { criar: true });
+          await client.query(
+            `UPDATE transacoes SET categoria_id = $1, categoria_macro_id = $2, categoria_detalhada_id = $3,
+             categoria_origem = 'AJUSTE_TI', atualizado_em = NOW() WHERE id = $4`,
+            [cats.categoriaId, cats.categoriaMacroId, cats.categoriaDetalhadaId, t.id]
+          );
+          if (t.tipo === 'CREDITO') entrada++; else saida++;
+        }
+        await client.query('COMMIT');
+      } catch (e) { await client.query('ROLLBACK'); client.release(); return res.status(500).json({ erro: 'ROLLBACK', detalhes: e.message }); }
+      client.release();
+      return res.json({ sucesso: true, entrada, saida, total: entrada + saida, mensagem: 'Movimentações internas reclassificadas (origem AJUSTE_TI, reversível).' });
+    }
+    return res.status(400).json({ erro: 'acao inválida.' });
+  } catch (e) { res.status(500).json({ erro: e.message }); }
+});
+
+
+// ============================================================================
 // INICIAR SERVER
 // ============================================================================
 
