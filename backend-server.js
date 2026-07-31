@@ -4784,11 +4784,49 @@ app.get('/api/health', (req, res) => {
 });
 
 // ============================================================================
-// CATEGORIZAÇÃO ADMIN (listar / aplicar por mapa de estabelecimento) — temporário
-// GET /api/admin/categorizar?chave=CHAVE&acao=listar|aplicar
+// CATEGORIZAÇÃO ADMIN por palavra-chave (heurística) — temporário
+// GET /api/admin/categorizar?chave=CHAVE&acao=listar|aplicar[&somenteContagem=1]
 // ============================================================================
-const CAT_CHAVE = process.env.CAT_CHAVE || '9WUZp50_99Hub_qbhQRiAzJn1otD3oKz';
+const CAT_CHAVE = process.env.CAT_CHAVE || 'l_YcjTcmlxjY4hWWFzavLD39tKgxlN7c';
 const CAT_EMAIL = process.env.MIGRACAO_EMAIL || 'henriquetoldi@gmail.com';
+
+function classificarHeuristica(descricao, tipo) {
+  const s = normalizarDescricaoCategorizacao(descricao); // MAIUSCULO, sem acentos/pontuacao
+  const has = (re) => re.test(s);
+  // ordem: mais especifico primeiro
+  if (has(/\bUBER\b|99APP|\b99 NUPAY\b|\b99 \b/)) return { macro: 'Transporte', detalhada: 'Uber / 99' };
+  if (has(/POSTO|COMBUSTIVE|GASOLINA|\bSHELL\b|IPIRANGA|XULIZ|BARATAO|PETROBRAS|PIT STOP|SHELL BOX/)) return { macro: 'Transporte', detalhada: 'Gasolina' };
+  if (has(/ESTACIONAMENT|GREEN VIX/)) return { macro: 'Transporte', detalhada: null };
+  if (has(/DROGA|FARMACIA|DROGASIL|DROGARIA|PACHECO|PAGUE MENOS|\bRAIA\b/)) return { macro: 'Saúde', detalhada: 'Farmácia / Remédios' };
+  if (has(/ACADEMIA|SMARTFIT|SMART FIT/)) return { macro: 'Saúde', detalhada: null };
+  if (has(/HOSPITAL|CLINICA|LABORATORIO|ODONTO|DENTAL/)) return { macro: 'Saúde', detalhada: null };
+  if (has(/CONVENIENCIA|CONVENI\b|FERRARI CONVENIENCIA|CONVENTO CONVENIENCIA/)) return { macro: 'Alimentação', detalhada: 'Conveniência' };
+  if (has(/PADARIA|CONFEITARIA|\bPAO\b/)) return { macro: 'Alimentação', detalhada: 'Padaria' };
+  if (has(/SUPERMERCAD|ATACAD|HORTOMERCADO|HORTIFRUT|SUPERGIRO|BRSUPERMERCADOS|BR SUPERMERCADOS|ASSAI|CARREFOUR|\bEXTRA\b|EPA |IDM ALIMENTOS|REALMAR DISTRIBUIDORA|EMPORIO MAIA|ESPACO HORTENCIA|MEAIPE COMERCIO|ILHA COMERCIO DE ALIM/)) return { macro: 'Alimentação', detalhada: 'Supermercado' };
+  if (has(/\bIFD\b|IFOOD|IFD |ZE DELIVERY|HOTDOG|HOT DOG|SUPERHOTDOG|LANCHE|GIRAFFAS|MCDONALDS|SUBWAY|\bFAST\b|GRILL|FRANGUINHO|MANIA FOOD|BENEVITA|ACET DELIVERY|ASIA ALIMENTOS|FAST GRILL/)) return { macro: 'Alimentação', detalhada: 'Fast Food' };
+  if (has(/RESTAURANTE|CANTINA|CAFETERIA|CHURRASCARIA|ESPETERIA|PIZZARIA|SABOR|\bACAI\b|EMPORIO|DELICIAS|COMIDA|REYEL|GASTRO|GOSTINHO MINEIRO|COCO DOSSI|DIDOMDOM|40 SABORES|SABORNOFOGO|RESTSABORFOGO|GRILL MANIA|MINEIRINHOS|CALIENTE|OSENHORDEFUMA|SANTA CLARA MATHIAS|TREM BOM|BOI DE|M D RESTAURANTE|RUSSOS PIZZARIA|RECANTO GASTRO|CB VITORIA COMERCIO|BAR DE|MTV BAR/)) return { macro: 'Alimentação', detalhada: 'Restaurante' };
+  if (has(/CERVEJA|CERVEJARIA|HAPPY|BALADA|MISTURAS BAR|\bBAR\b|BOTECO|TABACARIA|BARRACA|SUMUP|CANTINA DO HONOFRE|HOT TAPE|CAPPTA/)) return { macro: 'Diversão', detalhada: 'Happy Hour / Balada' };
+  if (has(/CINEMA|CINEMARK|TEATRO|CASA BARBIXAS|CASA .*HUMOR|SYMPLA|EDUZZ|\bSHOW\b/)) return { macro: 'Diversão', detalhada: 'Cinema / Teatro' };
+  if (has(/HOTEL|HOTEIS|POUSADA|AIRBNB|MORUMBI HOTEIS/)) return { macro: 'Diversão', detalhada: 'Estadia - Viagem' };
+  if (has(/GOL LINHAS|LATAM|AZUL LINHAS|PASSAGEN|RODOVIARIA|VIACAO/)) return { macro: 'Diversão', detalhada: 'Passagens - Viagem' };
+  if (has(/RENNER|RIACHUELO|PA CALCADOS|CALCADOS|C J COMERCIO DE ROUPAS|REAL MODA|LOJAS RIACHUELO|\bMODA\b|MODAMONKEY/)) return { macro: 'Compras / Shopping', detalhada: 'Roupas / Sapatos / Acessórios' };
+  if (has(/SHOPEE|MERCADOLIVRE|MERCADO LIVRE|MAGAZINE|KALUNGA|\bOTICA\b|OBOTICARIO|BOTICARIO|NATURA|\bPETZ\b|SHOPPING VIT|KAREN COMERCIO|MEGA LAR|TIKTOK SHOP|WL IMPORTS|MIOLOPRINT|BONISHOP|EMPORIOC|SHOPEE /)) return { macro: 'Compras / Shopping', detalhada: null };
+  if (has(/NETFLIX|SPOTIFY|DISNEY|\bHBO\b|AMAZON PRIME/)) return { macro: 'Assinaturas / Software', detalhada: null };
+  if (has(/OPENAI|CHATGPT|CLAUDE|GRINDR|GOOGLE|PAYPAL|LINKEDIN|APPLE|MICROSOFT|\bMETA\b/)) return { macro: 'Assinaturas / Software', detalhada: 'IA' };
+  if (has(/CLARO|\bVIVO\b|\bTIM\b|\bOI\b|INTERNET|TELEFON|CELULAR/)) return { macro: 'Assinaturas / Software', detalhada: 'Internet / TV / Celular' };
+  if (has(/CCAA|CENTRO DE ESTUDOS DE LINGUAS|CURSO|IDIOMAS|PASSEI DIRETO|CCAAVITORIA/)) return { macro: 'Educação', detalhada: 'Curso Idiomas' };
+  if (has(/CONDOMINIO|TIFFANY CENTER/)) return { macro: 'Moradia', detalhada: 'Condomínio' };
+  if (has(/ENERGIA|ESCELSA|\bEDP\b|\bENEL\b|CEMIG|ELETRIC/)) return { macro: 'Moradia', detalhada: 'Energia' };
+  if (has(/\bAGUA\b|SANEAMENTO|CESAN/)) return { macro: 'Moradia', detalhada: 'Água' };
+  if (has(/ALUGUEL|IMOBILIARIA/)) return { macro: 'Moradia', detalhada: 'Aluguel' };
+  if (has(/NUINVEST|NU INVEST|RENDA FIXA|TESOURO|APLICACAO|CDB|TRANSFERENCIA DE SALDO NUINVEST/)) return { macro: 'Investimentos', detalhada: null };
+  if (has(/LAVANDERIA|5ASEC|\bLASEC\b|\bLAV \b/)) return { macro: 'Outros', detalhada: null };
+  // impostos/taxas/tarifas
+  if (has(/RECEITA FEDERAL|SEFAZ|MINISTERIO PUBLICO|\bIPTU\b|\bDARF\b|GOVERNO|\bIOF\b|\bIRRF\b|TARIFA|SERASA|LIMPA NOME|BOLETO/)) return { macro: 'Outros', detalhada: null };
+  // recebimentos de renda
+  if (tipo === 'CREDITO' && has(/UNIVERSIDADE FEDERAL|EMEG|SALARIO|LIGA ACADEMICA/)) return { macro: 'Renda Extra', detalhada: null };
+  return null; // -> Outros (default)
+}
 
 app.get('/api/admin/categorizar', async (req, res) => {
   if (req.query.chave !== CAT_CHAVE) return res.status(403).json({ erro: 'Chave inválida.' });
@@ -4805,43 +4843,32 @@ app.get('/api/admin/categorizar', async (req, res) => {
     );
 
     if (acao === 'listar') {
-      const grupos = new Map();
+      const cont = {};
       for (const t of sem.rows) {
-        const termo = sugerirTermoRegra(t.descricao);
-        if (!grupos.has(termo)) grupos.set(termo, { termo, n: 0, tipo: t.tipo, exemplo: t.descricao });
-        grupos.get(termo).n++;
+        const c = classificarHeuristica(t.descricao, t.tipo);
+        const nome = c ? (c.macro + (c.detalhada ? ' / ' + c.detalhada : '')) : 'Outros (default)';
+        cont[nome] = (cont[nome] || 0) + 1;
       }
-      const lista = [...grupos.values()].sort((a, b) => b.n - a.n);
-      const cats = await pool.query(
-        `SELECT c.nome, c.nivel, c.tipo, p.nome AS pai FROM categorias c
-         LEFT JOIN categorias p ON p.id = c.categoria_pai_id
-         WHERE (c.usuario_id = $1 OR c.usuario_id IS NULL) AND c.ativa = true
-         ORDER BY c.nivel, c.nome`,
-        [usuarioId]
-      );
-      return res.json({ total_sem_categoria: sem.rows.length, termos_distintos: lista.length, termos: lista, categorias: cats.rows });
+      return res.json({ total_sem_categoria: sem.rows.length, distribuicao_prevista: cont });
     }
 
     if (acao === 'aplicar') {
-      let mapa;
-      try { mapa = JSON.parse(fs.readFileSync(path.join(__dirname, 'categorias_map.json'), 'utf8')); }
-      catch (e) { return res.status(500).json({ erro: 'categorias_map.json não encontrado.', detalhes: e.message }); }
-
       const client = await pool.connect();
-      let aplicadas = 0; const usados = {};
+      let aplicadas = 0, outros = 0; const dist = {};
       try {
         await client.query('BEGIN');
         for (const t of sem.rows) {
-          const termo = sugerirTermoRegra(t.descricao);
-          const entry = mapa[termo];
-          if (!entry) continue;
-          const cats = await resolverCategoriasImportacao(usuarioId, { categoria_macro: entry.macro, categoria_detalhada: entry.detalhada || '', tipo: t.tipo }, { criar: true });
+          const c = classificarHeuristica(t.descricao, t.tipo) || { macro: 'Outros', detalhada: null };
+          if (!classificarHeuristica(t.descricao, t.tipo)) outros++;
+          const cats = await resolverCategoriasImportacao(usuarioId, { categoria_macro: c.macro, categoria_detalhada: c.detalhada || '', tipo: t.tipo }, { criar: true });
           await client.query(
             `UPDATE transacoes SET categoria_id = $1, categoria_macro_id = $2, categoria_detalhada_id = $3,
              categoria_origem = 'RECAT_HEUR', atualizado_em = NOW() WHERE id = $4`,
             [cats.categoriaId, cats.categoriaMacroId, cats.categoriaDetalhadaId, t.id]
           );
-          aplicadas++; usados[termo] = (usados[termo] || 0) + 1;
+          const nome = c.macro + (c.detalhada ? ' / ' + c.detalhada : '');
+          dist[nome] = (dist[nome] || 0) + 1;
+          aplicadas++;
         }
         await client.query('COMMIT');
       } catch (e) {
@@ -4849,11 +4876,10 @@ app.get('/api/admin/categorizar', async (req, res) => {
         return res.status(500).json({ erro: 'Falha ao aplicar — ROLLBACK.', detalhes: e.message });
       }
       client.release();
-      const restante = sem.rows.length - aplicadas;
-      return res.json({ sucesso: true, aplicadas, ainda_sem_categoria: restante, termos_usados: usados, mensagem: 'Categorização heurística aplicada (reversível: origem RECAT_HEUR).' });
+      return res.json({ sucesso: true, aplicadas, foram_para_outros: outros, distribuicao: dist, mensagem: 'Categorização heurística aplicada (reversível: origem RECAT_HEUR).' });
     }
 
-    return res.status(400).json({ erro: 'acao inválida (use listar ou aplicar).' });
+    return res.status(400).json({ erro: 'acao inválida.' });
   } catch (e) {
     res.status(500).json({ erro: e.message });
   }
