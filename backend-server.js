@@ -4784,84 +4784,78 @@ app.get('/api/health', (req, res) => {
 });
 
 // ============================================================================
-// RECATEGORIZAÇÃO EM LOTE por semelhança de estabelecimento (voto majoritário)
-// GET /api/admin/recategorizar-similares?chave=CHAVE
-// Só ATRIBUI categoria a quem está sem categoria_macro (reversível: origem RECAT_SIMILAR).
+// CATEGORIZAÇÃO ADMIN (listar / aplicar por mapa de estabelecimento) — temporário
+// GET /api/admin/categorizar?chave=CHAVE&acao=listar|aplicar
 // ============================================================================
-const RECAT_CHAVE = process.env.RECAT_CHAVE || 'rphr12oB8rGIuIL-UAIxntuR372_xL3y';
-const RECAT_EMAIL = process.env.MIGRACAO_EMAIL || 'henriquetoldi@gmail.com';
+const CAT_CHAVE = process.env.CAT_CHAVE || '9WUZp50_99Hub_qbhQRiAzJn1otD3oKz';
+const CAT_EMAIL = process.env.MIGRACAO_EMAIL || 'henriquetoldi@gmail.com';
 
-app.get('/api/admin/recategorizar-similares', async (req, res) => {
-  if (req.query.chave !== RECAT_CHAVE) return res.status(403).json({ erro: 'Chave inválida.' });
-  const client = await pool.connect();
+app.get('/api/admin/categorizar', async (req, res) => {
+  if (req.query.chave !== CAT_CHAVE) return res.status(403).json({ erro: 'Chave inválida.' });
+  const acao = req.query.acao || 'listar';
   try {
-    const u = await client.query('SELECT id FROM usuarios WHERE email = $1', [RECAT_EMAIL]);
-    if (!u.rows[0]) { client.release(); return res.status(404).json({ erro: 'Usuário não encontrado.' }); }
+    const u = await pool.query('SELECT id FROM usuarios WHERE email = $1', [CAT_EMAIL]);
+    if (!u.rows[0]) return res.status(404).json({ erro: 'Usuário não encontrado.' });
     const usuarioId = u.rows[0].id;
 
-    // 1) categorizados -> voto majoritario por termo do estabelecimento
-    const cat = await client.query(
-      `SELECT t.descricao, t.categoria_id, t.categoria_macro_id, t.categoria_detalhada_id
-       FROM transacoes t JOIN contas c ON c.id = t.conta_id
-       WHERE c.usuario_id = $1 AND t.deletado_em IS NULL AND t.categoria_macro_id IS NOT NULL`,
-      [usuarioId]
-    );
-    const votos = new Map();
-    for (const r of cat.rows) {
-      const termo = sugerirTermoRegra(r.descricao);
-      if (!termo || termo.length < 3) continue;
-      if (!votos.has(termo)) votos.set(termo, new Map());
-      const key = [r.categoria_id||'', r.categoria_macro_id||'', r.categoria_detalhada_id||''].join('|');
-      const m = votos.get(termo);
-      m.set(key, (m.get(key)||0) + 1);
-    }
-    const decisao = new Map();
-    for (const [termo, m] of votos.entries()) {
-      let total = 0, best = null, bestN = 0;
-      for (const [k, n] of m.entries()) { total += n; if (n > bestN) { bestN = n; best = k; } }
-      if (best && bestN / total >= 0.6) {
-        const [cid, mac, det] = best.split('|');
-        decisao.set(termo, { categoria_id: cid||null, categoria_macro_id: mac||null, categoria_detalhada_id: det||null, apoio: bestN, total });
-      }
-    }
-
-    // 2) aplicar aos sem categoria_macro
-    const semcat = await client.query(
-      `SELECT t.id, t.descricao FROM transacoes t JOIN contas c ON c.id = t.conta_id
+    const sem = await pool.query(
+      `SELECT t.id, t.descricao, t.tipo FROM transacoes t JOIN contas c ON c.id = t.conta_id
        WHERE c.usuario_id = $1 AND t.deletado_em IS NULL AND t.categoria_macro_id IS NULL`,
       [usuarioId]
     );
-    let recategorizadas = 0;
-    const amostra = [];
-    await client.query('BEGIN');
-    for (const t of semcat.rows) {
-      const termo = sugerirTermoRegra(t.descricao);
-      const d = decisao.get(termo);
-      if (!d) continue;
-      await client.query(
-        `UPDATE transacoes SET categoria_id = $1, categoria_macro_id = $2, categoria_detalhada_id = $3,
-         categoria_origem = 'RECAT_SIMILAR', atualizado_em = NOW() WHERE id = $4`,
-        [d.categoria_id, d.categoria_macro_id, d.categoria_detalhada_id, t.id]
-      );
-      recategorizadas++;
-      if (amostra.length < 15) amostra.push({ descricao: t.descricao, termo });
-    }
-    await client.query('COMMIT');
 
-    res.json({
-      sucesso: true,
-      sem_categoria_antes: semcat.rows.length,
-      recategorizadas,
-      ainda_sem_categoria: semcat.rows.length - recategorizadas,
-      termos_com_decisao: decisao.size,
-      amostra,
-      mensagem: 'Recategorização concluída (reversível: origem RECAT_SIMILAR).'
-    });
+    if (acao === 'listar') {
+      const grupos = new Map();
+      for (const t of sem.rows) {
+        const termo = sugerirTermoRegra(t.descricao);
+        if (!grupos.has(termo)) grupos.set(termo, { termo, n: 0, tipo: t.tipo, exemplo: t.descricao });
+        grupos.get(termo).n++;
+      }
+      const lista = [...grupos.values()].sort((a, b) => b.n - a.n);
+      const cats = await pool.query(
+        `SELECT c.nome, c.nivel, c.tipo, p.nome AS pai FROM categorias c
+         LEFT JOIN categorias p ON p.id = c.categoria_pai_id
+         WHERE (c.usuario_id = $1 OR c.usuario_id IS NULL) AND c.ativa = true
+         ORDER BY c.nivel, c.nome`,
+        [usuarioId]
+      );
+      return res.json({ total_sem_categoria: sem.rows.length, termos_distintos: lista.length, termos: lista, categorias: cats.rows });
+    }
+
+    if (acao === 'aplicar') {
+      let mapa;
+      try { mapa = JSON.parse(fs.readFileSync(path.join(__dirname, 'categorias_map.json'), 'utf8')); }
+      catch (e) { return res.status(500).json({ erro: 'categorias_map.json não encontrado.', detalhes: e.message }); }
+
+      const client = await pool.connect();
+      let aplicadas = 0; const usados = {};
+      try {
+        await client.query('BEGIN');
+        for (const t of sem.rows) {
+          const termo = sugerirTermoRegra(t.descricao);
+          const entry = mapa[termo];
+          if (!entry) continue;
+          const cats = await resolverCategoriasImportacao(usuarioId, { categoria_macro: entry.macro, categoria_detalhada: entry.detalhada || '', tipo: t.tipo }, { criar: true });
+          await client.query(
+            `UPDATE transacoes SET categoria_id = $1, categoria_macro_id = $2, categoria_detalhada_id = $3,
+             categoria_origem = 'RECAT_HEUR', atualizado_em = NOW() WHERE id = $4`,
+            [cats.categoriaId, cats.categoriaMacroId, cats.categoriaDetalhadaId, t.id]
+          );
+          aplicadas++; usados[termo] = (usados[termo] || 0) + 1;
+        }
+        await client.query('COMMIT');
+      } catch (e) {
+        await client.query('ROLLBACK'); client.release();
+        return res.status(500).json({ erro: 'Falha ao aplicar — ROLLBACK.', detalhes: e.message });
+      }
+      client.release();
+      const restante = sem.rows.length - aplicadas;
+      return res.json({ sucesso: true, aplicadas, ainda_sem_categoria: restante, termos_usados: usados, mensagem: 'Categorização heurística aplicada (reversível: origem RECAT_HEUR).' });
+    }
+
+    return res.status(400).json({ erro: 'acao inválida (use listar ou aplicar).' });
   } catch (e) {
-    try { await client.query('ROLLBACK'); } catch (_) {}
-    res.status(500).json({ erro: 'Falha na recategorização — ROLLBACK.', detalhes: e.message });
-  } finally {
-    client.release();
+    res.status(500).json({ erro: e.message });
   }
 });
 
