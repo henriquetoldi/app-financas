@@ -4784,6 +4784,116 @@ app.get('/api/health', (req, res) => {
 });
 
 // ============================================================================
+// MIGRAÇÃO ÚNICA: substituir base atual pela base validada (com backup)
+// Dispare com: GET /api/admin/migrar-base-final?chave=CHAVE_AQUI
+// Roda uma vez só (protegida pela existência da tabela de backup).
+// ============================================================================
+const MIGRACAO_CHAVE = process.env.MIGRACAO_CHAVE || '7wcTEuA0XIWBF--Ja9NESwy_tkZo5oUy';
+const MIGRACAO_EMAIL = process.env.MIGRACAO_EMAIL || 'henriquetoldi@gmail.com';
+
+app.get('/api/admin/migrar-base-final', async (req, res) => {
+  if (req.query.chave !== MIGRACAO_CHAVE) {
+    return res.status(403).json({ erro: 'Chave inválida.' });
+  }
+  const client = await pool.connect();
+  try {
+    const u = await client.query('SELECT id FROM usuarios WHERE email = $1', [MIGRACAO_EMAIL]);
+    if (!u.rows[0]) { client.release(); return res.status(404).json({ erro: 'Usuário não encontrado: ' + MIGRACAO_EMAIL }); }
+    const usuarioId = u.rows[0].id;
+
+    const jaRodou = await client.query("SELECT to_regclass('public.transacoes_backup_migracao') AS t");
+    if (jaRodou.rows[0].t) { client.release(); return res.status(409).json({ erro: 'Migração já executada (backup transacoes_backup_migracao existe). Abortado para não repetir.' }); }
+
+    let base;
+    try { base = JSON.parse(fs.readFileSync(path.join(__dirname, 'base_validada.json'), 'utf8')); }
+    catch (e) { client.release(); return res.status(500).json({ erro: 'Não achei base_validada.json no servidor.', detalhes: e.message }); }
+
+    await client.query('BEGIN');
+
+    await client.query(
+      `CREATE TABLE transacoes_backup_migracao AS
+       SELECT t.* FROM transacoes t JOIN contas c ON c.id = t.conta_id WHERE c.usuario_id = $1`,
+      [usuarioId]
+    );
+    const totalBackup = (await client.query('SELECT COUNT(*)::int AS n FROM transacoes_backup_migracao')).rows[0].n;
+
+    const atuais = await client.query(
+      `SELECT t.descricao, t.categoria_id, t.categoria_macro_id, t.categoria_detalhada_id
+       FROM transacoes t JOIN contas c ON c.id = t.conta_id
+       WHERE c.usuario_id = $1 AND t.deletado_em IS NULL`,
+      [usuarioId]
+    );
+    const mapaCat = new Map();
+    for (const row of atuais.rows) {
+      const k = normalizarDescricaoCategorizacao(row.descricao);
+      if (!k) continue;
+      if (!mapaCat.has(k) && (row.categoria_macro_id || row.categoria_id)) mapaCat.set(k, row);
+    }
+
+    const del = await client.query(
+      'DELETE FROM transacoes t USING contas c WHERE t.conta_id = c.id AND c.usuario_id = $1',
+      [usuarioId]
+    );
+
+    const contasRes = await client.query('SELECT id, nome FROM contas WHERE usuario_id = $1 AND ativo = true', [usuarioId]);
+    const contaPorNome = new Map();
+    for (const c of contasRes.rows) contaPorNome.set(normalizarNomeConta(c.nome), c.id);
+
+    let inseridas = 0, semConta = 0, porSimilar = 0, porRegra = 0, duplicadasNaBase = 0;
+    const contasNaoEncontradas = new Set();
+    for (const tx of base) {
+      const contaId = contaPorNome.get(normalizarNomeConta(tx.conta));
+      if (!contaId) { semConta++; contasNaoEncontradas.add(tx.conta); continue; }
+      const data = normalizarDataImportacao(tx.data);
+      const descricao = String(tx.descricao).trim();
+      const valor = Math.abs(Number(tx.valor));
+      const tipo = normalizarTipoTransacao(tx.tipo);
+      const hash = gerarHashTransacao({ data, descricao, valor, tipo }, contaId);
+
+      let catId = null, macroId = null, detId = null, origem = 'IMPORTACAO';
+      const k = normalizarDescricaoCategorizacao(descricao);
+      const m = mapaCat.get(k);
+      if (m) { catId = m.categoria_id; macroId = m.categoria_macro_id; detId = m.categoria_detalhada_id; origem = 'MIGRACAO_SIMILAR'; porSimilar++; }
+      else {
+        const regra = await buscarRegraCompatível(usuarioId, descricao);
+        if (regra) { catId = regra.categoria_id; origem = 'AUTO'; porRegra++; }
+      }
+
+      const ins = await client.query(
+        `INSERT INTO transacoes (conta_id, data, descricao, valor, tipo, categoria_id, categoria_macro_id, categoria_detalhada_id, categoria_origem, hash_transacao, criado_em, atualizado_em)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW(),NOW())
+         ON CONFLICT (hash_transacao) DO NOTHING RETURNING id`,
+        [contaId, data, descricao, valor, tipo, catId, macroId, detId, origem, hash]
+      );
+      if (ins.rows[0]) inseridas++; else duplicadasNaBase++;
+    }
+
+    await client.query('COMMIT');
+    res.json({
+      sucesso: true,
+      backup_tabela: 'transacoes_backup_migracao',
+      total_backup: totalBackup,
+      apagadas: del.rowCount,
+      base_total: base.length,
+      inseridas,
+      duplicadas_na_base_ignoradas: duplicadasNaBase,
+      sem_conta: semConta,
+      contas_nao_encontradas: [...contasNaoEncontradas],
+      categorizadas_por_similaridade: porSimilar,
+      categorizadas_por_regra: porRegra,
+      sem_categoria: inseridas - porSimilar - porRegra,
+      mensagem: 'Migração concluída. Backup em transacoes_backup_migracao (reversível).'
+    });
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    res.status(500).json({ erro: 'Falha na migração — ROLLBACK aplicado, nada foi alterado.', detalhes: e.message });
+  } finally {
+    client.release();
+  }
+});
+
+
+// ============================================================================
 // INICIAR SERVER
 // ============================================================================
 
