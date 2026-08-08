@@ -1,0 +1,97 @@
+diff --git a/App.jsx b/App.jsx
+--- a/App.jsx
++++ b/App.jsx
+@@ -1563,6 +1563,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
+   const [editandoItem, setEditandoItem] = useState(null);
+   const [escopoEdicao, setEscopoEdicao] = useState('APENAS_ESTE');
+   const [formularioAberto, setFormularioAberto] = useState(false);
++  const [abaPlanejamento, setAbaPlanejamento] = useState('resumo');
+   const formularioInicial = { descricao: '', categoria: '', categoria_id: '', tipo_despesa: 'FIXA', valor_previsto: '', dia_previsto: '', observacao: '', recorrencia_tipo: 'UNICA', recorrencia_termino: 'SEM_FIM', mes_fim: String(hoje.getMonth() + 1), ano_fim: String(hoje.getFullYear()), quantidade_parcelas: '', parcela_inicial: '1' };
+   const [form, setForm] = useState(formularioInicial);
+ 
+@@ -1679,6 +1680,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
+ 
+   const editarPlanejamento = (item) => {
+     setFormularioAberto(true);
++    setAbaPlanejamento('planejamentos');
+     setEditandoId(item.id);
+     setEditandoItem(item);
+     setEscopoEdicao('APENAS_ESTE');
+@@ -1736,10 +1738,15 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
+   const limparFiltrosPlanejamento = () => setFiltrosPlanejamento({ tipo: 'TODOS', recorrencia: 'TODAS', categoria: '', periodo: 12 });
+ 
+   return (
+-    <div style={{ minHeight: '100vh', background: '#f5f5f5', padding: '20px' }}>
+-      <div style={{ maxWidth: '1200px', margin: '0 auto' }}>
++    <div style={{ minHeight: 0, background: '#f5f5f5', padding: '20px' }}>
++      <div style={{ maxWidth: '100%', margin: '0 auto' }}>
+         <PageHeader icone="🗓️" titulo="Planejamento Mensal" descricao="Planeje seus gastos antes do mês acontecer." breadcrumb={<Breadcrumb atual="Planejamento Mensal" onVoltar={onVoltar} />} />
++        <div className="admin-tabs">
++          {[['resumo', '📊 Resumo'], ['projecoes', '📈 Projeções'], ['categorias', '🏷️ Categorias'], ['planejamentos', '🧾 Planejamentos']].map(([id, label]) => <button key={id} className={abaPlanejamento === id ? 'active' : ''} onClick={() => setAbaPlanejamento(id)}>{label}</button>)}
++        </div>
+         <div style={{ background: 'white', borderRadius: '16px', padding: '22px', boxShadow: '0 2px 10px rgba(15,23,42,0.08)', marginBottom: '18px' }}>
+           <p style={{ color: '#64748b', marginTop: 0 }}>Esta tela é de orçamento e previsão: planejamento não é conciliação com transações individuais.</p>
+           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '12px', margin: '18px 0' }}>
+@@ -1756,24 +1763,24 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
+               <label>Tipo de despesa<select value={filtrosPlanejamento.tipo} onChange={(e) => setFiltrosPlanejamento({ ...filtrosPlanejamento, tipo: e.target.value })} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}><option value="TODOS">Todos</option><option value="FIXA">Fixas</option><option value="VARIAVEL">Variáveis</option></select></label>
+               <label>Recorrência<select value={filtrosPlanejamento.recorrencia} onChange={(e) => setFiltrosPlanejamento({ ...filtrosPlanejamento, recorrencia: e.target.value })} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}><option value="TODAS">Todas</option><option value="UNICA">Únicas</option><option value="MENSAL">Mensais recorrentes</option><option value="PARCELADA">Parceladas</option></select></label>
+               <label>Categoria<select value={filtrosPlanejamento.categoria} onChange={(e) => setFiltrosPlanejamento({ ...filtrosPlanejamento, categoria: e.target.value })} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}><option value="">Todas as categorias</option>{categoriasAgrupadasPlanejamento.map((macro) => <optgroup key={macro.id} label={`${macro.emoji || ''} ${macro.nome}`}><option value={macro.id}>{macro.emoji || ''} {macro.nome} (macro)</option>{macro.filhas.map((filha) => <option key={filha.id} value={filha.id}>── {filha.nome}</option>)}</optgroup>)}{categoriasFiltroLegado.map((cat) => <option key={cat.valor} value={cat.valor}>{cat.label || 'Sem categoria'}</option>)}</select></label>
+-              <label>Período dos gráficos<select value={filtrosPlanejamento.periodo} onChange={(e) => setFiltrosPlanejamento({ ...filtrosPlanejamento, periodo: Number(e.target.value) })} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}>{opcoesPeriodoGraficos.map((qtd) => <option key={qtd} value={qtd}>Próximos {qtd} meses</option>)}</select></label>
++              <label>Horizonte de projeção<select value={filtrosPlanejamento.periodo} onChange={(e) => setFiltrosPlanejamento({ ...filtrosPlanejamento, periodo: Number(e.target.value) })} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}>{opcoesPeriodoGraficos.map((qtd) => <option key={qtd} value={qtd}>Próximos {qtd} meses</option>)}</select></label>
+               <Btn variant="ghost" size="sm" onClick={limparFiltrosPlanejamento}>Limpar filtros</Btn>
+             </div>
+           </div>
+-          <h2 style={{ margin: '18px 0 12px' }}>Resumo planejado de {rotuloMesAnoSelecionado}</h2>
+-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '12px', marginTop: '16px' }}>
++          <h2 style={{ margin: '18px 0 12px', display: abaPlanejamento === 'resumo' ? 'block' : 'none' }}>Resumo planejado de {rotuloMesAnoSelecionado}</h2>
++          <div style={{ display: abaPlanejamento === 'resumo' ? 'grid' : 'none', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '12px', marginTop: '16px' }}>
+             <KpiCard titulo="Fixas planejadas" valor={formatarMoeda(resumo.totalFixas)} detalhe="Compromissos fixos do mês" cor="#2563eb" fundo="#eff6ff" />
+             <KpiCard titulo="Variáveis planejadas" valor={formatarMoeda(resumo.totalVariaveis)} detalhe="Estimativas variáveis" cor="#f97316" fundo="#fff7ed" />
+             <KpiCard titulo="Total previsto no mês" valor={formatarMoeda(resumo.totalPrevisto)} detalhe="Soma do planejamento" cor="#0f766e" fundo="#f0fdfa" />
+             <KpiCard titulo="Itens planejados" valor={Number(resumo.quantidade || 0)} detalhe="Despesas cadastradas" cor="#475569" fundo="#f8fafc" />
+             {parcelasPlanejadas.length > 0 && <KpiCard titulo="Parcelas previstas" valor={formatarMoeda(totalParcelasPlanejadas)} detalhe={`${parcelasPlanejadas.length} parcela(s) no mês`} cor="#7c3aed" fundo="#f5f3ff" />}
+           </div>
+-          <div style={{ marginTop: '12px', background: '#f8fafc', border: '1px solid #e5e7eb', borderRadius: '10px', padding: '12px', color: '#64748b' }}>
++          <div style={{ display: abaPlanejamento === 'resumo' ? 'block' : 'none', marginTop: '12px', background: '#f8fafc', border: '1px solid #e5e7eb', borderRadius: '10px', padding: '12px', color: '#64748b' }}>
+             <strong style={{ color: '#334155' }}>Comparativo com realizado:</strong> realizado no mês {formatarMoeda(resumo.totalRealizado)} · diferença {formatarMoeda(resumo.diferencaPrevistoRealizado)}.
+           </div>
+         </div>
+ 
+-        <div style={{ background: 'white', borderRadius: '16px', padding: '22px', boxShadow: '0 2px 10px rgba(15,23,42,0.08)', marginBottom: '18px' }}>
++        <div style={{ display: abaPlanejamento === 'categorias' ? 'block' : 'none', background: 'white', borderRadius: '16px', padding: '22px', boxShadow: '0 2px 10px rgba(15,23,42,0.08)', marginBottom: '18px' }}>
+           <h2 style={{ margin: '0 0 6px' }}>Planejado x Realizado por categoria</h2>
+           <p style={{ color: '#64748b', marginTop: 0 }}>Comparativo secundário do mês selecionado. O planejado vem das despesas planejadas e o realizado soma transações de saída categorizadas no mês, sem transferências internas.</p>
+           {comparativoCategorias.length === 0 ? <p style={{ color: '#64748b' }}>Sem valores planejados ou realizados por categoria neste mês.</p> : (
+@@ -1793,7 +1800,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
+           )}
+         </div>
+ 
+-        <div style={{ background: 'white', borderRadius: '16px', padding: '22px', boxShadow: '0 2px 10px rgba(15,23,42,0.08)', marginBottom: '18px' }}>
++        <div style={{ display: abaPlanejamento === 'projecoes' ? 'block' : 'none', background: 'white', borderRadius: '16px', padding: '22px', boxShadow: '0 2px 10px rgba(15,23,42,0.08)', marginBottom: '18px' }}>
+           <h2 style={{ margin: '0 0 6px' }}>Compromissos previstos para os próximos meses</h2>
+           <p style={{ color: '#64748b', marginTop: 0 }}>Valores calculados com base nas despesas únicas, recorrentes e parceladas cadastradas no planejamento.</p>
+           <div style={{ display: 'flex', gap: '14px', flexWrap: 'wrap', marginBottom: '16px', color: '#475569', fontSize: '13px' }}>
+@@ -1838,7 +1845,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
+           )}
+         </div>
+ 
+-        <div style={{ background: 'white', borderRadius: '16px', padding: '22px', boxShadow: '0 2px 10px rgba(15,23,42,0.08)', marginBottom: '18px' }}>
++        <div style={{ display: abaPlanejamento === 'categorias' ? 'block' : 'none', background: 'white', borderRadius: '16px', padding: '22px', boxShadow: '0 2px 10px rgba(15,23,42,0.08)', marginBottom: '18px' }}>
+           <h2 style={{ margin: '0 0 6px' }}>Distribuição planejada por categoria</h2>
+           <p style={{ color: '#64748b', marginTop: 0 }}>Veja como os gastos planejados de cada mês estão distribuídos entre as categorias.</p>
+           {linhasResumoCategorias.length === 0 ? <p style={{ color: '#64748b' }}>{planejamentos.length === 0 && haDadosResumoMensal ? 'Não há despesas planejadas para este mês, mas existem valores previstos em outros meses do período analisado.' : 'Nenhuma despesa planejada encontrada para os filtros selecionados.'}</p> : (
+@@ -1882,11 +1889,11 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
+           )}
+         </div>
+ 
+-        <div style={{ marginBottom: '14px' }}>
+-          <Btn variant="primary" onClick={() => setFormularioAberto(true)}>+ Adicionar despesa planejada</Btn>
++        <div style={{ display: abaPlanejamento === 'planejamentos' ? 'block' : 'none', marginBottom: '14px' }}>
++          <Btn variant="primary" onClick={() => { setFormularioAberto(true); setAbaPlanejamento('planejamentos'); }}>+ Adicionar despesa planejada</Btn>
+         </div>
+ 
+-        <div style={{ display: 'grid', gridTemplateColumns: formularioAberto ? 'repeat(auto-fit, minmax(320px, 1fr))' : '1fr', gap: '18px' }}>
++        <div style={{ display: abaPlanejamento === 'planejamentos' ? 'grid' : 'none', gridTemplateColumns: formularioAberto ? 'repeat(auto-fit, minmax(320px, 1fr))' : '1fr', gap: '18px' }}>
+           {formularioAberto && <form onSubmit={salvarPlanejamento} style={{ background: 'white', borderRadius: '14px', padding: '18px', display: 'grid', gap: '12px', border: '1px solid #e5e7eb' }}>
+             <h2 style={{ margin: 0 }}>{editandoId ? 'Editar despesa planejada' : 'Adicionar despesa planejada'}</h2>
+             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
