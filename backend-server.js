@@ -372,6 +372,29 @@ async function inicializarBanco() {
   `);
 
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS compras_programadas (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      usuario_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+      descricao TEXT NOT NULL,
+      valor_estimado DECIMAL(12, 2) NOT NULL,
+      data_desejada DATE NOT NULL,
+      prioridade VARCHAR(20) NOT NULL DEFAULT 'MEDIA',
+      forma_pagamento VARCHAR(20) NOT NULL DEFAULT 'A_VISTA',
+      parcelas INT NOT NULL DEFAULT 1,
+      conta_id UUID REFERENCES contas(id) ON DELETE SET NULL,
+      categoria_macro_id UUID REFERENCES categorias(id) ON DELETE SET NULL,
+      categoria_detalhada_id UUID REFERENCES categorias(id) ON DELETE SET NULL,
+      status VARCHAR(20) NOT NULL DEFAULT 'PLANEJADA',
+      observacao TEXT,
+      criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_compras_programadas_usuario_data ON compras_programadas(usuario_id, data_desejada)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_compras_programadas_usuario_status ON compras_programadas(usuario_id, status)');
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS conciliacoes (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       usuario_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
@@ -2764,6 +2787,206 @@ app.get('/api/admin/backups', verificarToken, async (req, res) => {
   }
 });
 
+
+
+// ============================================================================
+// ROTAS: COMPRAS PROGRAMADAS
+// ============================================================================
+
+const PRIORIDADES_COMPRA = ['BAIXA', 'MEDIA', 'ALTA', 'ESSENCIAL'];
+const FORMAS_PAGAMENTO_COMPRA = ['A_VISTA', 'PARCELADO'];
+const STATUS_COMPRA = ['PLANEJADA', 'ADIADA', 'COMPRADA', 'CANCELADA'];
+
+function validarPayloadCompraProgramada(body = {}, parcial = false) {
+  const payload = {};
+
+  if (!parcial || body.descricao !== undefined) {
+    payload.descricao = String(body.descricao || '').trim();
+    if (!payload.descricao) throw new Error('Descrição da compra é obrigatória.');
+  }
+
+  if (!parcial || body.valorEstimado !== undefined || body.valor_estimado !== undefined) {
+    payload.valorEstimado = Number(body.valorEstimado ?? body.valor_estimado);
+    if (!Number.isFinite(payload.valorEstimado) || payload.valorEstimado <= 0) throw new Error('Valor estimado deve ser positivo.');
+  }
+
+  if (!parcial || body.dataDesejada !== undefined || body.data_desejada !== undefined) {
+    payload.dataDesejada = normalizarDataImportacao(body.dataDesejada ?? body.data_desejada);
+    if (!payload.dataDesejada) throw new Error('Data desejada é obrigatória.');
+  }
+
+  if (!parcial || body.prioridade !== undefined) {
+    payload.prioridade = String(body.prioridade || 'MEDIA').toUpperCase();
+    if (!PRIORIDADES_COMPRA.includes(payload.prioridade)) throw new Error('Prioridade inválida.');
+  }
+
+  if (!parcial || body.formaPagamento !== undefined || body.forma_pagamento !== undefined) {
+    payload.formaPagamento = String(body.formaPagamento ?? body.forma_pagamento ?? 'A_VISTA').toUpperCase();
+    if (!FORMAS_PAGAMENTO_COMPRA.includes(payload.formaPagamento)) throw new Error('Forma de pagamento inválida.');
+  }
+
+  if (!parcial || body.parcelas !== undefined) {
+    payload.parcelas = Number(body.parcelas ?? 1);
+    if (!Number.isInteger(payload.parcelas) || payload.parcelas < 1 || payload.parcelas > 60) throw new Error('Quantidade de parcelas inválida.');
+    if ((payload.formaPagamento || body.formaPagamento || body.forma_pagamento) === 'A_VISTA') payload.parcelas = 1;
+    if ((payload.formaPagamento || body.formaPagamento || body.forma_pagamento) === 'PARCELADO' && payload.parcelas < 2) throw new Error('Compra parcelada deve ter pelo menos 2 parcelas.');
+  }
+
+  if (body.contaId !== undefined || body.conta_id !== undefined) payload.contaId = body.contaId || body.conta_id || null;
+  if (body.categoriaMacroId !== undefined || body.categoria_macro_id !== undefined) payload.categoriaMacroId = body.categoriaMacroId || body.categoria_macro_id || null;
+  if (body.categoriaDetalhadaId !== undefined || body.categoria_detalhada_id !== undefined) payload.categoriaDetalhadaId = body.categoriaDetalhadaId || body.categoria_detalhada_id || null;
+
+  if (body.status !== undefined) {
+    payload.status = String(body.status || '').toUpperCase();
+    if (!STATUS_COMPRA.includes(payload.status)) throw new Error('Status da compra inválido.');
+  }
+
+  if (body.observacao !== undefined) payload.observacao = body.observacao || null;
+  return payload;
+}
+
+async function validarRelacionamentosCompraProgramada(usuarioId, payload) {
+  if (payload.contaId) {
+    const conta = await pool.query(
+      'SELECT id FROM contas WHERE id = $1 AND usuario_id = $2 AND ativo = true',
+      [payload.contaId, usuarioId]
+    );
+    if (conta.rows.length === 0) throw new Error('Conta não encontrada para este usuário.');
+  }
+
+  for (const [campo, id] of [['categoriaMacroId', payload.categoriaMacroId], ['categoriaDetalhadaId', payload.categoriaDetalhadaId]]) {
+    if (!id) continue;
+    const categoria = await pool.query(
+      'SELECT id FROM categorias WHERE id = $1 AND (usuario_id = $2 OR usuario_id IS NULL) AND ativa = true',
+      [id, usuarioId]
+    );
+    if (categoria.rows.length === 0) throw new Error(`${campo} inválida para este usuário.`);
+  }
+
+  if (payload.categoriaMacroId && payload.categoriaDetalhadaId) {
+    const relacao = await pool.query(
+      'SELECT id FROM categorias WHERE id = $1 AND categoria_pai_id = $2 AND (usuario_id = $3 OR usuario_id IS NULL) AND ativa = true',
+      [payload.categoriaDetalhadaId, payload.categoriaMacroId, usuarioId]
+    );
+    if (relacao.rows.length === 0) throw new Error('Categoria detalhada não pertence à categoria macro selecionada.');
+  }
+}
+
+app.get('/api/compras-programadas', verificarToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT cp.*,
+              c.nome AS conta_nome,
+              cm.nome AS categoria_macro_nome,
+              cd.nome AS categoria_detalhada_nome
+       FROM compras_programadas cp
+       LEFT JOIN contas c ON c.id = cp.conta_id
+       LEFT JOIN categorias cm ON cm.id = cp.categoria_macro_id
+       LEFT JOIN categorias cd ON cd.id = cp.categoria_detalhada_id
+       WHERE cp.usuario_id = $1
+       ORDER BY
+         CASE cp.status WHEN 'PLANEJADA' THEN 0 WHEN 'ADIADA' THEN 1 WHEN 'COMPRADA' THEN 2 ELSE 3 END,
+         cp.data_desejada ASC,
+         cp.criado_em DESC`,
+      [req.usuario.usuario_id]
+    );
+    res.json({ compras: result.rows });
+  } catch (error) {
+    res.status(500).json({ erro: error.message });
+  }
+});
+
+app.post('/api/compras-programadas', verificarToken, async (req, res) => {
+  try {
+    const payload = validarPayloadCompraProgramada(req.body);
+    await validarRelacionamentosCompraProgramada(req.usuario.usuario_id, payload);
+    const result = await pool.query(
+      `INSERT INTO compras_programadas (
+        usuario_id, descricao, valor_estimado, data_desejada, prioridade, forma_pagamento,
+        parcelas, conta_id, categoria_macro_id, categoria_detalhada_id, status, observacao
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'PLANEJADA', $11)
+      RETURNING *`,
+      [
+        req.usuario.usuario_id,
+        payload.descricao,
+        payload.valorEstimado,
+        payload.dataDesejada,
+        payload.prioridade,
+        payload.formaPagamento,
+        payload.parcelas,
+        payload.contaId || null,
+        payload.categoriaMacroId || null,
+        payload.categoriaDetalhadaId || null,
+        payload.observacao || null,
+      ]
+    );
+    res.status(201).json({ compra: result.rows[0] });
+  } catch (error) {
+    res.status(400).json({ erro: error.message });
+  }
+});
+
+app.patch('/api/compras-programadas/:id', verificarToken, async (req, res) => {
+  try {
+    const existente = await pool.query(
+      'SELECT id FROM compras_programadas WHERE id = $1 AND usuario_id = $2',
+      [req.params.id, req.usuario.usuario_id]
+    );
+    if (existente.rows.length === 0) return res.status(404).json({ erro: 'Compra programada não encontrada.' });
+
+    const payload = validarPayloadCompraProgramada(req.body, true);
+    await validarRelacionamentosCompraProgramada(req.usuario.usuario_id, payload);
+
+    const mapa = {
+      descricao: 'descricao',
+      valorEstimado: 'valor_estimado',
+      dataDesejada: 'data_desejada',
+      prioridade: 'prioridade',
+      formaPagamento: 'forma_pagamento',
+      parcelas: 'parcelas',
+      contaId: 'conta_id',
+      categoriaMacroId: 'categoria_macro_id',
+      categoriaDetalhadaId: 'categoria_detalhada_id',
+      status: 'status',
+      observacao: 'observacao',
+    };
+
+    const sets = [];
+    const valores = [];
+    for (const [campo, coluna] of Object.entries(mapa)) {
+      if (payload[campo] === undefined) continue;
+      valores.push(payload[campo]);
+      sets.push(`${coluna} = $${valores.length}`);
+    }
+
+    if (sets.length === 0) return res.status(400).json({ erro: 'Nenhum campo válido para atualizar.' });
+    valores.push(req.params.id, req.usuario.usuario_id);
+
+    const result = await pool.query(
+      `UPDATE compras_programadas
+       SET ${sets.join(', ')}, atualizado_em = NOW()
+       WHERE id = $${valores.length - 1} AND usuario_id = $${valores.length}
+       RETURNING *`,
+      valores
+    );
+    res.json({ compra: result.rows[0] });
+  } catch (error) {
+    res.status(400).json({ erro: error.message });
+  }
+});
+
+app.delete('/api/compras-programadas/:id', verificarToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'DELETE FROM compras_programadas WHERE id = $1 AND usuario_id = $2 RETURNING id',
+      [req.params.id, req.usuario.usuario_id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ erro: 'Compra programada não encontrada.' });
+    res.json({ sucesso: true });
+  } catch (error) {
+    res.status(500).json({ erro: error.message });
+  }
+});
 
 
 // ============================================================================
