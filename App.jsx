@@ -2075,6 +2075,258 @@ function HeaderPrincipal({ usuario, token, onLogout, onAbrirMenu }) {
   return <header className="top-header"><div className="top-header-left"><button type="button" className="mobile-menu-button" onClick={onAbrirMenu} aria-label="Abrir menu">☰</button><div><h1>💰 Finanças Pessoais</h1><p>Olá, {nome}</p></div></div><div className="top-actions"><NotificacoesBell token={token} /><div className="avatar-menu"><button className="avatar-button" onClick={() => setAberto(!aberto)}><img src={usuario?.foto_url || usuario?.picture || 'https://ui-avatars.com/api/?name=Financas'} alt="Avatar" /><span className="avatar-name">{nome.split(' ')[0]}</span><span>▾</span></button>{aberto && <div className="avatar-dropdown"><strong>{nome}</strong><small>{usuario?.email}</small><button onClick={onLogout}>Sair</button></div>}</div></div></header>;
 }
 
+
+function TelaComprasProgramadas({ contas = [], token }) {
+  const formularioVazio = () => ({
+    descricao: '',
+    valorEstimado: '',
+    dataDesejada: '',
+    prioridade: 'MEDIA',
+    formaPagamento: 'A_VISTA',
+    parcelas: 1,
+    contaId: '',
+    categoriaMacroId: '',
+    categoriaDetalhadaId: '',
+    observacao: '',
+  });
+
+  const [compras, setCompras] = useState([]);
+  const [categorias, setCategorias] = useState([]);
+  const [form, setForm] = useState(formularioVazio);
+  const [editandoId, setEditandoId] = useState(null);
+  const [carregando, setCarregando] = useState(true);
+  const [salvando, setSalvando] = useState(false);
+
+  const categoriasAgrupadas = useMemo(
+    () => agruparCategorias(categorias).filter((categoria) => (categoria.tipo || 'DESPESA') === 'DESPESA'),
+    [categorias]
+  );
+  const macroSelecionada = categoriasAgrupadas.find((categoria) => categoria.id === form.categoriaMacroId);
+
+  const carregarCompras = async () => {
+    const response = await axios.get(`${API_URL}/compras-programadas`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    setCompras(response.data.compras || []);
+  };
+
+  const carregarCategorias = async () => {
+    const response = await axios.get(`${API_URL}/categorias`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    setCategorias(response.data.categorias || []);
+  };
+
+  useEffect(() => {
+    let ativa = true;
+    setCarregando(true);
+    Promise.all([carregarCompras(), carregarCategorias()])
+      .catch((error) => {
+        if (ativa) mostrarToast(error.response?.data?.erro || 'Não foi possível carregar as compras programadas.', 'erro');
+      })
+      .finally(() => {
+        if (ativa) setCarregando(false);
+      });
+    return () => { ativa = false; };
+  }, [token]);
+
+  const limparFormulario = () => {
+    setForm(formularioVazio());
+    setEditandoId(null);
+  };
+
+  const salvarCompra = async (event) => {
+    event.preventDefault();
+    const valor = Number(form.valorEstimado);
+    if (!form.descricao.trim()) return mostrarToast('Informe o que você pretende comprar.', 'aviso');
+    if (!Number.isFinite(valor) || valor <= 0) return mostrarToast('Informe um valor estimado válido.', 'aviso');
+    if (!form.dataDesejada) return mostrarToast('Informe a data desejada para a compra.', 'aviso');
+    if (form.formaPagamento === 'PARCELADO' && (!Number.isInteger(Number(form.parcelas)) || Number(form.parcelas) < 2)) {
+      return mostrarToast('Informe pelo menos 2 parcelas.', 'aviso');
+    }
+
+    const payload = {
+      descricao: form.descricao.trim(),
+      valorEstimado: valor,
+      dataDesejada: form.dataDesejada,
+      prioridade: form.prioridade,
+      formaPagamento: form.formaPagamento,
+      parcelas: form.formaPagamento === 'PARCELADO' ? Number(form.parcelas) : 1,
+      contaId: form.contaId || null,
+      categoriaMacroId: form.categoriaMacroId || null,
+      categoriaDetalhadaId: form.categoriaDetalhadaId || null,
+      observacao: form.observacao.trim() || null,
+    };
+
+    setSalvando(true);
+    try {
+      if (editandoId) {
+        await axios.patch(`${API_URL}/compras-programadas/${editandoId}`, payload, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        mostrarToast('Compra programada atualizada.');
+      } else {
+        await axios.post(`${API_URL}/compras-programadas`, payload, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        mostrarToast('Compra programada cadastrada.');
+      }
+      limparFormulario();
+      await carregarCompras();
+    } catch (error) {
+      mostrarToast(error.response?.data?.erro || 'Não foi possível salvar a compra programada.', 'erro');
+    } finally {
+      setSalvando(false);
+    }
+  };
+
+  const editarCompra = (compra) => {
+    setEditandoId(compra.id);
+    setForm({
+      descricao: compra.descricao || '',
+      valorEstimado: compra.valor_estimado || '',
+      dataDesejada: String(compra.data_desejada || '').slice(0, 10),
+      prioridade: compra.prioridade || 'MEDIA',
+      formaPagamento: compra.forma_pagamento || 'A_VISTA',
+      parcelas: compra.parcelas || 1,
+      contaId: compra.conta_id || '',
+      categoriaMacroId: compra.categoria_macro_id || '',
+      categoriaDetalhadaId: compra.categoria_detalhada_id || '',
+      observacao: compra.observacao || '',
+    });
+    document.getElementById('form-compra-programada')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
+  const excluirCompra = (compra) => {
+    pedirConfirmacao(
+      'Excluir compra programada',
+      `Deseja excluir "${compra.descricao}"?`,
+      async () => {
+        try {
+          await axios.delete(`${API_URL}/compras-programadas/${compra.id}`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (editandoId === compra.id) limparFormulario();
+          await carregarCompras();
+          mostrarToast('Compra programada excluída.');
+        } catch (error) {
+          mostrarToast(error.response?.data?.erro || 'Não foi possível excluir a compra.', 'erro');
+        }
+      },
+      { labelConfirmar: 'Excluir', corConfirmar: '#dc2626' }
+    );
+  };
+
+  const formatarDataCompra = (valor) => {
+    if (!valor) return 'Sem data';
+    const data = String(valor).slice(0, 10);
+    const [ano, mes, dia] = data.split('-');
+    return ano && mes && dia ? `${dia}/${mes}/${ano}` : data;
+  };
+
+  const totalPlanejado = compras
+    .filter((compra) => compra.status === 'PLANEJADA')
+    .reduce((total, compra) => total + Number(compra.valor_estimado || 0), 0);
+
+  const proximas = compras.filter((compra) => {
+    if (!compra.data_desejada || compra.status !== 'PLANEJADA') return false;
+    const hoje = new Date();
+    const limite = new Date();
+    limite.setDate(limite.getDate() + 30);
+    const data = new Date(`${String(compra.data_desejada).slice(0, 10)}T12:00:00`);
+    return data >= new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate()) && data <= limite;
+  }).length;
+
+  const corPrioridade = {
+    BAIXA: ['#f1f5f9', '#475569'],
+    MEDIA: ['#dbeafe', '#1d4ed8'],
+    ALTA: ['#ffedd5', '#c2410c'],
+    ESSENCIAL: ['#fee2e2', '#b91c1c'],
+  };
+
+  return (
+    <section>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '12px', marginBottom: '18px' }}>
+        <div style={{ border: '1px solid #e2e8f0', borderRadius: '12px', padding: '14px', background: '#f8fafc' }}>
+          <small style={{ color: '#64748b' }}>Compras planejadas</small>
+          <strong style={{ display: 'block', fontSize: '24px', marginTop: '4px' }}>{compras.filter((item) => item.status === 'PLANEJADA').length}</strong>
+        </div>
+        <div style={{ border: '1px solid #e2e8f0', borderRadius: '12px', padding: '14px', background: '#f8fafc' }}>
+          <small style={{ color: '#64748b' }}>Valor total estimado</small>
+          <strong style={{ display: 'block', fontSize: '24px', marginTop: '4px' }}>{formatarMoeda(totalPlanejado)}</strong>
+        </div>
+        <div style={{ border: '1px solid #e2e8f0', borderRadius: '12px', padding: '14px', background: '#f8fafc' }}>
+          <small style={{ color: '#64748b' }}>Próximos 30 dias</small>
+          <strong style={{ display: 'block', fontSize: '24px', marginTop: '4px' }}>{proximas}</strong>
+        </div>
+      </div>
+
+      <form id="form-compra-programada" onSubmit={salvarCompra} style={{ border: '1px solid #e2e8f0', borderRadius: '14px', padding: '18px', background: '#f8fafc', marginBottom: '20px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
+          <div>
+            <h2 style={{ margin: 0, fontSize: '20px' }}>{editandoId ? '✏️ Editar compra programada' : '🛒 Nova compra programada'}</h2>
+            <p style={{ margin: '4px 0 0', color: '#64748b' }}>Cadastre a intenção de compra. A análise de impacto no caixa será adicionada na próxima etapa.</p>
+          </div>
+          {editandoId && <Btn type="button" onClick={limparFormulario}>Cancelar edição</Btn>}
+        </div>
+
+        <div className="filter-grid">
+          <label>O que você quer comprar? *<input value={form.descricao} onChange={(e) => setForm({ ...form, descricao: e.target.value })} placeholder="Ex.: notebook, TV, viagem..." /></label>
+          <label>Valor estimado *<input type="number" min="0.01" step="0.01" value={form.valorEstimado} onChange={(e) => setForm({ ...form, valorEstimado: e.target.value })} placeholder="0,00" /></label>
+          <label>Data desejada *<input type="date" value={form.dataDesejada} onChange={(e) => setForm({ ...form, dataDesejada: e.target.value })} /></label>
+          <label>Prioridade *<select value={form.prioridade} onChange={(e) => setForm({ ...form, prioridade: e.target.value })}><option value="BAIXA">Baixa</option><option value="MEDIA">Média</option><option value="ALTA">Alta</option><option value="ESSENCIAL">Essencial</option></select></label>
+          <label>Forma de pagamento *<select value={form.formaPagamento} onChange={(e) => setForm({ ...form, formaPagamento: e.target.value, parcelas: e.target.value === 'A_VISTA' ? 1 : Math.max(2, Number(form.parcelas) || 2) })}><option value="A_VISTA">À vista</option><option value="PARCELADO">Parcelado</option></select></label>
+          {form.formaPagamento === 'PARCELADO' && <label>Parcelas *<input type="number" min="2" max="60" value={form.parcelas} onChange={(e) => setForm({ ...form, parcelas: e.target.value })} /></label>}
+          <label>Conta pretendida<select value={form.contaId} onChange={(e) => setForm({ ...form, contaId: e.target.value })}><option value="">Ainda não definida</option>{contas.filter((conta) => conta.ativo !== false).map((conta) => <option key={conta.id} value={conta.id}>{conta.nome}</option>)}</select></label>
+          <label>Categoria macro<select value={form.categoriaMacroId} onChange={(e) => setForm({ ...form, categoriaMacroId: e.target.value, categoriaDetalhadaId: '' })}><option value="">Sem categoria</option>{categoriasAgrupadas.map((categoria) => <option key={categoria.id} value={categoria.id}>{categoria.emoji || ''} {categoria.nome}</option>)}</select></label>
+          <label>Categoria detalhada<select value={form.categoriaDetalhadaId} onChange={(e) => setForm({ ...form, categoriaDetalhadaId: e.target.value })} disabled={!form.categoriaMacroId}><option value="">Sem detalhamento</option>{(macroSelecionada?.filhas || []).map((categoria) => <option key={categoria.id} value={categoria.id}>{categoria.emoji || ''} {categoria.nome}</option>)}</select></label>
+        </div>
+
+        <label style={{ display: 'block', marginTop: '12px' }}>Observações<textarea value={form.observacao} onChange={(e) => setForm({ ...form, observacao: e.target.value })} rows="3" placeholder="Ex.: modelo desejado, motivo da compra, condição mínima..." style={{ width: '100%', marginTop: '6px', resize: 'vertical' }} /></label>
+
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '16px' }}>
+          <Btn type="submit" variant="primary" disabled={salvando}>{salvando ? 'Salvando...' : editandoId ? 'Salvar alterações' : 'Cadastrar compra'}</Btn>
+        </div>
+      </form>
+
+      <div>
+        <h2 style={{ margin: '0 0 12px', fontSize: '20px' }}>Compras cadastradas</h2>
+        {carregando ? <Spinner texto="Carregando compras..." /> : compras.length === 0 ? (
+          <div style={{ border: '1px dashed #cbd5e1', borderRadius: '14px', padding: '28px', textAlign: 'center', color: '#64748b' }}>
+            Nenhuma compra programada ainda. Cadastre a primeira acima.
+          </div>
+        ) : (
+          <div style={{ display: 'grid', gap: '10px' }}>
+            {compras.map((compra) => {
+              const cores = corPrioridade[compra.prioridade] || corPrioridade.MEDIA;
+              const categoria = compra.categoria_detalhada_nome || compra.categoria_macro_nome || 'Sem categoria';
+              return (
+                <div key={compra.id} style={{ border: '1px solid #e2e8f0', borderRadius: '12px', padding: '14px', background: 'white', display: 'grid', gridTemplateColumns: 'minmax(220px, 1.6fr) repeat(3, minmax(120px, 0.8fr)) auto', gap: '14px', alignItems: 'center' }}>
+                  <div>
+                    <strong style={{ display: 'block', fontSize: '16px' }}>{compra.descricao}</strong>
+                    <small style={{ color: '#64748b' }}>{categoria}{compra.conta_nome ? ` · ${compra.conta_nome}` : ''}</small>
+                  </div>
+                  <div><small style={{ display: 'block', color: '#64748b' }}>Valor</small><strong>{formatarMoeda(compra.valor_estimado)}</strong></div>
+                  <div><small style={{ display: 'block', color: '#64748b' }}>Quando</small><strong>{formatarDataCompra(compra.data_desejada)}</strong></div>
+                  <div>
+                    <small style={{ display: 'block', color: '#64748b', marginBottom: '4px' }}>Prioridade</small>
+                    <span style={{ background: cores[0], color: cores[1], borderRadius: '999px', padding: '4px 8px', fontSize: '12px', fontWeight: 700 }}>{compra.prioridade}</span>
+                    <small style={{ display: 'block', color: '#64748b', marginTop: '5px' }}>{compra.forma_pagamento === 'PARCELADO' ? `${compra.parcelas}x` : 'À vista'}</small>
+                  </div>
+                  <div style={{ display: 'flex', gap: '6px', justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+                    <Btn size="sm" onClick={() => editarCompra(compra)}>Editar</Btn>
+                    <Btn size="sm" onClick={() => excluirCompra(compra)}>Excluir</Btn>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function TelaPrevisoes({ contas = [], token, onVoltar }) {
   const [aba, setAba] = useState('orcamento');
   const abas = [
@@ -2100,28 +2352,7 @@ function TelaPrevisoes({ contas = [], token, onVoltar }) {
 
       {aba === 'orcamento' && <TelaPlanejamentoMensal token={token} onVoltar={onVoltar} />}
       {aba === 'contas' && <TelaProvisoes contas={contas} token={token} onVoltar={onVoltar} />}
-      {aba === 'compras' && (
-        <section style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '14px', padding: '22px' }}>
-          <h2 style={{ marginTop: 0 }}>🛒 Compras programadas</h2>
-          <p style={{ color: '#475569', maxWidth: '760px' }}>
-            Esta área vai substituir a antiga experiência em tela sobreposta. A próxima etapa será cadastrar compras futuras com valor estimado, prioridade, forma de pagamento e análise de impacto no caixa.
-          </p>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '12px', marginTop: '16px' }}>
-            <div style={{ background: 'white', borderRadius: '12px', padding: '14px', border: '1px solid #e5e7eb' }}>
-              <strong>1. Simular compra</strong>
-              <p style={{ color: '#64748b', marginBottom: 0 }}>Ex.: fogão, notebook, viagem ou qualquer compra futura.</p>
-            </div>
-            <div style={{ background: 'white', borderRadius: '12px', padding: '14px', border: '1px solid #e5e7eb' }}>
-              <strong>2. Analisar impacto</strong>
-              <p style={{ color: '#64748b', marginBottom: 0 }}>Comparar a compra com receitas, despesas e contas previstas.</p>
-            </div>
-            <div style={{ background: 'white', borderRadius: '12px', padding: '14px', border: '1px solid #e5e7eb' }}>
-              <strong>3. Transformar em previsão</strong>
-              <p style={{ color: '#64748b', marginBottom: 0 }}>Quando aprovada, a compra poderá virar orçamento ou conta prevista.</p>
-            </div>
-          </div>
-        </section>
-      )}
+      {aba === 'compras' && <TelaComprasProgramadas contas={contas} token={token} />}
     </div>
   );
 }
