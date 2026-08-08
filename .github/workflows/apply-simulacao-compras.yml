@@ -1,0 +1,72 @@
+name: Aplicar simulacao de Compras Programadas
+
+on:
+  push:
+    branches:
+      - agent/simulacao-compras-caixa
+
+permissions:
+  contents: write
+
+jobs:
+  aplicar-validar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configurar Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Aplicar implementacao
+        run: python .github/scripts/apply_simulacao_compras.py
+
+      - name: Ajustar limite de datas da projecao
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('backend-server.js')
+          s = p.read_text(encoding='utf-8')
+          old = "    const ultimoMes = somarMesesChaveCompra(mesAtual, horizonteMeses - 1);\n    const dataLimite = `${ultimoMes}-31`;"
+          new = "    const mesDepoisDoHorizonte = somarMesesChaveCompra(mesAtual, horizonteMeses);\n    const dataLimiteExclusiva = `${mesDepoisDoHorizonte}-01`;"
+          if old not in s:
+              raise SystemExit('Trecho de limite de data não encontrado')
+          s = s.replace(old, new, 1)
+          s = s.replace("         AND data_prevista <= $2::date", "         AND data_prevista < $2::date", 1)
+          s = s.replace("      [req.usuario.usuario_id, dataLimite]", "      [req.usuario.usuario_id, dataLimiteExclusiva]", 1)
+          p.write_text(s, encoding='utf-8')
+          PY
+
+      - name: Validar backend
+        run: node --check backend-server.js
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Validar diff e escopo
+        run: |
+          git diff --check
+          grep -q "compras-programadas/:id/simular" backend-server.js
+          grep -q "Simular impacto" App.jsx
+          test -z "$(git diff --name-only | grep '^public/' || true)"
+
+      - name: Limpar automacao temporaria
+        run: |
+          rm -f .github/scripts/apply_simulacao_compras.py
+          rm -f .github/workflows/apply-simulacao-compras.yml
+
+      - name: Commit da implementacao validada
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Implementar simulacao de impacto de compras no caixa"
+          git push
