@@ -1,0 +1,71 @@
+name: Comparador de cenarios de compra
+
+on:
+  push:
+    branches:
+      - feat/compras-comparador-cenarios
+    paths:
+      - changes/apply-comparador-cenarios.mjs
+      - .github/workflows/comparador-cenarios.yml
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: feat/compras-comparador-cenarios
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Apply comparator
+        run: node changes/apply-comparador-cenarios.mjs
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Run comparator assertions
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const app = fs.readFileSync('App.jsx', 'utf8');
+          const required = [
+            'const compararCenarios = async',
+            "horizonteMeses: 18",
+            "const [reservaMinimaComparacao, setReservaMinimaComparacao]",
+            'Comparador de cenários',
+            'Melhor cenário dentro da reserva definida',
+            'comprar',
+            'Usar no simulador',
+            'cenariosClassificados.slice(0, 8)',
+          ];
+          for (const trecho of required) {
+            if (!app.includes(trecho)) throw new Error(`Trecho obrigatório ausente: ${trecho}`);
+          }
+          if (!app.includes('indice += 3')) throw new Error('Comparador não limita concorrência em lotes.');
+          if (!app.includes("a.adiamentoMeses - b.adiamentoMeses")) throw new Error('Ranking não prioriza menor adiamento entre cenários adequados.');
+          console.log('Assertions do comparador aprovadas.');
+          NODE
+
+      - name: Check diff
+        run: git diff --check
+
+      - name: Commit validated App.jsx
+        run: |
+          git add App.jsx
+          git commit -m "Adicionar comparador de cenários de compra"
+          git push origin feat/compras-comparador-cenarios
