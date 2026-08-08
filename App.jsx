@@ -2061,17 +2061,69 @@ function Sidebar({ modo, onNavegar, usuario, onLogout, aberta = false, onFechar 
   const itens = [
     ['home', '📊', 'Dashboard'],
     ['transacoes', '💸', 'Transações'],
-    ['planejamento', '🗓️', 'Planejamento'],
-    ['provisoes', '📌', 'Provisões'],
+    ['previsoes', '🔮', 'Previsões'],
     ['conferencia-saldos', '🏦', 'Conferência'],
   ];
-  return <aside className={`sidebar ${aberta ? 'open' : ''}`}><div className="sidebar-brand"><span>💰</span><strong>Finanças</strong><button type="button" className="sidebar-close" onClick={onFechar} aria-label="Fechar menu">×</button></div><div className="sidebar-sep" /> <nav>{itens.map(([id, icone, label]) => <button key={id} className={`sidebar-item ${modo === id ? 'active' : ''}`} onClick={() => onNavegar(id)}><span>{icone}</span><span className="sidebar-label">{label}</span></button>)}<div className="sidebar-sep" /><button className={`sidebar-item admin ${modo === 'admin' ? 'active' : ''}`} onClick={() => onNavegar('admin')}><span>⚙️</span><span className="sidebar-label">Admin</span></button></nav><div className="sidebar-footer"><img src={usuario?.foto_url || usuario?.picture || 'https://ui-avatars.com/api/?name=Financas'} alt="Usuário" /><span className="sidebar-label">{(usuario?.nome || usuario?.email || 'Usuário').split(' ')[0]}</span><button onClick={onLogout}>→ Sair</button></div></aside>;
+  const estaAtivo = (id) => id === modo || (id === 'previsoes' && ['previsoes', 'planejamento', 'provisoes'].includes(modo));
+
+  return <aside className={`sidebar ${aberta ? 'open' : ''}`}><div className="sidebar-brand"><span>💰</span><strong>Finanças</strong><button type="button" className="sidebar-close" onClick={onFechar} aria-label="Fechar menu">×</button></div><div className="sidebar-sep" /> <nav>{itens.map(([id, icone, label]) => <button key={id} className={`sidebar-item ${estaAtivo(id) ? 'active' : ''}`} onClick={() => onNavegar(id)}><span>{icone}</span><span className="sidebar-label">{label}</span></button>)}<div className="sidebar-sep" /><button className={`sidebar-item admin ${modo === 'admin' ? 'active' : ''}`} onClick={() => onNavegar('admin')}><span>⚙️</span><span className="sidebar-label">Admin</span></button></nav><div className="sidebar-footer"><img src={usuario?.foto_url || usuario?.picture || 'https://ui-avatars.com/api/?name=Financas'} alt="Usuário" /><span className="sidebar-label">{(usuario?.nome || usuario?.email || 'Usuário').split(' ')[0]}</span><button onClick={onLogout}>→ Sair</button></div></aside>;
 }
 
 function HeaderPrincipal({ usuario, token, onLogout, onAbrirMenu }) {
   const [aberto, setAberto] = useState(false);
   const nome = usuario?.nome || usuario?.email || 'Usuário';
   return <header className="top-header"><div className="top-header-left"><button type="button" className="mobile-menu-button" onClick={onAbrirMenu} aria-label="Abrir menu">☰</button><div><h1>💰 Finanças Pessoais</h1><p>Olá, {nome}</p></div></div><div className="top-actions"><NotificacoesBell token={token} /><div className="avatar-menu"><button className="avatar-button" onClick={() => setAberto(!aberto)}><img src={usuario?.foto_url || usuario?.picture || 'https://ui-avatars.com/api/?name=Financas'} alt="Avatar" /><span className="avatar-name">{nome.split(' ')[0]}</span><span>▾</span></button>{aberto && <div className="avatar-dropdown"><strong>{nome}</strong><small>{usuario?.email}</small><button onClick={onLogout}>Sair</button></div>}</div></div></header>;
+}
+
+function TelaPrevisoes({ contas = [], token, onVoltar }) {
+  const [aba, setAba] = useState('orcamento');
+  const abas = [
+    ['orcamento', '📊 Orçamento', 'Planejamento mensal por categoria'],
+    ['contas', '📌 Contas previstas', 'Compromissos esperados e conciliação'],
+    ['compras', '🛒 Compras programadas', 'Decisões futuras de compra'],
+  ];
+
+  return (
+    <div className="content-card" style={{ background: 'white', borderRadius: '12px', padding: '24px' }}>
+      <PageHeader
+        icone="🔮"
+        titulo="Previsões"
+        descricao="Planejamento, contas previstas e compras futuras em uma única área."
+        breadcrumb={<Breadcrumb atual="Previsões" onVoltar={onVoltar} />}
+      />
+
+      <div className="admin-tabs" style={{ marginBottom: '18px' }}>
+        {abas.map(([id, label, descricao]) => (
+          <button key={id} className={aba === id ? 'active' : ''} onClick={() => setAba(id)} title={descricao}>{label}</button>
+        ))}
+      </div>
+
+      {aba === 'orcamento' && <TelaPlanejamentoMensal token={token} onVoltar={onVoltar} />}
+      {aba === 'contas' && <TelaProvisoes contas={contas} token={token} onVoltar={onVoltar} />}
+      {aba === 'compras' && (
+        <section style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '14px', padding: '22px' }}>
+          <h2 style={{ marginTop: 0 }}>🛒 Compras programadas</h2>
+          <p style={{ color: '#475569', maxWidth: '760px' }}>
+            Esta área vai substituir a antiga experiência em tela sobreposta. A próxima etapa será cadastrar compras futuras com valor estimado, prioridade, forma de pagamento e análise de impacto no caixa.
+          </p>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '12px', marginTop: '16px' }}>
+            <div style={{ background: 'white', borderRadius: '12px', padding: '14px', border: '1px solid #e5e7eb' }}>
+              <strong>1. Simular compra</strong>
+              <p style={{ color: '#64748b', marginBottom: 0 }}>Ex.: fogão, notebook, viagem ou qualquer compra futura.</p>
+            </div>
+            <div style={{ background: 'white', borderRadius: '12px', padding: '14px', border: '1px solid #e5e7eb' }}>
+              <strong>2. Analisar impacto</strong>
+              <p style={{ color: '#64748b', marginBottom: 0 }}>Comparar a compra com receitas, despesas e contas previstas.</p>
+            </div>
+            <div style={{ background: 'white', borderRadius: '12px', padding: '14px', border: '1px solid #e5e7eb' }}>
+              <strong>3. Transformar em previsão</strong>
+              <p style={{ color: '#64748b', marginBottom: 0 }}>Quando aprovada, a compra poderá virar orçamento ou conta prevista.</p>
+            </div>
+          </div>
+        </section>
+      )}
+    </div>
+  );
 }
 
 const emojisCategorias = ['🍔', '🛒', '🛍️', '🎮', '🎬', '🏠', '🚗', '🚌', '✈️', '💡', '📱', '💊', '🎓', '💼', '💰', '📈', '🎁', '🐶', '🏋️', '☕', '🍕', '🧾', '🔧', '✨'];
@@ -2638,6 +2690,7 @@ function Dashboard({ usuario, token, onLogout }) {
 
         {modo === 'admin' && <TelaAdmin token={token} usuario={usuario} onVoltar={() => setModo('home')} />}
         {modo === 'conferencia-saldos' && <TelaConferenciaSaldos contas={contas} token={token} onVoltar={() => setModo('home')} onAtualizarContas={carregarContas} />}
+        {modo === 'previsoes' && <TelaPrevisoes contas={contas} token={token} onVoltar={() => setModo('home')} />}
         {modo === 'provisoes' && <TelaProvisoes contas={contas} token={token} onVoltar={() => setModo('home')} />}
         {modo === 'planejamento' && <TelaPlanejamentoMensal token={token} onVoltar={() => setModo('home')} />}
         {modo === 'transacoes' && <TelaTransacoes contaInicial={contaSelecionada} contas={contas} token={token} onVoltar={() => setModo('home')} onAtualizarContas={carregarContas} onImportar={() => setModo('importar')} />}
