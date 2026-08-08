@@ -5,8 +5,8 @@ on:
     branches:
       - feat/compras-programadas-ciclo-vida
     paths:
-      - changes/apply-compras-ciclo-vida.mjs
-      - changes/apply-compras-ciclo-vida-responsive.mjs
+      - changes/apply-compras-ciclo-vida-v2.mjs
+      - changes/apply-compras-ciclo-vida-css.mjs
       - .github/workflows/compras-ciclo-vida.yml
   pull_request:
     branches:
@@ -32,8 +32,8 @@ jobs:
 
       - name: Apply lifecycle changes
         run: |
-          node changes/apply-compras-ciclo-vida.mjs
-          node changes/apply-compras-ciclo-vida-responsive.mjs
+          node changes/apply-compras-ciclo-vida-v2.mjs
+          node changes/apply-compras-ciclo-vida-css.mjs
 
       - name: Install dependencies
         run: npm ci
