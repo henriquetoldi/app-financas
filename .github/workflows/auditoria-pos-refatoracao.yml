@@ -1,0 +1,71 @@
+name: Auditoria pos-refatoracao
+
+on:
+  push:
+    branches:
+      - chore/auditoria-pos-refatoracao
+    paths:
+      - changes/apply-auditoria-pos-refatoracao.mjs
+      - .github/workflows/auditoria-pos-refatoracao.yml
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  audit-and-fix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: chore/auditoria-pos-refatoracao
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Apply safe audit fixes
+        run: node changes/apply-auditoria-pos-refatoracao.mjs
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Run static regression assertions
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const app = fs.readFileSync('App.jsx', 'utf8');
+          const count100vh = (app.match(/minHeight: '100vh'/g) || []).length;
+          if (count100vh !== 1) throw new Error(`Esperado apenas o 100vh da tela de login; encontrados ${count100vh}.`);
+          if (app.includes("maxWidth: '1200px'")) throw new Error('Transações ainda usa maxWidth 1200px.');
+          if (app.includes("maxWidth: '1280px'")) throw new Error('Contas previstas ainda usa maxWidth 1280px.');
+          if (!app.includes("return dia + '/' + mes + '/' + ano;")) throw new Error('Proteção contra deslocamento de data não encontrada.');
+
+          const formatarDataCalendario = (data) => {
+            const texto = String(data).trim();
+            const match = texto.match(/^(\d{4})-(\d{2})-(\d{2})/);
+            if (!match) return null;
+            const [, ano, mes, dia] = match;
+            return dia + '/' + mes + '/' + ano;
+          };
+          if (formatarDataCalendario('2026-08-01') !== '01/08/2026') throw new Error('Data ISO simples ainda desloca.');
+          if (formatarDataCalendario('2026-08-08T00:00:00.000Z') !== '08/08/2026') throw new Error('Timestamp de data financeira ainda desloca.');
+          console.log('Assertions de regressão aprovadas.');
+          NODE
+
+      - name: Check diff
+        run: git diff --check
+
+      - name: Commit validated App.jsx
+        run: |
+          git add App.jsx
+          git commit -m "Corrigir regressões pós-refatoração"
+          git push origin chore/auditoria-pos-refatoracao
