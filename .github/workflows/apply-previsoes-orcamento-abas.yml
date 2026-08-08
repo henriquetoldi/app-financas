@@ -1,0 +1,48 @@
+name: Apply previsoes orcamento tabs patch
+
+on:
+  push:
+    branches:
+      - feat/previsoes-orcamento-abas
+    paths:
+      - changes/previsoes-orcamento-abas.patch
+      - .github/workflows/apply-previsoes-orcamento-abas.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: feat/previsoes-orcamento-abas
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Check patch
+        run: git apply --check changes/previsoes-orcamento-abas.patch
+
+      - name: Apply patch
+        run: git apply changes/previsoes-orcamento-abas.patch
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Check diff
+        run: git diff --check
+
+      - name: Commit validated App.jsx
+        run: |
+          git add App.jsx
+          git commit -m "Organizar orçamento em abas internas"
+          git push origin feat/previsoes-orcamento-abas
