@@ -5,18 +5,17 @@ on:
     branches:
       - feat/compras-comparador-cenarios
     paths:
-      - changes/apply-comparador-cenarios.mjs
-      - changes/fix-comparador-transform.mjs
+      - App.jsx
       - .github/workflows/comparador-cenarios.yml
   pull_request:
     branches:
       - main
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  apply-and-validate:
+  validate:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout branch
@@ -24,16 +23,6 @@ jobs:
         with:
           ref: feat/compras-comparador-cenarios
           fetch-depth: 0
-
-      - name: Configure git
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-      - name: Apply comparator
-        run: |
-          node changes/fix-comparador-transform.mjs
-          node changes/apply-comparador-cenarios.mjs
 
       - name: Install dependencies
         run: npm ci
@@ -63,11 +52,5 @@ jobs:
           console.log('Assertions do comparador aprovadas.');
           NODE
 
-      - name: Check diff
-        run: git diff --check
-
-      - name: Commit validated App.jsx
-        run: |
-          git add App.jsx
-          git commit -m "Adicionar comparador de cenários de compra"
-          git push origin feat/compras-comparador-cenarios
+      - name: Check branch diff
+        run: git diff --check origin/main...HEAD
