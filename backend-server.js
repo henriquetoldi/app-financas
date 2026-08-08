@@ -3176,6 +3176,457 @@ app.post('/api/compras-programadas/:id/simular', verificarToken, async (req, res
 
 
 // ============================================================================
+// ASSISTENTE FINANCEIRO — SOMENTE LEITURA
+// ============================================================================
+
+const ASSISTENTE_OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-5.6-luna';
+const ASSISTENTE_MAX_HISTORICO = 10;
+const ASSISTENTE_MAX_MENSAGEM = 2000;
+
+function inteiroAssistente(valor, minimo, maximo, padrao) {
+  const numero = Number(valor);
+  if (!Number.isInteger(numero)) return padrao;
+  return Math.min(maximo, Math.max(minimo, numero));
+}
+
+function periodoPassadoAssistente(meses) {
+  const qtd = inteiroAssistente(meses, 1, 24, 6);
+  const hoje = new Date();
+  const inicio = new Date(Date.UTC(hoje.getUTCFullYear(), hoje.getUTCMonth() - (qtd - 1), 1));
+  const fim = new Date(Date.UTC(hoje.getUTCFullYear(), hoje.getUTCMonth() + 1, 1));
+  return { meses: qtd, inicio: inicio.toISOString().slice(0, 10), fim: fim.toISOString().slice(0, 10) };
+}
+
+function periodoFuturoAssistente(meses) {
+  const qtd = inteiroAssistente(meses, 1, 24, 6);
+  const hoje = new Date();
+  const inicio = new Date(Date.UTC(hoje.getUTCFullYear(), hoje.getUTCMonth(), 1));
+  const fim = new Date(Date.UTC(hoje.getUTCFullYear(), hoje.getUTCMonth() + qtd, 1));
+  return { meses: qtd, inicio: inicio.toISOString().slice(0, 10), fim: fim.toISOString().slice(0, 10) };
+}
+
+async function ferramentaGastosPorCategoria(usuarioId, args = {}) {
+  const periodo = periodoPassadoAssistente(args.meses);
+  const nivel = args.nivel === 'detalhada' ? 'detalhada' : 'macro';
+  const limite = inteiroAssistente(args.limite, 1, 20, 10);
+  const expressaoCategoria = nivel === 'detalhada'
+    ? "COALESCE(cd.nome, CASE WHEN legado.categoria_pai_id IS NOT NULL THEN legado.nome END, 'Sem detalhamento')"
+    : "COALESCE(cm.nome, CASE WHEN legado.categoria_pai_id IS NULL THEN legado.nome ELSE pai_legado.nome END, 'Não categorizado')";
+
+  const result = await pool.query(
+    `SELECT ${expressaoCategoria} AS categoria,
+            COUNT(*)::int AS quantidade,
+            ROUND(SUM(ABS(t.valor))::numeric, 2) AS valor,
+            ROUND(SUM(SUM(ABS(t.valor))) OVER ()::numeric, 2) AS total_geral
+     FROM transacoes t
+     JOIN contas c ON c.id = t.conta_id
+     LEFT JOIN categorias cm ON cm.id = t.categoria_macro_id
+     LEFT JOIN categorias cd ON cd.id = t.categoria_detalhada_id
+     LEFT JOIN categorias legado ON legado.id = t.categoria_id
+     LEFT JOIN categorias pai_legado ON pai_legado.id = legado.categoria_pai_id
+     WHERE c.usuario_id = $1
+       AND t.deletado_em IS NULL
+       AND t.tipo = 'DEBITO'
+       AND COALESCE(t.eh_transferencia_interna, false) = false
+       AND t.data >= $2::date
+       AND t.data < $3::date
+     GROUP BY 1
+     ORDER BY valor DESC
+     LIMIT $4`,
+    [usuarioId, periodo.inicio, periodo.fim, limite]
+  );
+  const totalGastoPeriodo = Number(result.rows[0]?.total_geral || 0);
+  return {
+    periodo,
+    nivel,
+    totalGastoPeriodo: Number(totalGastoPeriodo.toFixed(2)),
+    categorias: result.rows.map((item) => ({
+      categoria: item.categoria,
+      quantidade: Number(item.quantidade || 0),
+      valor: Number(item.valor || 0),
+      percentualDoGastoPeriodo: totalGastoPeriodo ? Number(((Number(item.valor || 0) / totalGastoPeriodo) * 100).toFixed(1)) : 0,
+    })),
+  };
+}
+
+async function ferramentaNaoCategorizados(usuarioId, args = {}) {
+  const periodo = periodoPassadoAssistente(args.meses);
+  const limite = inteiroAssistente(args.limite, 1, 50, 20);
+  const resumo = await pool.query(
+    `SELECT COUNT(*)::int AS quantidade,
+            COUNT(*) FILTER (WHERE t.tipo = 'DEBITO')::int AS quantidade_debitos,
+            COUNT(*) FILTER (WHERE t.tipo = 'CREDITO')::int AS quantidade_creditos,
+            ROUND(COALESCE(SUM(ABS(t.valor)) FILTER (WHERE t.tipo = 'DEBITO'), 0)::numeric, 2) AS valor_debitos,
+            ROUND(COALESCE(SUM(ABS(t.valor)) FILTER (WHERE t.tipo = 'CREDITO'), 0)::numeric, 2) AS valor_creditos
+     FROM transacoes t
+     JOIN contas c ON c.id = t.conta_id
+     WHERE c.usuario_id = $1
+       AND t.deletado_em IS NULL
+       AND COALESCE(t.eh_transferencia_interna, false) = false
+       AND t.data >= $2::date
+       AND t.data < $3::date
+       AND t.categoria_id IS NULL
+       AND t.categoria_macro_id IS NULL
+       AND t.categoria_detalhada_id IS NULL`,
+    [usuarioId, periodo.inicio, periodo.fim]
+  );
+  const itens = await pool.query(
+    `SELECT t.data, t.descricao, t.tipo, t.valor, c.nome AS conta_nome
+     FROM transacoes t
+     JOIN contas c ON c.id = t.conta_id
+     WHERE c.usuario_id = $1
+       AND t.deletado_em IS NULL
+       AND COALESCE(t.eh_transferencia_interna, false) = false
+       AND t.data >= $2::date
+       AND t.data < $3::date
+       AND t.categoria_id IS NULL
+       AND t.categoria_macro_id IS NULL
+       AND t.categoria_detalhada_id IS NULL
+     ORDER BY t.data DESC, t.criado_em DESC
+     LIMIT $4`,
+    [usuarioId, periodo.inicio, periodo.fim, limite]
+  );
+  return {
+    periodo,
+    quantidade: Number(resumo.rows[0]?.quantidade || 0),
+    debitos: {
+      quantidade: Number(resumo.rows[0]?.quantidade_debitos || 0),
+      valor: Number(resumo.rows[0]?.valor_debitos || 0),
+    },
+    creditos: {
+      quantidade: Number(resumo.rows[0]?.quantidade_creditos || 0),
+      valor: Number(resumo.rows[0]?.valor_creditos || 0),
+    },
+    exemplos: itens.rows.map((item) => ({
+      data: String(item.data).slice(0, 10),
+      descricao: item.descricao,
+      tipo: item.tipo,
+      valor: Number(item.valor || 0),
+      conta: item.conta_nome,
+    })),
+  };
+}
+
+async function ferramentaComprasProgramadas(usuarioId, args = {}) {
+  const periodo = periodoFuturoAssistente(args.meses);
+  const mesAtual = chaveMesCompra(periodo.inicio);
+  const chaves = Array.from({ length: periodo.meses }, (_, indice) => somarMesesChaveCompra(mesAtual, indice));
+  const impactos = new Map(chaves.map((chave) => [chave, 0]));
+
+  const result = await pool.query(
+    `SELECT descricao, valor_estimado, data_desejada, prioridade, forma_pagamento, parcelas
+     FROM compras_programadas
+     WHERE usuario_id = $1
+       AND status = 'PLANEJADA'
+       AND data_desejada < $2::date
+     ORDER BY data_desejada ASC, prioridade DESC`,
+    [usuarioId, periodo.fim]
+  );
+
+  for (const compra of result.rows) {
+    let inicio = chaveMesCompra(compra.data_desejada);
+    if (!inicio) continue;
+    if (diferencaMesesCompra(mesAtual, inicio) < 0) inicio = mesAtual;
+    const distribuicao = distribuirCompraEmMeses({
+      valor: compra.valor_estimado,
+      formaPagamento: compra.forma_pagamento,
+      parcelas: compra.parcelas,
+      mesInicio: inicio,
+    });
+    for (const [mes, valor] of distribuicao.entries()) {
+      if (impactos.has(mes)) impactos.set(mes, impactos.get(mes) + Number(valor || 0));
+    }
+  }
+
+  return {
+    periodo,
+    quantidadeCompras: result.rows.length,
+    valorTotalDasCompras: Number(result.rows.reduce((soma, item) => soma + Number(item.valor_estimado || 0), 0).toFixed(2)),
+    impactoPorMes: chaves.map((mes) => ({ mes, valor: Number((impactos.get(mes) || 0).toFixed(2)) })),
+    compras: result.rows.slice(0, 30).map((item) => ({
+      descricao: item.descricao,
+      valorEstimado: Number(item.valor_estimado || 0),
+      dataDesejada: String(item.data_desejada).slice(0, 10),
+      prioridade: item.prioridade,
+      pagamento: item.forma_pagamento,
+      parcelas: Number(item.parcelas || 1),
+    })),
+  };
+}
+
+async function ferramentaContasPrevistas(usuarioId, args = {}) {
+  const periodo = periodoFuturoAssistente(args.meses);
+  const mesAtual = chaveMesCompra(periodo.inicio);
+  const chaves = Array.from({ length: periodo.meses }, (_, indice) => somarMesesChaveCompra(mesAtual, indice));
+  const mapa = new Map(chaves.map((chave) => [chave, { creditos: 0, debitos: 0, quantidade: 0 }]));
+
+  const result = await pool.query(
+    `SELECT id, descricao, valor_previsto, tipo, data_prevista, status
+     FROM provisoes
+     WHERE usuario_id = $1
+       AND status IN ('PENDENTE', 'ATRASADA')
+       AND data_prevista < $2::date
+     ORDER BY data_prevista ASC`,
+    [usuarioId, periodo.fim]
+  );
+
+  for (const item of result.rows) {
+    let mes = chaveMesCompra(item.data_prevista);
+    if (!mes) continue;
+    if (diferencaMesesCompra(mesAtual, mes) < 0) mes = mesAtual;
+    if (!mapa.has(mes)) continue;
+    const atual = mapa.get(mes);
+    const valor = Number(item.valor_previsto || 0);
+    if (item.tipo === 'CREDITO') atual.creditos += valor;
+    if (item.tipo === 'DEBITO') atual.debitos += valor;
+    atual.quantidade += 1;
+  }
+
+  return {
+    periodo,
+    quantidadeContas: result.rows.length,
+    porMes: chaves.map((mes) => {
+      const item = mapa.get(mes);
+      return {
+        mes,
+        creditos: Number(item.creditos.toFixed(2)),
+        debitos: Number(item.debitos.toFixed(2)),
+        saldoLiquido: Number((item.creditos - item.debitos).toFixed(2)),
+        quantidade: item.quantidade,
+      };
+    }),
+    exemplos: result.rows.slice(0, 30).map((item) => ({
+      descricao: item.descricao,
+      valor: Number(item.valor_previsto || 0),
+      tipo: item.tipo,
+      data: String(item.data_prevista).slice(0, 10),
+      status: item.status,
+    })),
+  };
+}
+
+async function ferramentaSaldos(usuarioId) {
+  const result = await pool.query(
+    `SELECT nome, banco, tipo, COALESCE(saldo_atual, saldo_inicial, 0)::numeric AS saldo
+     FROM contas
+     WHERE usuario_id = $1 AND ativo = true
+     ORDER BY nome ASC`,
+    [usuarioId]
+  );
+  const contas = result.rows.map((item) => ({
+    nome: item.nome,
+    banco: item.banco,
+    tipo: item.tipo,
+    saldo: Number(item.saldo || 0),
+  }));
+  return {
+    saldoTotal: Number(contas.reduce((soma, item) => soma + item.saldo, 0).toFixed(2)),
+    quantidadeContas: contas.length,
+    contas,
+  };
+}
+
+const FERRAMENTAS_ASSISTENTE = [
+  {
+    type: 'function',
+    name: 'gastos_por_categoria',
+    description: 'Consulta despesas reais agrupadas por categoria nos últimos meses. Use para descobrir onde o usuário mais gastou e comparar categorias.',
+    strict: true,
+    parameters: {
+      type: 'object',
+      properties: {
+        meses: { type: 'integer', minimum: 1, maximum: 24, description: 'Quantidade de meses incluindo o mês atual.' },
+        nivel: { type: 'string', enum: ['macro', 'detalhada'], description: 'Nível de categoria a analisar.' },
+        limite: { type: 'integer', minimum: 1, maximum: 20, description: 'Quantidade máxima de categorias retornadas.' },
+      },
+      required: ['meses', 'nivel', 'limite'],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: 'function',
+    name: 'lancamentos_nao_categorizados',
+    description: 'Conta e lista exemplos de lançamentos sem qualquer categoria nos últimos meses.',
+    strict: true,
+    parameters: {
+      type: 'object',
+      properties: {
+        meses: { type: 'integer', minimum: 1, maximum: 24 },
+        limite: { type: 'integer', minimum: 1, maximum: 50 },
+      },
+      required: ['meses', 'limite'],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: 'function',
+    name: 'compras_programadas_por_mes',
+    description: 'Consulta compras programadas planejadas e distribui o impacto à vista ou parcelado nos próximos meses.',
+    strict: true,
+    parameters: {
+      type: 'object',
+      properties: { meses: { type: 'integer', minimum: 1, maximum: 24 } },
+      required: ['meses'],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: 'function',
+    name: 'contas_previstas_por_mes',
+    description: 'Consulta créditos e débitos previstos pendentes ou atrasados nos próximos meses.',
+    strict: true,
+    parameters: {
+      type: 'object',
+      properties: { meses: { type: 'integer', minimum: 1, maximum: 24 } },
+      required: ['meses'],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: 'function',
+    name: 'saldos_das_contas',
+    description: 'Consulta os saldos atuais das contas ativas do usuário e o saldo total.',
+    strict: true,
+    parameters: { type: 'object', properties: {}, required: [], additionalProperties: false },
+  },
+];
+
+const ROTULOS_FERRAMENTAS_ASSISTENTE = {
+  gastos_por_categoria: 'gastos por categoria',
+  lancamentos_nao_categorizados: 'não categorizados',
+  compras_programadas_por_mes: 'compras programadas',
+  contas_previstas_por_mes: 'contas previstas',
+  saldos_das_contas: 'saldos das contas',
+};
+
+async function executarFerramentaAssistente(usuarioId, nome, args) {
+  if (nome === 'gastos_por_categoria') return ferramentaGastosPorCategoria(usuarioId, args);
+  if (nome === 'lancamentos_nao_categorizados') return ferramentaNaoCategorizados(usuarioId, args);
+  if (nome === 'compras_programadas_por_mes') return ferramentaComprasProgramadas(usuarioId, args);
+  if (nome === 'contas_previstas_por_mes') return ferramentaContasPrevistas(usuarioId, args);
+  if (nome === 'saldos_das_contas') return ferramentaSaldos(usuarioId);
+  throw new Error('Ferramenta não autorizada para o assistente.');
+}
+
+function extrairTextoRespostaAssistente(response) {
+  if (typeof response?.output_text === 'string' && response.output_text.trim()) return response.output_text.trim();
+  return (response?.output || [])
+    .filter((item) => item.type === 'message')
+    .flatMap((item) => item.content || [])
+    .filter((conteudo) => conteudo.type === 'output_text' && typeof conteudo.text === 'string')
+    .map((conteudo) => conteudo.text)
+    .join('\n')
+    .trim();
+}
+
+async function chamarOpenAIAssistente(payload) {
+  let response;
+  try {
+    response = await fetch('https://api.openai.com/v1/responses', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+  } catch (error) {
+    throw new Error('Não foi possível conectar ao serviço de IA.');
+  }
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const erro = new Error(data?.error?.message || `Falha no serviço de IA (${response.status}).`);
+    erro.statusOpenAI = response.status;
+    throw erro;
+  }
+  return data;
+}
+
+function normalizarHistoricoAssistente(historico) {
+  if (!Array.isArray(historico)) return [];
+  return historico
+    .filter((item) => item && ['user', 'assistant'].includes(item.role) && typeof item.content === 'string')
+    .slice(-ASSISTENTE_MAX_HISTORICO)
+    .map((item) => ({ role: item.role, content: item.content.slice(0, ASSISTENTE_MAX_MENSAGEM) }));
+}
+
+app.post('/api/assistente', verificarToken, async (req, res) => {
+  if (!process.env.OPENAI_API_KEY) {
+    return res.status(503).json({
+      erro: 'Assistente financeiro ainda não configurado no servidor.',
+      codigo: 'OPENAI_API_KEY_AUSENTE',
+    });
+  }
+
+  const mensagem = String(req.body?.mensagem || '').trim().slice(0, ASSISTENTE_MAX_MENSAGEM);
+  if (!mensagem) return res.status(400).json({ erro: 'Escreva uma pergunta para o assistente.' });
+
+  const usuarioId = req.usuario.usuario_id;
+  const historico = normalizarHistoricoAssistente(req.body?.historico);
+  const input = [...historico, { role: 'user', content: mensagem }];
+  const ferramentasUsadas = new Set();
+  const safetyIdentifier = crypto.createHash('sha256').update(String(usuarioId)).digest('hex').slice(0, 32);
+  const hoje = new Date().toISOString().slice(0, 10);
+  const instructions = `Você é o Assistente Financeiro de um aplicativo de finanças pessoais. Data atual do servidor: ${hoje}.
+Responda em português do Brasil, de forma direta, clara e útil.
+Você está em MODO SOMENTE LEITURA. Nunca afirme que criou, editou, excluiu, categorizou ou alterou dados.
+Para perguntas sobre dados financeiros do usuário, use as ferramentas disponíveis. Não invente números, categorias, saldos ou lançamentos.
+Se os dados disponíveis não forem suficientes para responder, diga exatamente o que falta.
+Valores são em BRL. Diferencie fatos encontrados nos dados de interpretações ou sugestões.
+Não exponha IDs internos, SQL, tokens, chaves ou detalhes técnicos do banco.
+Não use tabelas Markdown complexas; prefira conclusão curta, números principais e bullets quando ajudarem.
+As ferramentas disponíveis são exclusivamente de consulta e já estão limitadas ao usuário autenticado.`;
+
+  try {
+    let response = null;
+    for (let rodada = 0; rodada < 5; rodada += 1) {
+      response = await chamarOpenAIAssistente({
+        model: ASSISTENTE_OPENAI_MODEL,
+        instructions,
+        input,
+        tools: FERRAMENTAS_ASSISTENTE,
+        tool_choice: 'auto',
+        reasoning: { effort: 'low' },
+        text: { verbosity: 'medium' },
+        safety_identifier: safetyIdentifier,
+        store: false,
+      });
+
+      input.push(...(response.output || []));
+      const chamadas = (response.output || []).filter((item) => item.type === 'function_call');
+      if (chamadas.length === 0) {
+        const resposta = extrairTextoRespostaAssistente(response);
+        if (!resposta) throw new Error('A IA não retornou uma resposta em texto.');
+        return res.json({
+          resposta,
+          modelo: response.model || ASSISTENTE_OPENAI_MODEL,
+          consultas: Array.from(ferramentasUsadas).map((nome) => ROTULOS_FERRAMENTAS_ASSISTENTE[nome] || nome),
+        });
+      }
+
+      for (const chamada of chamadas) {
+        let args = {};
+        try { args = JSON.parse(chamada.arguments || '{}'); } catch { args = {}; }
+        const resultado = await executarFerramentaAssistente(usuarioId, chamada.name, args);
+        ferramentasUsadas.add(chamada.name);
+        input.push({
+          type: 'function_call_output',
+          call_id: chamada.call_id,
+          output: JSON.stringify(resultado),
+        });
+      }
+    }
+
+    return res.status(502).json({ erro: 'A análise exigiu chamadas demais. Tente fazer uma pergunta mais específica.' });
+  } catch (error) {
+    console.error('Erro no assistente financeiro:', error.message);
+    if (error.statusOpenAI === 429) return res.status(503).json({ erro: 'O limite temporário do serviço de IA foi atingido. Tente novamente em alguns instantes.' });
+    if (error.statusOpenAI === 401 || error.statusOpenAI === 403) return res.status(503).json({ erro: 'A configuração da IA no servidor precisa ser revisada.', codigo: 'OPENAI_CONFIG_INVALIDA' });
+    return res.status(500).json({ erro: 'Não foi possível concluir a análise agora. Tente novamente.' });
+  }
+});
+
+// ============================================================================
 // ROTAS: PROVISÕES E CONCILIAÇÕES
 // ============================================================================
 

@@ -2062,6 +2062,7 @@ function Sidebar({ modo, onNavegar, usuario, onLogout, aberta = false, onFechar 
     ['home', '📊', 'Dashboard'],
     ['transacoes', '💸', 'Transações'],
     ['previsoes', '🔮', 'Previsões'],
+    ['assistente', '✨', 'Assistente'],
     ['conferencia-saldos', '🏦', 'Conferência'],
   ];
   const estaAtivo = (id) => id === modo || (id === 'previsoes' && ['previsoes', 'planejamento', 'provisoes'].includes(modo));
@@ -2075,6 +2076,134 @@ function HeaderPrincipal({ usuario, token, onLogout, onAbrirMenu }) {
   return <header className="top-header"><div className="top-header-left"><button type="button" className="mobile-menu-button" onClick={onAbrirMenu} aria-label="Abrir menu">☰</button><div><h1>💰 Finanças Pessoais</h1><p>Olá, {nome}</p></div></div><div className="top-actions"><NotificacoesBell token={token} /><div className="avatar-menu"><button className="avatar-button" onClick={() => setAberto(!aberto)}><img src={usuario?.foto_url || usuario?.picture || 'https://ui-avatars.com/api/?name=Financas'} alt="Avatar" /><span className="avatar-name">{nome.split(' ')[0]}</span><span>▾</span></button>{aberto && <div className="avatar-dropdown"><strong>{nome}</strong><small>{usuario?.email}</small><button onClick={onLogout}>Sair</button></div>}</div></div></header>;
 }
 
+
+function TelaAssistenteFinanceiro({ token, onVoltar }) {
+  const boasVindas = {
+    role: 'assistant',
+    content: 'Sou o assistente financeiro do seu app. Nesta primeira versão eu posso consultar seus dados e responder perguntas, mas não altero nenhum lançamento, categoria ou previsão.',
+    consultas: [],
+  };
+  const exemplos = [
+    'Qual categoria eu mais gastei nos últimos 6 meses?',
+    'Tenho lançamentos não categorizados?',
+    'Qual a projeção das compras programadas nos próximos 6 meses?',
+    'Como estão minhas contas previstas nos próximos 3 meses?',
+  ];
+  const [mensagens, setMensagens] = useState([boasVindas]);
+  const [texto, setTexto] = useState('');
+  const [enviando, setEnviando] = useState(false);
+  const fimRef = useRef(null);
+
+  useEffect(() => {
+    fimRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, [mensagens, enviando]);
+
+  const enviarPergunta = async (perguntaForcada) => {
+    const pergunta = String(perguntaForcada ?? texto).trim();
+    if (!pergunta || enviando) return;
+
+    const historico = mensagens
+      .filter((item) => item.role === 'user' || item.role === 'assistant')
+      .slice(-10)
+      .map((item) => ({ role: item.role, content: item.content }));
+
+    setMensagens((atuais) => [...atuais, { role: 'user', content: pergunta, consultas: [] }]);
+    setTexto('');
+    setEnviando(true);
+
+    try {
+      const response = await axios.post(`${API_URL}/assistente`, {
+        mensagem: pergunta,
+        historico,
+      }, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      setMensagens((atuais) => [...atuais, {
+        role: 'assistant',
+        content: response.data.resposta || 'Não consegui montar uma resposta.',
+        consultas: response.data.consultas || [],
+      }]);
+    } catch (error) {
+      const codigo = error.response?.data?.codigo;
+      const mensagem = codigo === 'OPENAI_API_KEY_AUSENTE'
+        ? 'O Assistente já está instalado, mas ainda falta configurar a chave da IA no servidor. Adicione OPENAI_API_KEY nas variáveis do Railway para ativá-lo.'
+        : (error.response?.data?.erro || 'Não foi possível consultar o assistente agora.');
+      setMensagens((atuais) => [...atuais, { role: 'assistant', content: mensagem, consultas: [], erro: true }]);
+    } finally {
+      setEnviando(false);
+    }
+  };
+
+  return (
+    <div className="content-card" style={{ background: 'white', borderRadius: '12px', padding: '24px' }}>
+      <style>{`
+        .assistente-shell { max-width: 980px; margin: 0 auto; }
+        .assistente-status { display: inline-flex; align-items: center; gap: 6px; background: #ecfdf5; color: #166534; border: 1px solid #bbf7d0; padding: 6px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; }
+        .assistente-chat { border: 1px solid #e2e8f0; background: #f8fafc; border-radius: 16px; min-height: 430px; max-height: 58vh; overflow-y: auto; padding: 18px; display: flex; flex-direction: column; gap: 12px; }
+        .assistente-msg { max-width: 82%; border-radius: 14px; padding: 12px 14px; line-height: 1.5; font-size: 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
+        .assistente-msg-user { align-self: flex-end; background: #2563eb; color: white; border-bottom-right-radius: 5px; }
+        .assistente-msg-assistant { align-self: flex-start; background: white; color: #0f172a; border: 1px solid #e2e8f0; border-bottom-left-radius: 5px; }
+        .assistente-msg-error { border-color: #fecaca; background: #fef2f2; color: #991b1b; }
+        .assistente-consultas { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+        .assistente-consulta { background: #eff6ff; color: #1d4ed8; border-radius: 999px; padding: 3px 7px; font-size: 10px; font-weight: 700; }
+        .assistente-exemplos { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0; }
+        .assistente-exemplo { border: 1px solid #cbd5e1; background: white; color: #334155; border-radius: 999px; padding: 8px 11px; font-size: 12px; cursor: pointer; }
+        .assistente-exemplo:hover { border-color: #3b82f6; color: #1d4ed8; background: #eff6ff; }
+        .assistente-composer { margin-top: 12px; border: 1px solid #cbd5e1; border-radius: 14px; padding: 10px; background: white; display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: end; }
+        .assistente-composer textarea { width: 100%; min-height: 54px; max-height: 150px; resize: vertical; border: 0; outline: none; padding: 8px; font: inherit; font-size: 14px; box-sizing: border-box; }
+        .assistente-disclaimer { margin-top: 9px; color: #64748b; font-size: 11px; line-height: 1.4; }
+        @media (max-width: 720px) {
+          .assistente-msg { max-width: 94%; }
+          .assistente-chat { max-height: 55vh; padding: 12px; }
+          .assistente-composer { grid-template-columns: 1fr; }
+          .assistente-composer .btn { width: 100%; }
+        }
+      `}</style>
+      <div className="assistente-shell">
+        <PageHeader
+          icone="✨"
+          titulo="Assistente Financeiro"
+          descricao="Pergunte sobre seus gastos, categorias, previsões e compras usando os dados reais do app."
+          breadcrumb={<Breadcrumb atual="Assistente" onVoltar={onVoltar} />}
+          action={<span className="assistente-status">🔒 Somente leitura</span>}
+        />
+
+        <div className="assistente-exemplos">
+          {exemplos.map((exemplo) => <button key={exemplo} type="button" className="assistente-exemplo" onClick={() => enviarPergunta(exemplo)} disabled={enviando}>{exemplo}</button>)}
+        </div>
+
+        <div className="assistente-chat">
+          {mensagens.map((mensagem, indice) => (
+            <div key={`${mensagem.role}-${indice}`} className={`assistente-msg ${mensagem.role === 'user' ? 'assistente-msg-user' : 'assistente-msg-assistant'} ${mensagem.erro ? 'assistente-msg-error' : ''}`}>
+              {mensagem.content}
+              {mensagem.consultas?.length > 0 && <div className="assistente-consultas">{mensagem.consultas.map((consulta) => <span key={consulta} className="assistente-consulta">Consultou: {consulta}</span>)}</div>}
+            </div>
+          ))}
+          {enviando && <div className="assistente-msg assistente-msg-assistant"><Spinner texto="Consultando seus dados..." /></div>}
+          <div ref={fimRef} />
+        </div>
+
+        <div className="assistente-composer">
+          <textarea
+            value={texto}
+            onChange={(event) => setTexto(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault();
+                enviarPergunta();
+              }
+            }}
+            maxLength={2000}
+            placeholder="Ex.: Em qual categoria eu mais gastei nos últimos 6 meses?"
+            disabled={enviando}
+          />
+          <Btn variant="primary" onClick={() => enviarPergunta()} disabled={enviando || !texto.trim()}>{enviando ? 'Analisando...' : 'Enviar'}</Btn>
+        </div>
+        <div className="assistente-disclaimer">A IA só acessa consultas de leitura autorizadas pelo backend e nunca recebe acesso direto ao banco. Nesta etapa ela não pode alterar seus dados.</div>
+      </div>
+    </div>
+  );
+}
 
 function TelaComprasProgramadas({ contas = [], token }) {
   const formularioVazio = () => ({
@@ -3203,6 +3332,7 @@ function Dashboard({ usuario, token, onLogout }) {
 
         {modo === 'admin' && <TelaAdmin token={token} usuario={usuario} onVoltar={() => setModo('home')} />}
         {modo === 'conferencia-saldos' && <TelaConferenciaSaldos contas={contas} token={token} onVoltar={() => setModo('home')} onAtualizarContas={carregarContas} />}
+          {modo === 'assistente' && <TelaAssistenteFinanceiro token={token} onVoltar={() => setModo('home')} />}
         {modo === 'previsoes' && <TelaPrevisoes contas={contas} token={token} onVoltar={() => setModo('home')} />}
         {modo === 'provisoes' && <TelaProvisoes contas={contas} token={token} onVoltar={() => setModo('home')} />}
         {modo === 'planejamento' && <TelaPlanejamentoMensal token={token} onVoltar={() => setModo('home')} />}
