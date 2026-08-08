@@ -7,6 +7,12 @@ on:
     paths:
       - changes/previsoes-orcamento-abas.patch
       - .github/workflows/apply-previsoes-orcamento-abas.yml
+  pull_request:
+    branches:
+      - main
+    paths:
+      - changes/previsoes-orcamento-abas.patch
+      - .github/workflows/apply-previsoes-orcamento-abas.yml
 
 permissions:
   contents: write
