@@ -95,6 +95,14 @@ function Breadcrumb({ atual, onVoltar }) {
 
 function formatarData(data) {
   if (!data) return '-';
+
+  const texto = String(data).trim();
+  const dataCalendario = texto.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (dataCalendario) {
+    const [, ano, mes, dia] = dataCalendario;
+    return dia + '/' + mes + '/' + ano;
+  }
+
   const valor = new Date(data);
   if (Number.isNaN(valor.getTime())) return '-';
   return valor.toLocaleDateString('pt-BR');
@@ -3840,8 +3848,8 @@ function TelaProvisoes({ contas = [], token, onVoltar }) {
   const aplicarFiltros = () => carregarDados();
 
   return (
-    <div style={{ minHeight: '100vh', background: '#f5f5f5' }}>
-      <div style={{ padding: '20px', maxWidth: '1280px', margin: '0 auto' }}>
+    <div style={{ minHeight: 0, background: '#f5f5f5' }}>
+      <div style={{ padding: '20px', maxWidth: '100%', margin: '0 auto' }}>
         <PageHeader icone="📌" titulo="Contas previstas" descricao="Cadastre valores previstos e confirme conciliações." breadcrumb={<Breadcrumb atual="Provisões" onVoltar={onVoltar} />} />
         <div className="filter-card">
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap', marginBottom: '12px' }}>
@@ -4579,7 +4587,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
 
   return (
     <div style={{ minHeight: 0, background: '#f5f5f5' }}>
-      <div style={{ padding: '20px', maxWidth: '1200px', margin: '0 auto' }}>
+      <div style={{ padding: '20px', maxWidth: '100%', margin: '0 auto' }}>
         <PageHeader icone="💸" titulo="Transações consolidadas" descricao="Todas as contas em uma única visão" breadcrumb={<Breadcrumb atual="Transações Consolidadas" onVoltar={onVoltar} />} />
         <div className="admin-tabs">
           {[['lancamentos', '💸 Lançamentos'], ['resumo', '📋 Resumo da base']].map(([id, label]) => (
