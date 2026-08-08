@@ -2096,6 +2096,10 @@ function TelaComprasProgramadas({ contas = [], token }) {
   const [editandoId, setEditandoId] = useState(null);
   const [carregando, setCarregando] = useState(true);
   const [salvando, setSalvando] = useState(false);
+  const [compraSimulada, setCompraSimulada] = useState(null);
+  const [simulacao, setSimulacao] = useState(null);
+  const [simulando, setSimulando] = useState(false);
+  const [opcoesSimulacao, setOpcoesSimulacao] = useState({ dataDesejada: '', formaPagamento: 'A_VISTA', parcelas: 1 });
 
   const categoriasAgrupadas = useMemo(
     () => agruparCategorias(categorias).filter((categoria) => (categoria.tipo || 'DESPESA') === 'DESPESA'),
@@ -2195,6 +2199,41 @@ function TelaComprasProgramadas({ contas = [], token }) {
       observacao: compra.observacao || '',
     });
     document.getElementById('form-compra-programada')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
+  const executarSimulacao = async (compra = compraSimulada, opcoes = opcoesSimulacao) => {
+    if (!compra) return;
+    setSimulando(true);
+    try {
+      const response = await axios.post(`${API_URL}/compras-programadas/${compra.id}/simular`, {
+        dataDesejada: opcoes.dataDesejada,
+        formaPagamento: opcoes.formaPagamento,
+        parcelas: opcoes.formaPagamento === 'PARCELADO' ? Number(opcoes.parcelas) : 1,
+      }, { headers: { Authorization: `Bearer ${token}` } });
+      setSimulacao(response.data);
+    } catch (error) {
+      mostrarToast(error.response?.data?.erro || 'Não foi possível calcular o impacto da compra.', 'erro');
+    } finally {
+      setSimulando(false);
+    }
+  };
+
+  const abrirSimulacao = (compra) => {
+    const opcoes = {
+      dataDesejada: String(compra.data_desejada || '').slice(0, 10),
+      formaPagamento: compra.forma_pagamento || 'A_VISTA',
+      parcelas: compra.forma_pagamento === 'PARCELADO' ? Number(compra.parcelas || 2) : 1,
+    };
+    setCompraSimulada(compra);
+    setOpcoesSimulacao(opcoes);
+    setSimulacao(null);
+    setTimeout(() => document.getElementById('simulacao-compra-programada')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50);
+    executarSimulacao(compra, opcoes);
+  };
+
+  const fecharSimulacao = () => {
+    setCompraSimulada(null);
+    setSimulacao(null);
   };
 
   const excluirCompra = (compra) => {
@@ -2370,6 +2409,22 @@ function TelaComprasProgramadas({ contas = [], token }) {
           padding-top: 16px;
           border-top: 1px solid #e2e8f0;
         }
+        .compras-simulacao-card { border: 1px solid #bfdbfe; border-radius: 16px; padding: 20px; background: #f8fbff; margin-bottom: 22px; scroll-margin-top: 18px; }
+        .compras-simulacao-header { display: flex; justify-content: space-between; gap: 14px; align-items: flex-start; margin-bottom: 16px; }
+        .compras-simulacao-header h2 { margin: 0; color: #0f172a; font-size: 20px; }
+        .compras-simulacao-header p { margin: 5px 0 0; color: #64748b; }
+        .compras-simulacao-controles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)) auto; gap: 12px; align-items: end; margin-bottom: 16px; }
+        .compras-simulacao-resumo { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 16px; }
+        .compras-simulacao-metrica { border: 1px solid #dbeafe; border-radius: 12px; padding: 12px; background: #ffffff; }
+        .compras-simulacao-metrica small { display: block; color: #64748b; margin-bottom: 4px; }
+        .compras-simulacao-metrica strong { color: #0f172a; font-size: 18px; }
+        .compras-simulacao-alerta { border-radius: 12px; padding: 12px 14px; margin-bottom: 16px; font-size: 14px; line-height: 1.45; }
+        .compras-simulacao-table-wrap { overflow-x: auto; border: 1px solid #e2e8f0; border-radius: 12px; background: #fff; }
+        .compras-simulacao-table { width: 100%; min-width: 860px; border-collapse: collapse; font-size: 13px; }
+        .compras-simulacao-table th, .compras-simulacao-table td { padding: 10px 12px; border-bottom: 1px solid #e2e8f0; text-align: right; white-space: nowrap; }
+        .compras-simulacao-table th:first-child, .compras-simulacao-table td:first-child { text-align: left; }
+        .compras-simulacao-table th { background: #f8fafc; color: #475569; font-weight: 700; }
+        .compras-simulacao-notas { margin: 14px 0 0; padding-left: 18px; color: #64748b; font-size: 12px; line-height: 1.5; }
         @media (max-width: 1100px) {
           .compras-form-grid-primary {
             grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2380,6 +2435,8 @@ function TelaComprasProgramadas({ contas = [], token }) {
           .compras-form-grid-secondary {
             grid-template-columns: repeat(2, minmax(0, 1fr));
           }
+          .compras-simulacao-controles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+          .compras-simulacao-resumo { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         }
         @media (max-width: 720px) {
           .compras-form-card {
@@ -2402,6 +2459,10 @@ function TelaComprasProgramadas({ contas = [], token }) {
           .compras-form-actions .btn {
             width: 100%;
           }
+          .compras-simulacao-card { padding: 16px; }
+          .compras-simulacao-header { flex-direction: column; }
+          .compras-simulacao-controles, .compras-simulacao-resumo { grid-template-columns: 1fr; }
+          .compras-simulacao-controles .btn { width: 100%; }
         }
       `}</style>
 
@@ -2409,7 +2470,7 @@ function TelaComprasProgramadas({ contas = [], token }) {
         <div className="compras-form-header">
           <div>
             <h2>{editandoId ? '✏️ Editar compra programada' : '🛒 Nova compra programada'}</h2>
-            <p>Cadastre a intenção de compra. A análise de impacto no caixa será adicionada na próxima etapa.</p>
+            <p>Cadastre a intenção de compra e depois simule o impacto no seu caixa antes de decidir.</p>
           </div>
           {editandoId && <Btn type="button" onClick={limparFormulario}>Cancelar edição</Btn>}
         </div>
@@ -2471,6 +2532,44 @@ function TelaComprasProgramadas({ contas = [], token }) {
         </div>
       </form>
 
+      {compraSimulada && (
+        <section id="simulacao-compra-programada" className="compras-simulacao-card">
+          <div className="compras-simulacao-header">
+            <div>
+              <h2>📈 Simulação de impacto no caixa</h2>
+              <p><strong>{compraSimulada.descricao}</strong> · {formatarMoeda(compraSimulada.valor_estimado)}</p>
+            </div>
+            <Btn type="button" onClick={fecharSimulacao}>Fechar simulação</Btn>
+          </div>
+          <div className="compras-simulacao-controles">
+            <label className="compras-field"><span className="compras-field-label">Data simulada</span><input type="date" value={opcoesSimulacao.dataDesejada} onChange={(e) => setOpcoesSimulacao({ ...opcoesSimulacao, dataDesejada: e.target.value })} /></label>
+            <label className="compras-field"><span className="compras-field-label">Pagamento</span><select value={opcoesSimulacao.formaPagamento} onChange={(e) => setOpcoesSimulacao({ ...opcoesSimulacao, formaPagamento: e.target.value, parcelas: e.target.value === 'A_VISTA' ? 1 : Math.max(2, Number(opcoesSimulacao.parcelas) || 2) })}><option value="A_VISTA">À vista</option><option value="PARCELADO">Parcelado</option></select></label>
+            {opcoesSimulacao.formaPagamento === 'PARCELADO' && <label className="compras-field"><span className="compras-field-label">Parcelas</span><input type="number" min="2" max="60" value={opcoesSimulacao.parcelas} onChange={(e) => setOpcoesSimulacao({ ...opcoesSimulacao, parcelas: e.target.value })} /></label>}
+            <Btn type="button" variant="primary" onClick={() => executarSimulacao()} disabled={simulando}>{simulando ? 'Calculando...' : 'Recalcular'}</Btn>
+          </div>
+          {simulando && !simulacao ? <Spinner texto="Calculando projeção..." /> : simulacao && (
+            <>
+              <div className="compras-simulacao-resumo">
+                <div className="compras-simulacao-metrica"><small>Saldo atual considerado</small><strong>{formatarMoeda(simulacao.base.saldoInicial)}</strong></div>
+                <div className="compras-simulacao-metrica"><small>Menor saldo sem esta compra</small><strong>{formatarMoeda(simulacao.resumo.menorSaldoSemCompra)}</strong></div>
+                <div className="compras-simulacao-metrica"><small>Menor saldo com a compra</small><strong>{formatarMoeda(simulacao.resumo.menorSaldoComCompra)}</strong></div>
+                <div className="compras-simulacao-metrica"><small>{simulacao.parametros.formaPagamento === 'PARCELADO' ? 'Parcela estimada' : 'Impacto à vista'}</small><strong>{formatarMoeda(simulacao.parametros.valorParcela)}</strong></div>
+              </div>
+              <div className="compras-simulacao-alerta" style={{ background: simulacao.resumo.caixaFicaNegativo ? '#fef2f2' : '#f0fdf4', color: simulacao.resumo.caixaFicaNegativo ? '#991b1b' : '#166534', border: `1px solid ${simulacao.resumo.caixaFicaNegativo ? '#fecaca' : '#bbf7d0'}` }}>
+                {simulacao.resumo.caixaFicaNegativo ? `⚠️ Neste cenário, o caixa projetado fica negativo a partir de ${simulacao.resumo.primeiroMesNegativo}. Vale testar outra data ou mais parcelas.` : '✅ Neste cenário, o saldo projetado não fica negativo dentro do horizonte calculado.'}
+              </div>
+              <div className="compras-simulacao-table-wrap">
+                <table className="compras-simulacao-table">
+                  <thead><tr><th>Mês</th><th>Entradas previstas</th><th>Saídas previstas</th><th>Outras compras</th><th>Esta compra</th><th>Saldo sem compra</th><th>Saldo com compra</th></tr></thead>
+                  <tbody>{simulacao.meses.map((item) => <tr key={item.mes}><td><strong>{item.mes}</strong></td><td>{formatarMoeda(item.entradasPrevistas)}</td><td>{formatarMoeda(item.saidasPrevistas)}</td><td>{formatarMoeda(item.outrasCompras)}</td><td>{item.impactoCompra ? <strong style={{ color: '#b91c1c' }}>-{formatarMoeda(item.impactoCompra)}</strong> : formatarMoeda(0)}</td><td>{formatarMoeda(item.saldoSemCompra)}</td><td style={{ color: item.saldoComCompra < 0 ? '#b91c1c' : '#166534', fontWeight: 700 }}>{formatarMoeda(item.saldoComCompra)}</td></tr>)}</tbody>
+                </table>
+              </div>
+              <ul className="compras-simulacao-notas">{(simulacao.observacoes || []).map((nota) => <li key={nota}>{nota}</li>)}</ul>
+            </>
+          )}
+        </section>
+      )}
+
       <div>
         <h2 style={{ margin: '0 0 12px', fontSize: '20px' }}>Compras cadastradas</h2>
         {carregando ? <Spinner texto="Carregando compras..." /> : compras.length === 0 ? (
@@ -2496,6 +2595,7 @@ function TelaComprasProgramadas({ contas = [], token }) {
                     <small style={{ display: 'block', color: '#64748b', marginTop: '5px' }}>{compra.forma_pagamento === 'PARCELADO' ? `${compra.parcelas}x` : 'À vista'}</small>
                   </div>
                   <div style={{ display: 'flex', gap: '6px', justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+                    <Btn size="sm" variant="primary" onClick={() => abrirSimulacao(compra)}>Simular impacto</Btn>
                     <Btn size="sm" onClick={() => editarCompra(compra)}>Editar</Btn>
                     <Btn size="sm" onClick={() => excluirCompra(compra)}>Excluir</Btn>
                   </div>
