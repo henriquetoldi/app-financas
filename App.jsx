@@ -94,7 +94,10 @@ function Breadcrumb({ atual, onVoltar }) {
 // ============================================================================
 
 function formatarData(data) {
-  return new Date(data).toLocaleDateString('pt-BR');
+  if (!data) return '-';
+  const valor = new Date(data);
+  if (Number.isNaN(valor.getTime())) return '-';
+  return valor.toLocaleDateString('pt-BR');
 }
 
 const STATUS_PROVISAO_OPCOES = ['PENDENTE', 'CONCILIADA', 'ATRASADA', 'CANCELADA', 'IGNORADA'];
@@ -2936,6 +2939,7 @@ function Dashboard({ usuario, token, onLogout }) {
   const [periodoDashboard, setPeriodoDashboard] = useState(calcularPeriodoRapido('mes'));
   const [resumoDashboard, setResumoDashboard] = useState(null);
   const [carregandoDashboard, setCarregandoDashboard] = useState(false);
+  const [abaDashboard, setAbaDashboard] = useState('resumo');
   const [toast, setToast] = useState(null);
   const [confirmacao, setConfirmacao] = useState(null);
   const [menuMobileAberto, setMenuMobileAberto] = useState(false);
@@ -3110,6 +3114,14 @@ function Dashboard({ usuario, token, onLogout }) {
             ) : (
               <div>
                 <PageHeader icone="📊" titulo="Dashboard financeiro" descricao={`Visão executiva entre ${formatarData(periodoDashboard.dataInicial)} e ${formatarData(periodoDashboard.dataFinal)}`} />
+                <div className="admin-tabs">
+                  {[['resumo', '📊 Resumo'], ['analises', '📈 Análises'], ['contas', '💳 Contas']].map(([id, label]) => (
+                    <button key={id} className={abaDashboard === id ? 'active' : ''} onClick={() => setAbaDashboard(id)}>{label}</button>
+                  ))}
+                </div>
+
+                {abaDashboard === 'resumo' && (
+                  <>
                 <div style={{ background: 'white', borderRadius: '16px', padding: '20px', boxShadow: '0 2px 10px rgba(15,23,42,0.08)', marginBottom: '20px' }}>
 
                   {contasSemConferenciaRecente.length > 0 && (
@@ -3168,7 +3180,10 @@ function Dashboard({ usuario, token, onLogout }) {
                   <KpiCard icone="🏷️" titulo="Categorizado" valor={formatarPercentual(kpisDashboard.percentualCategorizado)} detalhe="Transações com categoria" cor="#0f766e" />
                   <KpiCard icone="↔️" titulo="Transferências internas" valor={Number(kpisDashboard.transferenciasInternas || 0)} detalhe="Não entram nos KPIs financeiros" cor="#0f766e" />
                 </div>
+                  </>
+                )}
 
+                {abaDashboard === 'contas' && (
                 <div style={{ background: 'white', borderRadius: '14px', padding: '16px', marginBottom: '20px' }}>
                   <h3 style={{ marginTop: 0 }}>Contas previstas no período</h3>
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '12px' }}>
@@ -3180,8 +3195,9 @@ function Dashboard({ usuario, token, onLogout }) {
                     <KpiCard titulo="Provisões atrasadas" valor={Number(provisoesDashboard.atrasadas || 0)} detalhe="Status atrasada" cor="#b91c1c" fundo="#fef2f2" />
                   </div>
                 </div>
+                )}
 
-                {carregandoDashboard ? (
+                {abaDashboard === 'analises' && (carregandoDashboard ? (
                   <div style={{ background: 'white', borderRadius: '14px', padding: '24px', marginBottom: '20px' }}><Spinner texto="Carregando indicadores..." /></div>
                 ) : (
                   <>
@@ -3235,8 +3251,10 @@ function Dashboard({ usuario, token, onLogout }) {
                       </div>
                     </CardAnalitico>
                   </>
-                )}
+                ))}
 
+                {abaDashboard === 'contas' && (
+                  <>
                 <div className="section-title-row" style={{
                   display: 'flex',
                   justifyContent: 'space-between',
@@ -3294,6 +3312,8 @@ function Dashboard({ usuario, token, onLogout }) {
                     );
                   })}
                 </div>
+                  </>
+                )}
               </div>
             )}
           </>
@@ -3375,6 +3395,7 @@ function TelaConferenciaSaldos({ contas = [], token, onVoltar, onAtualizarContas
   const [diagnostico, setDiagnostico] = useState(null);
   const [historico, setHistorico] = useState([]);
   const [carregando, setCarregando] = useState(false);
+  const [abaConferencia, setAbaConferencia] = useState('conferir');
 
   const authHeaders = { Authorization: `Bearer ${token}` };
   const nomesMesesCurtos = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
@@ -3492,6 +3513,7 @@ function TelaConferenciaSaldos({ contas = [], token, onVoltar, onAtualizarContas
         diferenca,
       }, { headers: authHeaders });
       setDiagnostico(response.data);
+      setAbaConferencia('diagnostico');
     } catch (error) {
       mostrarToast(error.response?.data?.detalhes || error.response?.data?.erro || error.message);
     } finally {
@@ -3520,9 +3542,16 @@ function TelaConferenciaSaldos({ contas = [], token, onVoltar, onAtualizarContas
   } : null);
 
   return (
-    <div style={{ minHeight: '100vh', background: '#f8fafc', padding: '20px' }}>
+    <div style={{ minHeight: 0, background: '#f8fafc', padding: '20px' }}>
       <PageHeader icone="🏦" titulo="Conferência de Saldos" descricao="Compare o saldo calculado com o saldo real do banco." breadcrumb={<Breadcrumb atual="Conferência de Saldos" onVoltar={onVoltar} />} />
+      <div className="admin-tabs">
+        {[['conferir', '🏦 Conferir'], ['diagnostico', '🔎 Diagnóstico'], ['historico', '🕘 Histórico']].map(([id, label]) => (
+          <button key={id} className={abaConferencia === id ? 'active' : ''} onClick={() => setAbaConferencia(id)}>{label}</button>
+        ))}
+      </div>
 
+      {abaConferencia === 'conferir' && (
+        <>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '14px', marginBottom: '16px' }}>
         <div className="filter-card" style={{ marginBottom: 0 }}>
           <h3 style={{ marginTop: 0 }}>Filtros da conferência</h3>
@@ -3586,7 +3615,11 @@ function TelaConferenciaSaldos({ contas = [], token, onVoltar, onAtualizarContas
         </div>
       )}
 
-      {diagnostico && (
+        </>
+      )}
+
+      {abaConferencia === 'diagnostico' && (
+        diagnostico ? (
         <div style={{ background: '#eef2ff', border: '1px solid #c7d2fe', borderRadius: '12px', padding: '14px', marginBottom: '16px' }}>
           <h3 style={{ marginTop: 0 }}>Análise inteligente</h3>
           <p style={{ color: '#3730a3' }}>{diagnostico.resumoIA}</p>
@@ -3608,8 +3641,15 @@ function TelaConferenciaSaldos({ contas = [], token, onVoltar, onAtualizarContas
             ))}
           </div>
         </div>
+        ) : (
+          <div className="content-card" style={{ background: 'white' }}>
+            <h3 style={{ marginTop: 0 }}>Diagnóstico</h3>
+            <p style={{ color: '#64748b', marginBottom: 0 }}>Nenhuma análise de divergência disponível. Faça uma conferência e, se houver diferença, use “Analisar divergência”.</p>
+          </div>
+        )
       )}
 
+      {abaConferencia === 'historico' && (
       <div style={{ background: 'white', border: '1px solid #e5e7eb', borderRadius: '12px', padding: '14px' }}>
         <h3 style={{ marginTop: 0 }}>Histórico de conferências</h3>
         {historico.length === 0 ? <p style={{ color: '#64748b' }}>Nenhuma conferência salva para esta conta.</p> : (
@@ -3621,6 +3661,7 @@ function TelaConferenciaSaldos({ contas = [], token, onVoltar, onAtualizarContas
           </div>
         )}
       </div>
+      )}
     </div>
   );
 }
@@ -3951,6 +3992,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
   const [maisAcoesAberto, setMaisAcoesAberto] = useState(false);
   const [pagina, setPagina] = useState(1);
   const [limite, setLimite] = useState(50);
+  const [abaTransacoes, setAbaTransacoes] = useState('lancamentos');
   const [paginacao, setPaginacao] = useState({ total: 0, pagina: 1, limite: 50, totalPaginas: 1 });
   const tabelaRef = useRef(null);
 
@@ -4531,10 +4573,15 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
   };
 
   return (
-    <div style={{ minHeight: '100vh', background: '#f5f5f5' }}>
+    <div style={{ minHeight: 0, background: '#f5f5f5' }}>
       <div style={{ padding: '20px', maxWidth: '1200px', margin: '0 auto' }}>
         <PageHeader icone="💸" titulo="Transações consolidadas" descricao="Todas as contas em uma única visão" breadcrumb={<Breadcrumb atual="Transações Consolidadas" onVoltar={onVoltar} />} />
-        <div className="filter-card">
+        <div className="admin-tabs">
+          {[['lancamentos', '💸 Lançamentos'], ['resumo', '📋 Resumo da base']].map(([id, label]) => (
+            <button key={id} className={abaTransacoes === id ? 'active' : ''} onClick={() => setAbaTransacoes(id)}>{label}</button>
+          ))}
+        </div>
+        {abaTransacoes === 'lancamentos' && <div className="filter-card">
           <div className="filter-grid">
             <label>Pesquisar descrição<input value={filtros.busca} onChange={(event) => atualizarFiltroTransacoes({ busca: event.target.value })} placeholder="Ex.: AUTO POSTO" /></label>
             <label>Conta<select value={filtros.conta} onChange={(event) => atualizarFiltroTransacoes({ conta: event.target.value })}><option value="todas">Todas as contas</option>{contas.map((item) => <option key={item.id} value={item.id}>{item.nome}</option>)}</select></label>
@@ -4553,7 +4600,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
               <Btn variant="ghost" size="sm" onClick={limparFiltros}>Limpar filtros</Btn>
             </div>
             <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
-              {resumoBase && <span style={{ color: '#64748b', fontSize: '13px' }}>Início da base: {formatarData(resumoBase.data_inicio || resumoBase.dataInicio || resumoBase.primeira_data || resumoBase.primeiraData)}</span>}
+              {resumoBase && <span style={{ color: '#64748b', fontSize: '13px' }}>Início da base: {formatarData(resumoBase.data_inicio || resumoBase.dataInicio || resumoBase.primeira_data || resumoBase.primeiraData || resumoBase.primeira?.data)}</span>}
               <Btn variant="primary" size="sm" onClick={onImportar}>📥 Importar dados / conciliar</Btn>
               {contaSelecionadaFiltro && primeiraTransacaoBase && <Btn variant="ghost" size="sm" onClick={abrirModalSaldoInicial}>Configurar saldo inicial</Btn>}
               <div className="more-actions">
@@ -4589,9 +4636,9 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
               {OPCOES_LIMITE_TRANSACOES.map((n) => <option key={n} value={n}>{n} por página</option>)}
             </select>
           </div>
-        </div>
+        </div>}
 
-        {resumoBase && (
+        {abaTransacoes === 'resumo' && resumoBase && (
           <div style={{ background: 'white', border: '1px solid #dbeafe', borderRadius: '12px', padding: '16px', marginBottom: '16px', boxShadow: '0 2px 8px rgba(0,0,0,0.06)' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap', alignItems: 'flex-start' }}>
               <div>
@@ -4628,6 +4675,8 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
           </div>
         )}
 
+        {abaTransacoes === 'lancamentos' && (
+          <>
         {carregando ? (
           <Spinner texto="Carregando transações..." />
         ) : transacoes.length === 0 ? (
@@ -4723,6 +4772,8 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
           </div>
         )}
         <Paginacao pagina={Number(paginacao.pagina || pagina)} totalPaginas={Number(paginacao.totalPaginas || 1)} onMudar={setPagina} />
+          </>
+        )}
       </div>
 
       {modalConferenciaRapidaAberto && contaSelecionadaFiltro && resumoBase && (
