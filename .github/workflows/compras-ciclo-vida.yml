@@ -5,18 +5,17 @@ on:
     branches:
       - feat/compras-programadas-ciclo-vida
     paths:
-      - changes/apply-compras-ciclo-vida-v2.mjs
-      - changes/apply-compras-ciclo-vida-css.mjs
+      - App.jsx
       - .github/workflows/compras-ciclo-vida.yml
   pull_request:
     branches:
       - main
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  apply-and-validate:
+  validate:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout branch
@@ -24,16 +23,6 @@ jobs:
         with:
           ref: feat/compras-programadas-ciclo-vida
           fetch-depth: 0
-
-      - name: Configure git
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-      - name: Apply lifecycle changes
-        run: |
-          node changes/apply-compras-ciclo-vida-v2.mjs
-          node changes/apply-compras-ciclo-vida-css.mjs
 
       - name: Install dependencies
         run: npm ci
@@ -63,11 +52,5 @@ jobs:
           console.log('Assertions do ciclo de vida aprovadas.');
           NODE
 
-      - name: Check diff
-        run: git diff --check
-
-      - name: Commit validated App.jsx
-        run: |
-          git add App.jsx
-          git commit -m "Completar ciclo de vida de compras programadas"
-          git push origin feat/compras-programadas-ciclo-vida
+      - name: Check branch diff
+        run: git diff --check origin/main...HEAD
