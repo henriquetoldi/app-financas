@@ -3179,7 +3179,7 @@ app.post('/api/compras-programadas/:id/simular', verificarToken, async (req, res
 // ASSISTENTE FINANCEIRO — SOMENTE LEITURA
 // ============================================================================
 
-const ASSISTENTE_OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-5.6-luna';
+const ASSISTENTE_GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite';
 const ASSISTENTE_MAX_HISTORICO = 10;
 const ASSISTENTE_MAX_MENSAGEM = 2000;
 
@@ -3508,35 +3508,63 @@ async function executarFerramentaAssistente(usuarioId, nome, args) {
   throw new Error('Ferramenta não autorizada para o assistente.');
 }
 
+function declaracoesGeminiAssistente() {
+  return FERRAMENTAS_ASSISTENTE.map(({ name, description, parameters }) => ({
+    name,
+    description,
+    parameters,
+  }));
+}
+
 function extrairTextoRespostaAssistente(response) {
-  if (typeof response?.output_text === 'string' && response.output_text.trim()) return response.output_text.trim();
-  return (response?.output || [])
-    .filter((item) => item.type === 'message')
-    .flatMap((item) => item.content || [])
-    .filter((conteudo) => conteudo.type === 'output_text' && typeof conteudo.text === 'string')
-    .map((conteudo) => conteudo.text)
+  const partes = response?.candidates?.[0]?.content?.parts || [];
+  return partes
+    .filter((parte) => typeof parte?.text === 'string')
+    .map((parte) => parte.text)
     .join('\n')
     .trim();
 }
 
-async function chamarOpenAIAssistente(payload) {
+function extrairChamadasGeminiAssistente(response) {
+  const partes = response?.candidates?.[0]?.content?.parts || [];
+  return partes
+    .filter((parte) => parte?.functionCall?.name)
+    .map((parte) => ({
+      name: parte.functionCall.name,
+      args: parte.functionCall.args || {},
+      id: parte.functionCall.id || null,
+    }));
+}
+
+async function chamarGeminiAssistente({ contents, instructions }) {
+  const modelo = encodeURIComponent(ASSISTENTE_GEMINI_MODEL);
   let response;
   try {
-    response = await fetch('https://api.openai.com/v1/responses', {
+    response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent`, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        'x-goog-api-key': process.env.GEMINI_API_KEY,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: instructions }] },
+        contents,
+        tools: [{ functionDeclarations: declaracoesGeminiAssistente() }],
+        toolConfig: { functionCallingConfig: { mode: 'AUTO' } },
+        generationConfig: {
+          temperature: 0.2,
+          maxOutputTokens: 1200,
+        },
+      }),
     });
   } catch (error) {
-    throw new Error('Não foi possível conectar ao serviço de IA.');
+    throw new Error('Não foi possível conectar ao serviço gratuito de IA.');
   }
+
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const erro = new Error(data?.error?.message || `Falha no serviço de IA (${response.status}).`);
-    erro.statusOpenAI = response.status;
+    const erro = new Error(data?.error?.message || `Falha no serviço Gemini (${response.status}).`);
+    erro.statusGemini = response.status;
     throw erro;
   }
   return data;
@@ -3551,10 +3579,10 @@ function normalizarHistoricoAssistente(historico) {
 }
 
 app.post('/api/assistente', verificarToken, async (req, res) => {
-  if (!process.env.OPENAI_API_KEY) {
+  if (!process.env.GEMINI_API_KEY) {
     return res.status(503).json({
-      erro: 'Assistente financeiro ainda não configurado no servidor.',
-      codigo: 'OPENAI_API_KEY_AUSENTE',
+      erro: 'Assistente financeiro gratuito ainda não configurado no servidor.',
+      codigo: 'GEMINI_API_KEY_AUSENTE',
     });
   }
 
@@ -3563,9 +3591,13 @@ app.post('/api/assistente', verificarToken, async (req, res) => {
 
   const usuarioId = req.usuario.usuario_id;
   const historico = normalizarHistoricoAssistente(req.body?.historico);
-  const input = [...historico, { role: 'user', content: mensagem }];
+  const contents = historico.map((item) => ({
+    role: item.role === 'assistant' ? 'model' : 'user',
+    parts: [{ text: item.content }],
+  }));
+  contents.push({ role: 'user', parts: [{ text: mensagem }] });
+
   const ferramentasUsadas = new Set();
-  const safetyIdentifier = crypto.createHash('sha256').update(String(usuarioId)).digest('hex').slice(0, 32);
   const hoje = new Date().toISOString().slice(0, 10);
   const instructions = `Você é o Assistente Financeiro de um aplicativo de finanças pessoais. Data atual do servidor: ${hoje}.
 Responda em português do Brasil, de forma direta, clara e útil.
@@ -3580,51 +3612,65 @@ As ferramentas disponíveis são exclusivamente de consulta e já estão limitad
   try {
     let response = null;
     for (let rodada = 0; rodada < 5; rodada += 1) {
-      response = await chamarOpenAIAssistente({
-        model: ASSISTENTE_OPENAI_MODEL,
-        instructions,
-        input,
-        tools: FERRAMENTAS_ASSISTENTE,
-        tool_choice: 'auto',
-        reasoning: { effort: 'low' },
-        text: { verbosity: 'medium' },
-        safety_identifier: safetyIdentifier,
-        store: false,
+      response = await chamarGeminiAssistente({ contents, instructions });
+
+      const conteudoModelo = response?.candidates?.[0]?.content;
+      if (!conteudoModelo?.parts?.length) {
+        const motivo = response?.candidates?.[0]?.finishReason;
+        throw new Error(motivo ? `A IA não retornou conteúdo (${motivo}).` : 'A IA não retornou conteúdo.');
+      }
+
+      contents.push({
+        role: conteudoModelo.role || 'model',
+        parts: conteudoModelo.parts,
       });
 
-      input.push(...(response.output || []));
-      const chamadas = (response.output || []).filter((item) => item.type === 'function_call');
+      const chamadas = extrairChamadasGeminiAssistente(response);
       if (chamadas.length === 0) {
         const resposta = extrairTextoRespostaAssistente(response);
         if (!resposta) throw new Error('A IA não retornou uma resposta em texto.');
         return res.json({
           resposta,
-          modelo: response.model || ASSISTENTE_OPENAI_MODEL,
+          modelo: ASSISTENTE_GEMINI_MODEL,
+          provedor: 'gemini-free-tier',
           consultas: Array.from(ferramentasUsadas).map((nome) => ROTULOS_FERRAMENTAS_ASSISTENTE[nome] || nome),
         });
       }
 
+      const partesRespostaFerramentas = [];
       for (const chamada of chamadas) {
-        let args = {};
-        try { args = JSON.parse(chamada.arguments || '{}'); } catch { args = {}; }
-        const resultado = await executarFerramentaAssistente(usuarioId, chamada.name, args);
+        const resultado = await executarFerramentaAssistente(usuarioId, chamada.name, chamada.args || {});
         ferramentasUsadas.add(chamada.name);
-        input.push({
-          type: 'function_call_output',
-          call_id: chamada.call_id,
-          output: JSON.stringify(resultado),
-        });
+        const functionResponse = {
+          name: chamada.name,
+          response: resultado,
+        };
+        if (chamada.id) functionResponse.id = chamada.id;
+        partesRespostaFerramentas.push({ functionResponse });
       }
+
+      contents.push({ role: 'user', parts: partesRespostaFerramentas });
     }
 
     return res.status(502).json({ erro: 'A análise exigiu chamadas demais. Tente fazer uma pergunta mais específica.' });
   } catch (error) {
-    console.error('Erro no assistente financeiro:', error.message);
-    if (error.statusOpenAI === 429) return res.status(503).json({ erro: 'O limite temporário do serviço de IA foi atingido. Tente novamente em alguns instantes.' });
-    if (error.statusOpenAI === 401 || error.statusOpenAI === 403) return res.status(503).json({ erro: 'A configuração da IA no servidor precisa ser revisada.', codigo: 'OPENAI_CONFIG_INVALIDA' });
+    console.error('Erro no assistente financeiro gratuito:', error.message);
+    if (error.statusGemini === 429) {
+      return res.status(503).json({
+        erro: 'A cota gratuita da IA foi atingida por enquanto. Nenhuma cobrança será feita. Tente novamente depois.',
+        codigo: 'GEMINI_COTA_GRATUITA_ATINGIDA',
+      });
+    }
+    if (error.statusGemini === 401 || error.statusGemini === 403) {
+      return res.status(503).json({
+        erro: 'A chave gratuita do Gemini precisa ser revisada.',
+        codigo: 'GEMINI_CONFIG_INVALIDA',
+      });
+    }
     return res.status(500).json({ erro: 'Não foi possível concluir a análise agora. Tente novamente.' });
   }
 });
+
 
 // ============================================================================
 // ROTAS: PROVISÕES E CONCILIAÇÕES

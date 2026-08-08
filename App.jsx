@@ -2125,8 +2125,8 @@ function TelaAssistenteFinanceiro({ token, onVoltar }) {
       }]);
     } catch (error) {
       const codigo = error.response?.data?.codigo;
-      const mensagem = codigo === 'OPENAI_API_KEY_AUSENTE'
-        ? 'O Assistente já está instalado, mas ainda falta configurar a chave da IA no servidor. Adicione OPENAI_API_KEY nas variáveis do Railway para ativá-lo.'
+      const mensagem = codigo === 'GEMINI_API_KEY_AUSENTE'
+        ? 'O Assistente já está instalado e não exige API paga. Falta apenas configurar uma chave gratuita do Gemini no servidor. Adicione GEMINI_API_KEY nas variáveis do Railway para ativá-lo.'
         : (error.response?.data?.erro || 'Não foi possível consultar o assistente agora.');
       setMensagens((atuais) => [...atuais, { role: 'assistant', content: mensagem, consultas: [], erro: true }]);
     } finally {
@@ -2165,7 +2165,7 @@ function TelaAssistenteFinanceiro({ token, onVoltar }) {
           titulo="Assistente Financeiro"
           descricao="Pergunte sobre seus gastos, categorias, previsões e compras usando os dados reais do app."
           breadcrumb={<Breadcrumb atual="Assistente" onVoltar={onVoltar} />}
-          action={<span className="assistente-status">🔒 Somente leitura</span>}
+          action={<span className="assistente-status">🆓 Free tier · somente leitura</span>}
         />
 
         <div className="assistente-exemplos">
@@ -2199,7 +2199,7 @@ function TelaAssistenteFinanceiro({ token, onVoltar }) {
           />
           <Btn variant="primary" onClick={() => enviarPergunta()} disabled={enviando || !texto.trim()}>{enviando ? 'Analisando...' : 'Enviar'}</Btn>
         </div>
-        <div className="assistente-disclaimer">A IA só acessa consultas de leitura autorizadas pelo backend e nunca recebe acesso direto ao banco. Nesta etapa ela não pode alterar seus dados.</div>
+        <div className="assistente-disclaimer">A IA só acessa consultas de leitura autorizadas pelo backend e nunca recebe acesso direto ao banco. O assistente usa o nível gratuito do Gemini; nesse nível, o Google informa que o conteúdo enviado pode ser usado para melhorar seus produtos. Nesta etapa a IA não pode alterar seus dados.</div>
       </div>
     </div>
   );
