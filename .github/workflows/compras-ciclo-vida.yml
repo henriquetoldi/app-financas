@@ -1,0 +1,73 @@
+name: Compras programadas ciclo de vida
+
+on:
+  push:
+    branches:
+      - feat/compras-programadas-ciclo-vida
+    paths:
+      - changes/apply-compras-ciclo-vida.mjs
+      - changes/apply-compras-ciclo-vida-responsive.mjs
+      - .github/workflows/compras-ciclo-vida.yml
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: feat/compras-programadas-ciclo-vida
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Apply lifecycle changes
+        run: |
+          node changes/apply-compras-ciclo-vida.mjs
+          node changes/apply-compras-ciclo-vida-responsive.mjs
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Run lifecycle assertions
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const app = fs.readFileSync('App.jsx', 'utf8');
+          const required = [
+            "const [filtroStatusCompra, setFiltroStatusCompra] = useState('ATIVAS')",
+            'const atualizarStatusCompra = async',
+            '<option value="COMPRADA">Comprada</option>',
+            '<option value="CANCELADA">Cancelada</option>',
+            'comprasFiltradas.map',
+            'Compras concluídas',
+            'className="compras-item-card"',
+            '.compras-item-card { grid-template-columns: 1fr !important; }',
+          ];
+          for (const trecho of required) {
+            if (!app.includes(trecho)) throw new Error(`Trecho obrigatório ausente: ${trecho}`);
+          }
+          if (app.includes('{compras.map((compra) => {')) throw new Error('Lista ainda ignora filtro de status.');
+          console.log('Assertions do ciclo de vida aprovadas.');
+          NODE
+
+      - name: Check diff
+        run: git diff --check
+
+      - name: Commit validated App.jsx
+        run: |
+          git add App.jsx
+          git commit -m "Completar ciclo de vida de compras programadas"
+          git push origin feat/compras-programadas-ciclo-vida
