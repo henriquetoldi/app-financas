@@ -27,6 +27,11 @@
           touch-action: manipulation;
         }
 
+        /* O usuário já aparece no topo direito. Mantemos um único ponto de perfil/logout. */
+        .sidebar-footer {
+          display: none !important;
+        }
+
         @media (max-width: 640px) {
           body {
             overflow-x: hidden;
