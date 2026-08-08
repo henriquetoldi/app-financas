@@ -1,17 +1,17 @@
-name: Apply previsoes orcamento tabs patch
+name: Apply previsoes orcamento tabs transformation
 
 on:
   push:
     branches:
       - feat/previsoes-orcamento-abas
     paths:
-      - changes/previsoes-orcamento-abas.patch
+      - changes/apply-previsoes-orcamento-abas.mjs
       - .github/workflows/apply-previsoes-orcamento-abas.yml
   pull_request:
     branches:
       - main
     paths:
-      - changes/previsoes-orcamento-abas.patch
+      - changes/apply-previsoes-orcamento-abas.mjs
       - .github/workflows/apply-previsoes-orcamento-abas.yml
 
 permissions:
@@ -32,11 +32,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Check patch
-        run: git apply --check changes/previsoes-orcamento-abas.patch
-
-      - name: Apply patch
-        run: git apply changes/previsoes-orcamento-abas.patch
+      - name: Apply safe transformation
+        run: node changes/apply-previsoes-orcamento-abas.mjs
 
       - name: Install dependencies
         run: npm ci
