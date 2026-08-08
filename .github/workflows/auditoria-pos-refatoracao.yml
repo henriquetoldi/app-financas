@@ -69,3 +69,5 @@ jobs:
           git add App.jsx
           git commit -m "Corrigir regressões pós-refatoração"
           git push origin chore/auditoria-pos-refatoracao
+
+# touch: workflow ativo após abertura da PR
