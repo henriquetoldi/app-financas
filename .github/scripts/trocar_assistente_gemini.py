@@ -198,3 +198,5 @@ if 'GEMINI_API_KEY' not in backend or 'ASSISTENTE_GEMINI_MODEL' not in backend:
 
 backend_path.write_text(backend, encoding='utf-8')
 app_path.write_text(app, encoding='utf-8')
+
+# push de disparo do workflow
