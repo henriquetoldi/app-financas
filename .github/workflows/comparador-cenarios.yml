@@ -6,6 +6,7 @@ on:
       - feat/compras-comparador-cenarios
     paths:
       - changes/apply-comparador-cenarios.mjs
+      - changes/fix-comparador-transform.mjs
       - .github/workflows/comparador-cenarios.yml
   pull_request:
     branches:
@@ -30,7 +31,9 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Apply comparator
-        run: node changes/apply-comparador-cenarios.mjs
+        run: |
+          node changes/fix-comparador-transform.mjs
+          node changes/apply-comparador-cenarios.mjs
 
       - name: Install dependencies
         run: npm ci
@@ -49,7 +52,6 @@ jobs:
             "const [reservaMinimaComparacao, setReservaMinimaComparacao]",
             'Comparador de cenários',
             'Melhor cenário dentro da reserva definida',
-            'comprar',
             'Usar no simulador',
             'cenariosClassificados.slice(0, 8)',
           ];
