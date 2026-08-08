@@ -3216,7 +3216,8 @@ async function ferramentaGastosPorCategoria(usuarioId, args = {}) {
   const result = await pool.query(
     `SELECT ${expressaoCategoria} AS categoria,
             COUNT(*)::int AS quantidade,
-            ROUND(SUM(ABS(t.valor))::numeric, 2) AS valor
+            ROUND(SUM(ABS(t.valor))::numeric, 2) AS valor,
+            ROUND(SUM(SUM(ABS(t.valor))) OVER ()::numeric, 2) AS total_geral
      FROM transacoes t
      JOIN contas c ON c.id = t.conta_id
      LEFT JOIN categorias cm ON cm.id = t.categoria_macro_id
@@ -3234,16 +3235,16 @@ async function ferramentaGastosPorCategoria(usuarioId, args = {}) {
      LIMIT $4`,
     [usuarioId, periodo.inicio, periodo.fim, limite]
   );
-  const total = result.rows.reduce((soma, item) => soma + Number(item.valor || 0), 0);
+  const totalGastoPeriodo = Number(result.rows[0]?.total_geral || 0);
   return {
     periodo,
     nivel,
-    totalNasCategoriasRetornadas: Number(total.toFixed(2)),
+    totalGastoPeriodo: Number(totalGastoPeriodo.toFixed(2)),
     categorias: result.rows.map((item) => ({
       categoria: item.categoria,
       quantidade: Number(item.quantidade || 0),
       valor: Number(item.valor || 0),
-      percentualDoTotalRetornado: total ? Number(((Number(item.valor || 0) / total) * 100).toFixed(1)) : 0,
+      percentualDoGastoPeriodo: totalGastoPeriodo ? Number(((Number(item.valor || 0) / totalGastoPeriodo) * 100).toFixed(1)) : 0,
     })),
   };
 }
@@ -3253,7 +3254,10 @@ async function ferramentaNaoCategorizados(usuarioId, args = {}) {
   const limite = inteiroAssistente(args.limite, 1, 50, 20);
   const resumo = await pool.query(
     `SELECT COUNT(*)::int AS quantidade,
-            ROUND(COALESCE(SUM(ABS(t.valor)), 0)::numeric, 2) AS valor_total
+            COUNT(*) FILTER (WHERE t.tipo = 'DEBITO')::int AS quantidade_debitos,
+            COUNT(*) FILTER (WHERE t.tipo = 'CREDITO')::int AS quantidade_creditos,
+            ROUND(COALESCE(SUM(ABS(t.valor)) FILTER (WHERE t.tipo = 'DEBITO'), 0)::numeric, 2) AS valor_debitos,
+            ROUND(COALESCE(SUM(ABS(t.valor)) FILTER (WHERE t.tipo = 'CREDITO'), 0)::numeric, 2) AS valor_creditos
      FROM transacoes t
      JOIN contas c ON c.id = t.conta_id
      WHERE c.usuario_id = $1
@@ -3267,7 +3271,7 @@ async function ferramentaNaoCategorizados(usuarioId, args = {}) {
     [usuarioId, periodo.inicio, periodo.fim]
   );
   const itens = await pool.query(
-    `SELECT t.id, t.data, t.descricao, t.tipo, t.valor, c.nome AS conta_nome
+    `SELECT t.data, t.descricao, t.tipo, t.valor, c.nome AS conta_nome
      FROM transacoes t
      JOIN contas c ON c.id = t.conta_id
      WHERE c.usuario_id = $1
@@ -3285,9 +3289,15 @@ async function ferramentaNaoCategorizados(usuarioId, args = {}) {
   return {
     periodo,
     quantidade: Number(resumo.rows[0]?.quantidade || 0),
-    valorTotal: Number(resumo.rows[0]?.valor_total || 0),
+    debitos: {
+      quantidade: Number(resumo.rows[0]?.quantidade_debitos || 0),
+      valor: Number(resumo.rows[0]?.valor_debitos || 0),
+    },
+    creditos: {
+      quantidade: Number(resumo.rows[0]?.quantidade_creditos || 0),
+      valor: Number(resumo.rows[0]?.valor_creditos || 0),
+    },
     exemplos: itens.rows.map((item) => ({
-      id: item.id,
       data: String(item.data).slice(0, 10),
       descricao: item.descricao,
       tipo: item.tipo,
@@ -3304,7 +3314,7 @@ async function ferramentaComprasProgramadas(usuarioId, args = {}) {
   const impactos = new Map(chaves.map((chave) => [chave, 0]));
 
   const result = await pool.query(
-    `SELECT id, descricao, valor_estimado, data_desejada, prioridade, forma_pagamento, parcelas
+    `SELECT descricao, valor_estimado, data_desejada, prioridade, forma_pagamento, parcelas
      FROM compras_programadas
      WHERE usuario_id = $1
        AND status = 'PLANEJADA'
@@ -3334,7 +3344,6 @@ async function ferramentaComprasProgramadas(usuarioId, args = {}) {
     valorTotalDasCompras: Number(result.rows.reduce((soma, item) => soma + Number(item.valor_estimado || 0), 0).toFixed(2)),
     impactoPorMes: chaves.map((mes) => ({ mes, valor: Number((impactos.get(mes) || 0).toFixed(2)) })),
     compras: result.rows.slice(0, 30).map((item) => ({
-      id: item.id,
       descricao: item.descricao,
       valorEstimado: Number(item.valor_estimado || 0),
       dataDesejada: String(item.data_desejada).slice(0, 10),
@@ -3398,14 +3407,13 @@ async function ferramentaContasPrevistas(usuarioId, args = {}) {
 
 async function ferramentaSaldos(usuarioId) {
   const result = await pool.query(
-    `SELECT id, nome, banco, tipo, COALESCE(saldo_atual, saldo_inicial, 0)::numeric AS saldo
+    `SELECT nome, banco, tipo, COALESCE(saldo_atual, saldo_inicial, 0)::numeric AS saldo
      FROM contas
      WHERE usuario_id = $1 AND ativo = true
      ORDER BY nome ASC`,
     [usuarioId]
   );
   const contas = result.rows.map((item) => ({
-    id: item.id,
     nome: item.nome,
     banco: item.banco,
     tipo: item.tipo,

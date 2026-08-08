@@ -3332,8 +3332,8 @@ function Dashboard({ usuario, token, onLogout }) {
 
         {modo === 'admin' && <TelaAdmin token={token} usuario={usuario} onVoltar={() => setModo('home')} />}
         {modo === 'conferencia-saldos' && <TelaConferenciaSaldos contas={contas} token={token} onVoltar={() => setModo('home')} onAtualizarContas={carregarContas} />}
-        {modo === 'assistente' && <TelaAssistenteFinanceiro token={token} onVoltar={() => setModo('home')} />}
-      {modo === 'previsoes' && <TelaPrevisoes contas={contas} token={token} onVoltar={() => setModo('home')} />}
+          {modo === 'assistente' && <TelaAssistenteFinanceiro token={token} onVoltar={() => setModo('home')} />}
+        {modo === 'previsoes' && <TelaPrevisoes contas={contas} token={token} onVoltar={() => setModo('home')} />}
         {modo === 'provisoes' && <TelaProvisoes contas={contas} token={token} onVoltar={() => setModo('home')} />}
         {modo === 'planejamento' && <TelaPlanejamentoMensal token={token} onVoltar={() => setModo('home')} />}
         {modo === 'transacoes' && <TelaTransacoes contaInicial={contaSelecionada} contas={contas} token={token} onVoltar={() => setModo('home')} onAtualizarContas={carregarContas} onImportar={() => setModo('importar')} />}
