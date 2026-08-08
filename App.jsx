@@ -2245,6 +2245,8 @@ function TelaComprasProgramadas({ contas = [], token }) {
   const [simulacao, setSimulacao] = useState(null);
   const [simulando, setSimulando] = useState(false);
   const [opcoesSimulacao, setOpcoesSimulacao] = useState({ dataDesejada: '', formaPagamento: 'A_VISTA', parcelas: 1 });
+  const [filtroStatusCompra, setFiltroStatusCompra] = useState('ATIVAS');
+  const [atualizandoStatusId, setAtualizandoStatusId] = useState(null);
 
   const categoriasAgrupadas = useMemo(
     () => agruparCategorias(categorias).filter((categoria) => (categoria.tipo || 'DESPESA') === 'DESPESA'),
@@ -2381,6 +2383,23 @@ function TelaComprasProgramadas({ contas = [], token }) {
     setSimulacao(null);
   };
 
+  const atualizarStatusCompra = async (compra, status) => {
+    if (!compra || !status || status === compra.status) return;
+    setAtualizandoStatusId(compra.id);
+    try {
+      await axios.patch(`${API_URL}/compras-programadas/${compra.id}`, { status }, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (compraSimulada?.id === compra.id && ['COMPRADA', 'CANCELADA'].includes(status)) fecharSimulacao();
+      await carregarCompras();
+      mostrarToast('Status da compra atualizado.');
+    } catch (error) {
+      mostrarToast(error.response?.data?.erro || 'Não foi possível atualizar o status da compra.', 'erro');
+    } finally {
+      setAtualizandoStatusId(null);
+    }
+  };
+
   const excluirCompra = (compra) => {
     pedirConfirmacao(
       'Excluir compra programada',
@@ -2427,6 +2446,19 @@ function TelaComprasProgramadas({ contas = [], token }) {
     ALTA: ['#ffedd5', '#c2410c'],
     ESSENCIAL: ['#fee2e2', '#b91c1c'],
   };
+  const corStatusCompra = {
+    PLANEJADA: ['#dbeafe', '#1d4ed8'],
+    ADIADA: ['#fef3c7', '#92400e'],
+    COMPRADA: ['#dcfce7', '#166534'],
+    CANCELADA: ['#e5e7eb', '#475569'],
+  };
+  const rotuloStatusCompra = { PLANEJADA: 'Planejada', ADIADA: 'Adiada', COMPRADA: 'Comprada', CANCELADA: 'Cancelada' };
+  const comprasFiltradas = compras.filter((compra) => {
+    if (filtroStatusCompra === 'TODAS') return true;
+    if (filtroStatusCompra === 'ATIVAS') return ['PLANEJADA', 'ADIADA'].includes(compra.status);
+    return compra.status === filtroStatusCompra;
+  });
+  const totalCompradas = compras.filter((compra) => compra.status === 'COMPRADA').length;
 
   return (
     <section>
@@ -2442,6 +2474,10 @@ function TelaComprasProgramadas({ contas = [], token }) {
         <div style={{ border: '1px solid #e2e8f0', borderRadius: '12px', padding: '14px', background: '#f8fafc' }}>
           <small style={{ color: '#64748b' }}>Próximos 30 dias</small>
           <strong style={{ display: 'block', fontSize: '24px', marginTop: '4px' }}>{proximas}</strong>
+        </div>
+        <div style={{ border: '1px solid #e2e8f0', borderRadius: '12px', padding: '14px', background: '#f8fafc' }}>
+          <small style={{ color: '#64748b' }}>Compras concluídas</small>
+          <strong style={{ display: 'block', fontSize: '24px', marginTop: '4px' }}>{totalCompradas}</strong>
         </div>
       </div>
 
@@ -2570,6 +2606,10 @@ function TelaComprasProgramadas({ contas = [], token }) {
         .compras-simulacao-table th:first-child, .compras-simulacao-table td:first-child { text-align: left; }
         .compras-simulacao-table th { background: #f8fafc; color: #475569; font-weight: 700; }
         .compras-simulacao-notas { margin: 14px 0 0; padding-left: 18px; color: #64748b; font-size: 12px; line-height: 1.5; }
+        @media (max-width: 1200px) {
+          .compras-item-card { grid-template-columns: minmax(220px, 1.4fr) repeat(2, minmax(120px, 1fr)) !important; }
+          .compras-item-actions { justify-content: flex-start !important; }
+        }
         @media (max-width: 1100px) {
           .compras-form-grid-primary {
             grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2608,6 +2648,9 @@ function TelaComprasProgramadas({ contas = [], token }) {
           .compras-simulacao-header { flex-direction: column; }
           .compras-simulacao-controles, .compras-simulacao-resumo { grid-template-columns: 1fr; }
           .compras-simulacao-controles .btn { width: 100%; }
+          .compras-item-card { grid-template-columns: 1fr !important; }
+          .compras-item-actions { justify-content: flex-start !important; }
+          .compras-item-actions .btn { flex: 1 1 120px; }
         }
       `}</style>
 
@@ -2716,18 +2759,36 @@ function TelaComprasProgramadas({ contas = [], token }) {
       )}
 
       <div>
-        <h2 style={{ margin: '0 0 12px', fontSize: '20px' }}>Compras cadastradas</h2>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'end', gap: '12px', flexWrap: 'wrap', marginBottom: '12px' }}>
+          <h2 style={{ margin: 0, fontSize: '20px' }}>Compras cadastradas</h2>
+          <label className="compras-field" style={{ minWidth: '190px' }}>
+            <span className="compras-field-label">Exibir</span>
+            <select value={filtroStatusCompra} onChange={(e) => setFiltroStatusCompra(e.target.value)}>
+              <option value="ATIVAS">Ativas</option>
+              <option value="PLANEJADA">Planejadas</option>
+              <option value="ADIADA">Adiadas</option>
+              <option value="COMPRADA">Compradas</option>
+              <option value="CANCELADA">Canceladas</option>
+              <option value="TODAS">Todas</option>
+            </select>
+          </label>
+        </div>
         {carregando ? <Spinner texto="Carregando compras..." /> : compras.length === 0 ? (
           <div style={{ border: '1px dashed #cbd5e1', borderRadius: '14px', padding: '28px', textAlign: 'center', color: '#64748b' }}>
             Nenhuma compra programada ainda. Cadastre a primeira acima.
           </div>
+        ) : comprasFiltradas.length === 0 ? (
+          <div style={{ border: '1px dashed #cbd5e1', borderRadius: '14px', padding: '24px', textAlign: 'center', color: '#64748b' }}>
+            Nenhuma compra encontrada para o filtro selecionado.
+          </div>
         ) : (
           <div style={{ display: 'grid', gap: '10px' }}>
-            {compras.map((compra) => {
+            {comprasFiltradas.map((compra) => {
               const cores = corPrioridade[compra.prioridade] || corPrioridade.MEDIA;
+              const coresStatus = corStatusCompra[compra.status] || corStatusCompra.PLANEJADA;
               const categoria = compra.categoria_detalhada_nome || compra.categoria_macro_nome || 'Sem categoria';
               return (
-                <div key={compra.id} style={{ border: '1px solid #e2e8f0', borderRadius: '12px', padding: '14px', background: 'white', display: 'grid', gridTemplateColumns: 'minmax(220px, 1.6fr) repeat(3, minmax(120px, 0.8fr)) auto', gap: '14px', alignItems: 'center' }}>
+                <div key={compra.id} className="compras-item-card" style={{ border: '1px solid #e2e8f0', borderRadius: '12px', padding: '14px', background: 'white', display: 'grid', gridTemplateColumns: 'minmax(220px, 1.6fr) repeat(4, minmax(110px, 0.75fr)) auto', gap: '14px', alignItems: 'center' }}>
                   <div>
                     <strong style={{ display: 'block', fontSize: '16px' }}>{compra.descricao}</strong>
                     <small style={{ color: '#64748b' }}>{categoria}{compra.conta_nome ? ` · ${compra.conta_nome}` : ''}</small>
@@ -2739,8 +2800,22 @@ function TelaComprasProgramadas({ contas = [], token }) {
                     <span style={{ background: cores[0], color: cores[1], borderRadius: '999px', padding: '4px 8px', fontSize: '12px', fontWeight: 700 }}>{compra.prioridade}</span>
                     <small style={{ display: 'block', color: '#64748b', marginTop: '5px' }}>{compra.forma_pagamento === 'PARCELADO' ? `${compra.parcelas}x` : 'À vista'}</small>
                   </div>
-                  <div style={{ display: 'flex', gap: '6px', justifyContent: 'flex-end', flexWrap: 'wrap' }}>
-                    <Btn size="sm" variant="primary" onClick={() => abrirSimulacao(compra)}>Simular impacto</Btn>
+                  <div>
+                    <small style={{ display: 'block', color: '#64748b', marginBottom: '4px' }}>Status</small>
+                    <select
+                      value={compra.status || 'PLANEJADA'}
+                      onChange={(e) => atualizarStatusCompra(compra, e.target.value)}
+                      disabled={atualizandoStatusId === compra.id}
+                      style={{ width: '100%', minWidth: '110px', border: `1px solid ${coresStatus[0]}`, borderRadius: '8px', padding: '7px 8px', background: coresStatus[0], color: coresStatus[1], fontWeight: 700 }}
+                    >
+                      <option value="PLANEJADA">Planejada</option>
+                      <option value="ADIADA">Adiada</option>
+                      <option value="COMPRADA">Comprada</option>
+                      <option value="CANCELADA">Cancelada</option>
+                    </select>
+                  </div>
+                  <div className="compras-item-actions" style={{ display: 'flex', gap: '6px', justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+                    {!['COMPRADA', 'CANCELADA'].includes(compra.status) && <Btn size="sm" variant="primary" onClick={() => abrirSimulacao(compra)}>Simular impacto</Btn>}
                     <Btn size="sm" onClick={() => editarCompra(compra)}>Editar</Btn>
                     <Btn size="sm" onClick={() => excluirCompra(compra)}>Excluir</Btn>
                   </div>
