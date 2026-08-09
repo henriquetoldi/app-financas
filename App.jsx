@@ -2096,7 +2096,7 @@ function HeaderPrincipal({ usuario, token, onLogout, onAbrirMenu }) {
 function TelaAssistenteFinanceiro({ token, onVoltar }) {
   const boasVindas = {
     role: 'assistant',
-    content: 'Sou o assistente financeiro do seu app. Posso consultar seus dados, comparar cenários e preparar criação ou alteração de Compras Programadas. Nenhuma mudança é aplicada sem sua confirmação explícita.',
+    content: 'Sou o assistente financeiro do seu app. Posso consultar seus dados e preparar ações em Compras Programadas e Contas Previstas. Nenhuma mudança é aplicada sem sua confirmação explícita.',
     consultas: [],
   };
   const exemplos = [
@@ -2104,6 +2104,7 @@ function TelaAssistenteFinanceiro({ token, onVoltar }) {
     'Tenho lançamentos não categorizados?',
     'Qual a projeção das compras programadas nos próximos 6 meses?',
     'Como estão minhas contas previstas nos próximos 3 meses?',
+    'Adicione uma conta de internet de R$ 120 para o dia 15.',
     'Quero comprar uma TV de R$ 4.500 até novembro. Qual a melhor forma?',
   ];
   const [mensagens, setMensagens] = useState([boasVindas]);
@@ -2206,6 +2207,53 @@ function TelaAssistenteFinanceiro({ token, onVoltar }) {
     );
   };
 
+  const confirmarNovaProvisaoSugerida = (acao, indice) => {
+  if (!acao?.payload || acao.confirmada || acaoSalvandoIndice !== null) return;
+  const payload = acao.payload;
+  pedirConfirmacao(
+    acao.rotuloAcao || 'Adicionar conta prevista',
+    `Cadastrar "${payload.descricao}" por ${formatarMoeda(payload.valorPrevisto)}, para ${formatarData(payload.dataPrevista)}?`,
+    async () => {
+      setAcaoSalvandoIndice(indice);
+      try {
+        await axios.post(`${API_URL}/provisoes`, payload, { headers: { Authorization: `Bearer ${token}` } });
+        setMensagens((atuais) => atuais.map((item, posicao) => posicao === indice
+          ? { ...item, acaoPendente: { ...item.acaoPendente, confirmada: true } }
+          : item));
+        mostrarToast('Conta Prevista adicionada.');
+      } catch (error) {
+        mostrarToast(error.response?.data?.erro || 'Não foi possível adicionar a Conta Prevista.', 'erro');
+      } finally {
+        setAcaoSalvandoIndice(null);
+      }
+    },
+    { labelConfirmar: 'Adicionar conta prevista', corConfirmar: '#2563eb' }
+  );
+};
+
+  const confirmarAlteracaoProvisaoSugerida = (acao, indice) => {
+  if (!acao?.provisaoId || !acao?.payload || acao.confirmada || acaoSalvandoIndice !== null) return;
+  pedirConfirmacao(
+    acao.rotuloAcao || 'Confirmar alteração',
+    `Aplicar em "${acao.provisaoDescricao}"? ${(acao.detalhes || []).join(' • ')}`,
+    async () => {
+      setAcaoSalvandoIndice(indice);
+      try {
+        await axios.patch(`${API_URL}/provisoes/${acao.provisaoId}`, acao.payload, { headers: { Authorization: `Bearer ${token}` } });
+        setMensagens((atuais) => atuais.map((item, posicao) => posicao === indice
+          ? { ...item, acaoPendente: { ...item.acaoPendente, confirmada: true } }
+          : item));
+        mostrarToast('Conta Prevista atualizada.');
+      } catch (error) {
+        mostrarToast(error.response?.data?.erro || 'Não foi possível atualizar a Conta Prevista.', 'erro');
+      } finally {
+        setAcaoSalvandoIndice(null);
+      }
+    },
+    { labelConfirmar: acao.rotuloAcao || 'Aplicar alteração', corConfirmar: acao.acao === 'CANCELAR' ? '#dc2626' : '#2563eb' }
+  );
+};
+
   return (
     <div className="content-card" style={{ background: 'white', borderRadius: '12px', padding: '24px' }}>
       <style>{`
@@ -2288,6 +2336,36 @@ function TelaAssistenteFinanceiro({ token, onVoltar }) {
                     : <Btn variant={acao.acao === 'CANCELAR' ? 'danger' : 'primary'} size="sm" onClick={() => confirmarAlteracaoSugerida(acao, indice)} disabled={acaoSalvandoIndice !== null}>{acaoSalvandoIndice === indice ? 'Aplicando...' : (acao.rotuloAcao || 'Aplicar alteração')}</Btn>}
                 </div>;
               })()}
+              {mensagem.acaoPendente?.tipo === 'CRIAR_PROVISAO' && (() => {
+                const acao = mensagem.acaoPendente;
+                const payload = acao.payload || {};
+                return <div className="assistente-acao">
+                  <strong>📌 Nova Conta Prevista</strong>
+                  <div className="assistente-acao-grid">
+                    <div className="assistente-acao-item"><small>Descrição</small><strong>{payload.descricao}</strong></div>
+                    <div className="assistente-acao-item"><small>Tipo</small><strong>{payload.tipo === 'CREDITO' ? 'A receber' : 'A pagar'}</strong></div>
+                    <div className="assistente-acao-item"><small>Valor</small><strong>{formatarMoeda(payload.valorPrevisto)}</strong></div>
+                    <div className="assistente-acao-item"><small>Data prevista</small><strong>{formatarData(payload.dataPrevista)}</strong></div>
+                  </div>
+                  {acao.confirmada
+                    ? <span className="assistente-acao-confirmada">✅ Adicionada às Contas Previstas</span>
+                    : <Btn variant="primary" size="sm" onClick={() => confirmarNovaProvisaoSugerida(acao, indice)} disabled={acaoSalvandoIndice !== null}>{acaoSalvandoIndice === indice ? 'Adicionando...' : 'Adicionar às Contas Previstas'}</Btn>}
+                </div>;
+              })()}
+              {mensagem.acaoPendente?.tipo === 'ALTERAR_PROVISAO' && (() => {
+                const acao = mensagem.acaoPendente;
+                return <div className="assistente-acao">
+                  <strong>📌 {acao.rotuloAcao || 'Alteração de Conta Prevista'}</strong>
+                  <div className="assistente-acao-grid">
+                    <div className="assistente-acao-item"><small>Conta prevista</small><strong>{acao.provisaoDescricao}</strong></div>
+                    <div className="assistente-acao-item"><small>Ação</small><strong>{acao.rotuloAcao}</strong></div>
+                  </div>
+                  <ul className="assistente-acao-detalhes">{(acao.detalhes || []).map((detalhe) => <li key={detalhe}>{detalhe}</li>)}</ul>
+                  {acao.confirmada
+                    ? <span className="assistente-acao-confirmada">✅ Alteração aplicada</span>
+                    : <Btn variant={acao.acao === 'CANCELAR' ? 'danger' : 'primary'} size="sm" onClick={() => confirmarAlteracaoProvisaoSugerida(acao, indice)} disabled={acaoSalvandoIndice !== null}>{acaoSalvandoIndice === indice ? 'Aplicando...' : (acao.rotuloAcao || 'Aplicar alteração')}</Btn>}
+                </div>;
+              })()}
             </div>
           ))}
           {enviando && <div className="assistente-msg assistente-msg-assistant"><Spinner texto="Consultando seus dados..." /></div>}
@@ -2310,7 +2388,7 @@ function TelaAssistenteFinanceiro({ token, onVoltar }) {
           />
           <Btn variant="primary" onClick={() => enviarPergunta()} disabled={enviando || !texto.trim()}>{enviando ? 'Analisando...' : 'Enviar'}</Btn>
         </div>
-        <div className="assistente-disclaimer">A IA consulta dados por ferramentas autorizadas e não recebe acesso direto ao banco. Ela pode preparar criação ou alteração de Compra Programada, mas nenhuma gravação ocorre automaticamente: o app só executa depois de você clicar na ação e confirmar no modal. O assistente usa o nível gratuito do Gemini; nesse nível, o Google informa que o conteúdo enviado pode ser usado para melhorar seus produtos.</div>
+        <div className="assistente-disclaimer">A IA consulta dados por ferramentas autorizadas e não recebe acesso direto ao banco. Ela pode preparar ações em Compras Programadas e Contas Previstas, mas nenhuma gravação ocorre automaticamente: o app só executa depois de você clicar na ação e confirmar no modal. Contas Previstas só viram realizadas por conciliação com uma transação real. O assistente usa o nível gratuito do Gemini; nesse nível, o Google informa que o conteúdo enviado pode ser usado para melhorar seus produtos.</div>
       </div>
     </div>
   );
