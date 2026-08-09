@@ -5,15 +5,7 @@ function trocar(conteudo, rotulo, antigo, novo) {
   return conteudo.replace(antigo, novo);
 }
 
-// ---------------- Backend ----------------
-const backendPath = 'backend-server.js';
-let backend = fs.readFileSync(backendPath, 'utf8');
-
-const marcadorFerramentas = 'const FERRAMENTAS_ASSISTENTE = [';
-const indiceFerramentas = backend.indexOf(marcadorFerramentas);
-if (indiceFerramentas < 0) throw new Error('Bloco de ferramentas do assistente não encontrado.');
-
-const ferramentasProvisoes = `async function ferramentaPrepararNovaProvisao(usuarioId, args = {}) {
+async function ferramentaPrepararNovaProvisao(usuarioId, args = {}) {
   const descricao = String(args.descricao || '').trim();
   const valorPrevisto = Number(args.valorPrevisto);
   const tipo = String(args.tipo || '').trim().toUpperCase();
@@ -219,8 +211,13 @@ async function ferramentaPrepararAlteracaoProvisao(usuarioId, args = {}) {
   };
 }
 
-`;
-backend = backend.slice(0, indiceFerramentas) + ferramentasProvisoes + backend.slice(indiceFerramentas);
+const backendPath = 'backend-server.js';
+let backend = fs.readFileSync(backendPath, 'utf8');
+const marcadorFerramentas = 'const FERRAMENTAS_ASSISTENTE = [';
+const indiceFerramentas = backend.indexOf(marcadorFerramentas);
+if (indiceFerramentas < 0) throw new Error('Bloco de ferramentas do assistente não encontrado.');
+const fontesProvisoes = `${ferramentaPrepararNovaProvisao.toString()}\n\n${ferramentaPrepararAlteracaoProvisao.toString()}\n\n`;
+backend = backend.slice(0, indiceFerramentas) + fontesProvisoes + backend.slice(indiceFerramentas);
 
 backend = trocar(
   backend,
@@ -309,20 +306,64 @@ backend = trocar(
   `Se o usuário pedir para adiar, editar, marcar como comprada ou cancelar uma compra programada existente, use obrigatoriamente preparar_alteracao_compra_programada. Para campos que não serão alterados nessa ferramenta, use os sentinelas indicados no schema, como string vazia, 0 ou MANTER. Se faltarem dados indispensáveis para a alteração, peça-os antes de preparar. Se faltarem descrição, valor ou prazo/data limite para uma compra nova, peça esses dados antes de planejar.`,
   `Se o usuário pedir para adiar, editar, marcar como comprada ou cancelar uma compra programada existente, use obrigatoriamente preparar_alteracao_compra_programada. Se pedir para criar uma Conta Prevista, use preparar_nova_conta_prevista. Se pedir para adiar, editar, cancelar ou marcar como realizada uma Conta Prevista existente, use preparar_alteracao_conta_prevista. Uma Conta Prevista só pode ser considerada realizada após conciliação com uma transação real; nunca contorne essa regra alterando o status diretamente. Para campos que não serão alterados nessas ferramentas, use os sentinelas indicados no schema, como string vazia, 0 ou MANTER. Se faltarem dados indispensáveis para a alteração, peça-os antes de preparar. Se faltarem descrição, valor ou prazo/data limite para uma compra nova, peça esses dados antes de planejar.`
 );
-
 fs.writeFileSync(backendPath, backend);
 
 // ---------------- Frontend ----------------
+const fonteConfirmarNovaProvisao = (acao, indice) => {
+  if (!acao?.payload || acao.confirmada || acaoSalvandoIndice !== null) return;
+  const payload = acao.payload;
+  pedirConfirmacao(
+    acao.rotuloAcao || 'Adicionar conta prevista',
+    `Cadastrar "${payload.descricao}" por ${formatarMoeda(payload.valorPrevisto)}, para ${formatarData(payload.dataPrevista)}?`,
+    async () => {
+      setAcaoSalvandoIndice(indice);
+      try {
+        await axios.post(`${API_URL}/provisoes`, payload, { headers: { Authorization: `Bearer ${token}` } });
+        setMensagens((atuais) => atuais.map((item, posicao) => posicao === indice
+          ? { ...item, acaoPendente: { ...item.acaoPendente, confirmada: true } }
+          : item));
+        mostrarToast('Conta Prevista adicionada.');
+      } catch (error) {
+        mostrarToast(error.response?.data?.erro || 'Não foi possível adicionar a Conta Prevista.', 'erro');
+      } finally {
+        setAcaoSalvandoIndice(null);
+      }
+    },
+    { labelConfirmar: 'Adicionar conta prevista', corConfirmar: '#2563eb' }
+  );
+};
+
+const fonteConfirmarAlteracaoProvisao = (acao, indice) => {
+  if (!acao?.provisaoId || !acao?.payload || acao.confirmada || acaoSalvandoIndice !== null) return;
+  pedirConfirmacao(
+    acao.rotuloAcao || 'Confirmar alteração',
+    `Aplicar em "${acao.provisaoDescricao}"? ${(acao.detalhes || []).join(' • ')}`,
+    async () => {
+      setAcaoSalvandoIndice(indice);
+      try {
+        await axios.patch(`${API_URL}/provisoes/${acao.provisaoId}`, acao.payload, { headers: { Authorization: `Bearer ${token}` } });
+        setMensagens((atuais) => atuais.map((item, posicao) => posicao === indice
+          ? { ...item, acaoPendente: { ...item.acaoPendente, confirmada: true } }
+          : item));
+        mostrarToast('Conta Prevista atualizada.');
+      } catch (error) {
+        mostrarToast(error.response?.data?.erro || 'Não foi possível atualizar a Conta Prevista.', 'erro');
+      } finally {
+        setAcaoSalvandoIndice(null);
+      }
+    },
+    { labelConfirmar: acao.rotuloAcao || 'Aplicar alteração', corConfirmar: acao.acao === 'CANCELAR' ? '#dc2626' : '#2563eb' }
+  );
+};
+
 const appPath = 'App.jsx';
 let app = fs.readFileSync(appPath, 'utf8');
-
 app = trocar(
   app,
   'boas vindas do assistente',
   `content: 'Sou o assistente financeiro do seu app. Posso consultar seus dados, comparar cenários e preparar criação ou alteração de Compras Programadas. Nenhuma mudança é aplicada sem sua confirmação explícita.',`,
   `content: 'Sou o assistente financeiro do seu app. Posso consultar seus dados e preparar ações em Compras Programadas e Contas Previstas. Nenhuma mudança é aplicada sem sua confirmação explícita.',`
 );
-
 app = trocar(
   app,
   'exemplo de conta prevista',
@@ -336,54 +377,7 @@ app = trocar(
 const marcadorReturnAssistente = `  return (\n    <div className="content-card" style={{ background: 'white', borderRadius: '12px', padding: '24px' }}>`;
 const indiceReturn = app.indexOf(marcadorReturnAssistente, app.indexOf('function TelaAssistenteFinanceiro'));
 if (indiceReturn < 0) throw new Error('Return do Assistente não encontrado.');
-const funcoesProvisao = `  const confirmarNovaProvisaoSugerida = (acao, indice) => {
-    if (!acao?.payload || acao.confirmada || acaoSalvandoIndice !== null) return;
-    const payload = acao.payload;
-    pedirConfirmacao(
-      acao.rotuloAcao || 'Adicionar conta prevista',
-      `Cadastrar "${payload.descricao}" por ${formatarMoeda(payload.valorPrevisto)}, para ${formatarData(payload.dataPrevista)}?`,
-      async () => {
-        setAcaoSalvandoIndice(indice);
-        try {
-          await axios.post(`${API_URL}/provisoes`, payload, { headers: { Authorization: `Bearer ${token}` } });
-          setMensagens((atuais) => atuais.map((item, posicao) => posicao === indice
-            ? { ...item, acaoPendente: { ...item.acaoPendente, confirmada: true } }
-            : item));
-          mostrarToast('Conta Prevista adicionada.');
-        } catch (error) {
-          mostrarToast(error.response?.data?.erro || 'Não foi possível adicionar a Conta Prevista.', 'erro');
-        } finally {
-          setAcaoSalvandoIndice(null);
-        }
-      },
-      { labelConfirmar: 'Adicionar conta prevista', corConfirmar: '#2563eb' }
-    );
-  };
-
-  const confirmarAlteracaoProvisaoSugerida = (acao, indice) => {
-    if (!acao?.provisaoId || !acao?.payload || acao.confirmada || acaoSalvandoIndice !== null) return;
-    pedirConfirmacao(
-      acao.rotuloAcao || 'Confirmar alteração',
-      `Aplicar em "${acao.provisaoDescricao}"? ${(acao.detalhes || []).join(' • ')}`,
-      async () => {
-        setAcaoSalvandoIndice(indice);
-        try {
-          await axios.patch(`${API_URL}/provisoes/${acao.provisaoId}`, acao.payload, { headers: { Authorization: `Bearer ${token}` } });
-          setMensagens((atuais) => atuais.map((item, posicao) => posicao === indice
-            ? { ...item, acaoPendente: { ...item.acaoPendente, confirmada: true } }
-            : item));
-          mostrarToast('Conta Prevista atualizada.');
-        } catch (error) {
-          mostrarToast(error.response?.data?.erro || 'Não foi possível atualizar a Conta Prevista.', 'erro');
-        } finally {
-          setAcaoSalvandoIndice(null);
-        }
-      },
-      { labelConfirmar: acao.rotuloAcao || 'Aplicar alteração', corConfirmar: acao.acao === 'CANCELAR' ? '#dc2626' : '#2563eb' }
-    );
-  };
-
-`;
+const funcoesProvisao = `  const confirmarNovaProvisaoSugerida = ${fonteConfirmarNovaProvisao.toString()};\n\n  const confirmarAlteracaoProvisaoSugerida = ${fonteConfirmarAlteracaoProvisao.toString()};\n\n`;
 app = app.slice(0, indiceReturn) + funcoesProvisao + app.slice(indiceReturn);
 
 app = trocar(
@@ -455,6 +449,5 @@ app = trocar(
   `A IA consulta dados por ferramentas autorizadas e não recebe acesso direto ao banco. Ela pode preparar criação ou alteração de Compra Programada, mas nenhuma gravação ocorre automaticamente: o app só executa depois de você clicar na ação e confirmar no modal.`,
   `A IA consulta dados por ferramentas autorizadas e não recebe acesso direto ao banco. Ela pode preparar ações em Compras Programadas e Contas Previstas, mas nenhuma gravação ocorre automaticamente: o app só executa depois de você clicar na ação e confirmar no modal. Contas Previstas só viram realizadas por conciliação com uma transação real.`
 );
-
 fs.writeFileSync(appPath, app);
 console.log('Transformação do Assistente para Contas Previstas aplicada.');
