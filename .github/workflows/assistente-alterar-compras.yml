@@ -1,6 +1,9 @@
 name: Assistente alterar compras programadas
 
 on:
+  push:
+    branches:
+      - feat/assistente-alterar-compras
   pull_request:
     branches:
       - main
