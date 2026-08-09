@@ -4243,13 +4243,17 @@ async function ferramentaPrepararConciliacaoAssistente(usuarioId, args = {}) {
 
   const melhor = candidatas[0];
   const segunda = candidatas[1];
-  const claramenteMelhor = melhor.analise.score >= 0.65 && (!segunda || (melhor.analise.score - segunda.analise.score) >= 0.15);
+  const identificacaoExplicita = Boolean(termoTransacao) && candidatas.length === 1;
+  const claramenteMelhor = identificacaoExplicita || (melhor.analise.score >= 0.65 && (!segunda || (melhor.analise.score - segunda.analise.score) >= 0.15));
   if (!claramenteMelhor) {
+    const motivoAmbiguidade = candidatas.length === 1
+      ? 'Encontrei um candidato de baixa confiança. Peça ao usuário para confirmar a descrição desse lançamento antes de preparar a conciliação.'
+      : 'Encontrei mais de uma transação plausível. Peça ao usuário para indicar qual lançamento corresponde à Conta Prevista.';
     return {
       encontrada: true,
       preparada: false,
       ambigua: true,
-      motivo: 'Encontrei mais de uma transação plausível. Peça ao usuário para indicar qual lançamento corresponde à Conta Prevista.',
+      motivo: motivoAmbiguidade,
       contaPrevista: {
         descricao: provisao.descricao,
         valor: Number(provisao.valor_previsto || 0),
