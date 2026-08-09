@@ -63,7 +63,11 @@ jobs:
           }
           const routeCount = (backend.match(/app\.post\('\/api\/compras-programadas\/:id\/simular'/g) || []).length;
           if (routeCount !== 1) throw new Error(`Esperava 1 rota de simulação, encontrei ${routeCount}.`);
-          if (backend.includes("return res.status(404).json({ erro: 'Compra programada não encontrada.' });")) throw new Error('Helper ainda depende de res HTTP.');
+          const helperInicio = backend.indexOf('async function simularCompraProgramada');
+          const helperFim = backend.indexOf("app.post('/api/compras-programadas/:id/simular'", helperInicio);
+          const helper = backend.slice(helperInicio, helperFim);
+          if (helper.includes('res.status') || helper.includes('res.json')) throw new Error('Helper ainda depende de resposta HTTP.');
+          if (!helper.includes("throw new Error('Compra programada não encontrada.')")) throw new Error('Helper não trata compra inexistente de forma reutilizável.');
           console.log('Assertions da integração Assistente + Compras aprovadas.');
           NODE
 
