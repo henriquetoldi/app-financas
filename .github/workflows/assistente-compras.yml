@@ -5,21 +5,21 @@ on:
     branches:
       - feat/assistente-compras-programadas
     paths:
-      - changes/apply-assistente-compras.mjs
+      - backend-server.js
       - .github/workflows/assistente-compras.yml
   pull_request:
     branches:
       - main
 
 concurrency:
-  group: assistente-compras-programadas
+  group: assistente-compras-programadas-validate
   cancel-in-progress: true
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  apply-and-validate:
+  validate:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout branch
@@ -27,14 +27,6 @@ jobs:
         with:
           ref: feat/assistente-compras-programadas
           fetch-depth: 0
-
-      - name: Configure git
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-      - name: Apply assistant integration
-        run: node changes/apply-assistente-compras.mjs
 
       - name: Validate backend syntax
         run: node --check backend-server.js
@@ -62,6 +54,7 @@ jobs:
             'melhorCenario: melhor',
             'melhoresAlternativas: cenarios.slice(0, 5)',
             'indice += 3',
+            'Promise.all(lote.map',
           ];
           for (const trecho of required) {
             if (!backend.includes(trecho)) throw new Error(`Trecho obrigatório ausente: ${trecho}`);
@@ -73,15 +66,9 @@ jobs:
           const helper = backend.slice(helperInicio, helperFim);
           if (helper.includes('res.status') || helper.includes('res.json')) throw new Error('Helper ainda depende de resposta HTTP.');
           if (!helper.includes("throw new Error('Compra programada não encontrada.')")) throw new Error('Helper não trata compra inexistente de forma reutilizável.');
-          console.log('Assertions da integração Assistente + Compras aprovadas.');
+          if (!backend.includes("status IN ('PLANEJADA', 'ADIADA')")) throw new Error('Ferramenta não restringe a análise a compras ativas.');
+          console.log('Assertions finais da integração Assistente + Compras aprovadas.');
           NODE
 
-      - name: Check diff
-        run: git diff --check
-
-      - name: Commit validated backend
-        run: |
-          git add backend-server.js
-          git commit -m "Integrar assistente com cenários de compras programadas"
-          git pull --rebase origin feat/assistente-compras-programadas
-          git push origin feat/assistente-compras-programadas
+      - name: Check branch diff
+        run: git diff --check origin/main...HEAD
