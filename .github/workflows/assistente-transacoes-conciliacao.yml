@@ -1,0 +1,116 @@
+name: Assistente transacoes e conciliacao
+
+on:
+  push:
+    branches:
+      - feat/assistente-transacoes-conciliacao
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: feat/assistente-transacoes-conciliacao
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Apply feature when needed
+        run: |
+          if grep -q "async function ferramentaPrepararConciliacaoAssistente" backend-server.js; then
+            echo "Feature already applied."
+          else
+            python3 changes/apply-assistente-transacoes-conciliacao.py
+          fi
+
+      - name: Validate backend syntax
+        run: node --check backend-server.js
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Run safety and integration assertions
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          backend = Path('backend-server.js').read_text(encoding='utf-8')
+          app = Path('App.jsx').read_text(encoding='utf-8')
+
+          required_backend = [
+              'async function ferramentaSugerirConciliacoesPendentes',
+              'async function ferramentaPrepararConciliacaoAssistente',
+              'async function ferramentaPrepararCategorizacaoTransacao',
+              "name: 'sugerir_conciliacoes_pendentes'",
+              "name: 'preparar_conciliacao_conta_prevista'",
+              "name: 'preparar_categorizacao_transacao'",
+              "if (nome === 'preparar_conciliacao_conta_prevista')",
+              "if (nome === 'preparar_categorizacao_transacao')",
+              'calcularSugestaoConciliacao(provisao, transacao)',
+              "tipo: 'CONCILIAR_PROVISAO'",
+              "tipo: 'CATEGORIZAR_TRANSACAO'",
+              'nunca altere o status diretamente',
+              'Não edite nem exclua transações por meio do assistente neste fluxo.',
+          ]
+          for item in required_backend:
+              assert item in backend, f'Backend sem marcador obrigatório: {item}'
+
+          inicio = backend.index('async function ferramentaSugerirConciliacoesPendentes')
+          fim = backend.index('const FERRAMENTAS_ASSISTENTE = [', inicio)
+          tools = backend[inicio:fim]
+          forbidden_writes = [
+              'INSERT INTO conciliacoes',
+              'UPDATE conciliacoes',
+              'DELETE FROM conciliacoes',
+              'UPDATE provisoes',
+              'DELETE FROM provisoes',
+              'UPDATE transacoes',
+              'DELETE FROM transacoes',
+          ]
+          for item in forbidden_writes:
+              assert item not in tools, f'Ferramenta do assistente contém escrita direta: {item}'
+
+          required_app = [
+              'const confirmarConciliacaoSugerida',
+              'const confirmarCategorizacaoSugerida',
+              "mensagem.acaoPendente?.tipo === 'CONCILIAR_PROVISAO'",
+              "mensagem.acaoPendente?.tipo === 'CATEGORIZAR_TRANSACAO'",
+              "axios.post(`${API_URL}/conciliacoes/confirmar`",
+              "axios.patch(`${API_URL}/transacoes/${acao.transacaoId}/categorizar`",
+              "'Confirmar conciliação'",
+              "'Confirmar categorização'",
+          ]
+          for item in required_app:
+              assert item in app, f'Frontend sem marcador obrigatório: {item}'
+
+          assert app.count('pedirConfirmacao(') >= 6, 'Ações assistidas devem continuar exigindo confirmação explícita.'
+          assert "_acaoPendente" in backend and "delete resultado._acaoPendente" in backend, 'IDs internos precisam continuar sanitizados antes do Gemini.'
+          print('Assertions #75 concluídas com sucesso.')
+          PY
+
+      - name: Check diff
+        run: git diff --check
+
+      - name: Commit validated feature
+        run: |
+          if git diff --quiet -- App.jsx backend-server.js; then
+            echo "No feature changes to commit."
+          else
+            git add App.jsx backend-server.js
+            git commit -m "feat: permitir categorizacao e conciliacao pelo assistente"
+            git push origin HEAD:feat/assistente-transacoes-conciliacao
+          fi
