@@ -1,0 +1,125 @@
+name: Assistente contas previstas
+
+on:
+  push:
+    branches:
+      - feat/assistente-contas-previstas
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: assistente-contas-previstas
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: feat/assistente-contas-previstas
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Apply feature when needed
+        run: |
+          if grep -q "async function ferramentaPrepararNovaProvisao" backend-server.js; then
+            echo "Feature already applied."
+          else
+            node changes/apply-assistente-contas-previstas.mjs
+          fi
+
+      - name: Validate backend syntax
+        run: node --check backend-server.js
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Run safety and integration assertions
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const backend = fs.readFileSync('backend-server.js', 'utf8');
+          const app = fs.readFileSync('App.jsx', 'utf8');
+
+          const requiredBackend = [
+            'async function ferramentaPrepararNovaProvisao(usuarioId, args = {})',
+            'async function ferramentaPrepararAlteracaoProvisao(usuarioId, args = {})',
+            "name: 'preparar_nova_conta_prevista'",
+            "name: 'preparar_alteracao_conta_prevista'",
+            "tipo: 'CRIAR_PROVISAO'",
+            "tipo: 'ALTERAR_PROVISAO'",
+            'requerConciliacao: true',
+            "app.post('/api/provisoes', verificarToken",
+            "app.patch('/api/provisoes/:id', verificarToken",
+          ];
+          for (const trecho of requiredBackend) {
+            if (!backend.includes(trecho)) throw new Error(`Backend sem trecho obrigatório: ${trecho}`);
+          }
+
+          for (const nome of ['ferramentaPrepararNovaProvisao', 'ferramentaPrepararAlteracaoProvisao']) {
+            const inicio = backend.indexOf(`async function ${nome}`);
+            const fim = backend.indexOf(nome === 'ferramentaPrepararNovaProvisao' ? 'async function ferramentaPrepararAlteracaoProvisao' : 'const FERRAMENTAS_ASSISTENTE = [', inicio);
+            const ferramenta = backend.slice(inicio, fim);
+            if (/\bINSERT\s+INTO\s+provisoes\b/i.test(ferramenta) || /\bUPDATE\s+provisoes\b/i.test(ferramenta) || /\bDELETE\s+FROM\s+provisoes\b/i.test(ferramenta)) {
+              throw new Error(`${nome} não pode gravar em provisoes.`);
+            }
+          }
+
+          const inicioAlteracao = backend.indexOf('async function ferramentaPrepararAlteracaoProvisao');
+          const fimAlteracao = backend.indexOf('const FERRAMENTAS_ASSISTENTE = [', inicioAlteracao);
+          const alteracao = backend.slice(inicioAlteracao, fimAlteracao);
+          const trechoRealizada = alteracao.slice(alteracao.indexOf("acao === 'MARCAR_REALIZADA'"), alteracao.indexOf('const payload = {}'));
+          if (!trechoRealizada.includes('requerConciliacao: true')) throw new Error('MARCAR_REALIZADA deve exigir conciliação.');
+          if (trechoRealizada.includes('_acaoPendente')) throw new Error('MARCAR_REALIZADA não pode preparar escrita direta.');
+
+          const requiredApp = [
+            'const confirmarNovaProvisaoSugerida = (acao, indice) => {',
+            'const confirmarAlteracaoProvisaoSugerida = (acao, indice) => {',
+            "mensagem.acaoPendente?.tipo === 'CRIAR_PROVISAO'",
+            "mensagem.acaoPendente?.tipo === 'ALTERAR_PROVISAO'",
+            'axios.post(`${API_URL}/provisoes`, payload',
+            'axios.patch(`${API_URL}/provisoes/${acao.provisaoId}`, acao.payload',
+          ];
+          for (const trecho of requiredApp) {
+            if (!app.includes(trecho)) throw new Error(`Frontend sem trecho obrigatório: ${trecho}`);
+          }
+
+          for (const nome of ['confirmarNovaProvisaoSugerida', 'confirmarAlteracaoProvisaoSugerida']) {
+            const inicio = app.indexOf(`const ${nome}`);
+            const fim = app.indexOf('\n  };', inicio) + 5;
+            const bloco = app.slice(inicio, fim);
+            if (!bloco.includes('pedirConfirmacao(')) throw new Error(`${nome} não exige confirmação explícita.`);
+          }
+
+          if (!backend.includes('delete resultado._acaoPendente')) throw new Error('Ação interna não está sendo sanitizada antes do Gemini.');
+          console.log('Assertions do Assistente para Contas Previstas aprovadas.');
+          NODE
+
+      - name: Check diff
+        run: |
+          git diff --check
+          git diff --check origin/main...HEAD
+
+      - name: Commit validated feature
+        run: |
+          if git diff --quiet; then
+            echo "No working tree changes to commit."
+          else
+            git add App.jsx backend-server.js
+            git commit -m "Permitir gerenciar contas previstas pelo assistente com confirmação"
+            git pull --rebase origin feat/assistente-contas-previstas
+            git push origin feat/assistente-contas-previstas
+          fi
