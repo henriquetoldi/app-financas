@@ -2096,7 +2096,7 @@ function HeaderPrincipal({ usuario, token, onLogout, onAbrirMenu }) {
 function TelaAssistenteFinanceiro({ token, onVoltar }) {
   const boasVindas = {
     role: 'assistant',
-    content: 'Sou o assistente financeiro do seu app. Posso consultar seus dados, comparar cenários e preparar uma Compra Programada. Nenhuma compra é criada sem sua confirmação explícita.',
+    content: 'Sou o assistente financeiro do seu app. Posso consultar seus dados, comparar cenários e preparar criação ou alteração de Compras Programadas. Nenhuma mudança é aplicada sem sua confirmação explícita.',
     consultas: [],
   };
   const exemplos = [
@@ -2180,6 +2180,32 @@ function TelaAssistenteFinanceiro({ token, onVoltar }) {
     );
   };
 
+  const confirmarAlteracaoSugerida = (acao, indice) => {
+    if (!acao?.compraId || !acao?.payload || acao.confirmada || acaoSalvandoIndice !== null) return;
+    const ehCancelamento = acao.acao === 'CANCELAR';
+    pedirConfirmacao(
+      acao.rotuloAcao || 'Confirmar alteração',
+      `Aplicar em "${acao.compraDescricao}"? ${(acao.detalhes || []).join(' • ')}`,
+      async () => {
+        setAcaoSalvandoIndice(indice);
+        try {
+          await axios.patch(`${API_URL}/compras-programadas/${acao.compraId}`, acao.payload, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          setMensagens((atuais) => atuais.map((item, posicao) => posicao === indice
+            ? { ...item, acaoPendente: { ...item.acaoPendente, confirmada: true } }
+            : item));
+          mostrarToast('Compra Programada atualizada.');
+        } catch (error) {
+          mostrarToast(error.response?.data?.erro || 'Não foi possível atualizar a Compra Programada.', 'erro');
+        } finally {
+          setAcaoSalvandoIndice(null);
+        }
+      },
+      { labelConfirmar: acao.rotuloAcao || 'Aplicar alteração', corConfirmar: ehCancelamento ? '#dc2626' : '#2563eb' }
+    );
+  };
+
   return (
     <div className="content-card" style={{ background: 'white', borderRadius: '12px', padding: '24px' }}>
       <style>{`
@@ -2202,6 +2228,8 @@ function TelaAssistenteFinanceiro({ token, onVoltar }) {
         .assistente-acao-item { background: white; border: 1px solid #dbeafe; border-radius: 9px; padding: 8px; }
         .assistente-acao-item small { display: block; color: #64748b; font-size: 10px; margin-bottom: 3px; }
         .assistente-acao-confirmada { display: inline-flex; align-items: center; gap: 6px; color: #166534; background: #dcfce7; border-radius: 999px; padding: 6px 10px; font-size: 12px; font-weight: 700; }
+        .assistente-acao-detalhes { margin: 10px 0 12px; padding-left: 18px; color: #334155; font-size: 12px; }
+        .assistente-acao-detalhes li { margin: 4px 0; }
         .assistente-disclaimer { margin-top: 9px; color: #64748b; font-size: 11px; line-height: 1.4; }
         @media (max-width: 720px) {
           .assistente-msg { max-width: 94%; }
@@ -2246,6 +2274,20 @@ function TelaAssistenteFinanceiro({ token, onVoltar }) {
                     : <Btn variant="primary" size="sm" onClick={() => confirmarCompraSugerida(mensagem.acaoPendente, indice)} disabled={acaoSalvandoIndice !== null}>{acaoSalvandoIndice === indice ? 'Adicionando...' : 'Adicionar às Compras Programadas'}</Btn>}
                 </div>;
               })()}
+              {mensagem.acaoPendente?.tipo === 'ALTERAR_COMPRA_PROGRAMADA' && (() => {
+                const acao = mensagem.acaoPendente;
+                return <div className="assistente-acao">
+                  <strong>✏️ {acao.rotuloAcao || 'Alteração proposta'}</strong>
+                  <div className="assistente-acao-grid">
+                    <div className="assistente-acao-item"><small>Compra</small><strong>{acao.compraDescricao}</strong></div>
+                    <div className="assistente-acao-item"><small>Ação</small><strong>{acao.rotuloAcao}</strong></div>
+                  </div>
+                  <ul className="assistente-acao-detalhes">{(acao.detalhes || []).map((detalhe) => <li key={detalhe}>{detalhe}</li>)}</ul>
+                  {acao.confirmada
+                    ? <span className="assistente-acao-confirmada">✅ Alteração aplicada</span>
+                    : <Btn variant={acao.acao === 'CANCELAR' ? 'danger' : 'primary'} size="sm" onClick={() => confirmarAlteracaoSugerida(acao, indice)} disabled={acaoSalvandoIndice !== null}>{acaoSalvandoIndice === indice ? 'Aplicando...' : (acao.rotuloAcao || 'Aplicar alteração')}</Btn>}
+                </div>;
+              })()}
             </div>
           ))}
           {enviando && <div className="assistente-msg assistente-msg-assistant"><Spinner texto="Consultando seus dados..." /></div>}
@@ -2268,7 +2310,7 @@ function TelaAssistenteFinanceiro({ token, onVoltar }) {
           />
           <Btn variant="primary" onClick={() => enviarPergunta()} disabled={enviando || !texto.trim()}>{enviando ? 'Analisando...' : 'Enviar'}</Btn>
         </div>
-        <div className="assistente-disclaimer">A IA consulta dados por ferramentas autorizadas e não recebe acesso direto ao banco. Ela pode preparar uma sugestão de Compra Programada, mas nenhuma gravação ocorre automaticamente: o app só cadastra após você clicar em adicionar e confirmar no modal. O assistente usa o nível gratuito do Gemini; nesse nível, o Google informa que o conteúdo enviado pode ser usado para melhorar seus produtos.</div>
+        <div className="assistente-disclaimer">A IA consulta dados por ferramentas autorizadas e não recebe acesso direto ao banco. Ela pode preparar criação ou alteração de Compra Programada, mas nenhuma gravação ocorre automaticamente: o app só executa depois de você clicar na ação e confirmar no modal. O assistente usa o nível gratuito do Gemini; nesse nível, o Google informa que o conteúdo enviado pode ser usado para melhorar seus produtos.</div>
       </div>
     </div>
   );
