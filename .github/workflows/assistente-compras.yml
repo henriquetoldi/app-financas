@@ -1,0 +1,77 @@
+name: Assistente compras programadas
+
+on:
+  push:
+    branches:
+      - feat/assistente-compras-programadas
+    paths:
+      - changes/apply-assistente-compras.mjs
+      - .github/workflows/assistente-compras.yml
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: feat/assistente-compras-programadas
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Apply assistant integration
+        run: node changes/apply-assistente-compras.mjs
+
+      - name: Validate backend syntax
+        run: node --check backend-server.js
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Run integration assertions
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const backend = fs.readFileSync('backend-server.js', 'utf8');
+          const required = [
+            'async function simularCompraProgramada(usuarioId, compraId, parametros = {})',
+            "const resultado = await simularCompraProgramada(req.usuario.usuario_id, req.params.id, req.body || {})",
+            'async function ferramentaCompararCompraProgramada(usuarioId, args = {})',
+            "name: 'comparar_cenarios_compra_programada'",
+            "comparar_cenarios_compra_programada: 'comparação de cenários de compra'",
+            "if (nome === 'comparar_cenarios_compra_programada') return ferramentaCompararCompraProgramada(usuarioId, args);",
+            'use obrigatoriamente a ferramenta comparar_cenarios_compra_programada antes de recomendar',
+            'horizonteMeses: 18',
+            'melhorCenario: melhor',
+            'melhoresAlternativas: cenarios.slice(0, 5)',
+          ];
+          for (const trecho of required) {
+            if (!backend.includes(trecho)) throw new Error(`Trecho obrigatório ausente: ${trecho}`);
+          }
+          const routeCount = (backend.match(/app\.post\('\/api\/compras-programadas\/:id\/simular'/g) || []).length;
+          if (routeCount !== 1) throw new Error(`Esperava 1 rota de simulação, encontrei ${routeCount}.`);
+          if (backend.includes("return res.status(404).json({ erro: 'Compra programada não encontrada.' });")) throw new Error('Helper ainda depende de res HTTP.');
+          console.log('Assertions da integração Assistente + Compras aprovadas.');
+          NODE
+
+      - name: Check diff
+        run: git diff --check
+
+      - name: Commit validated backend
+        run: |
+          git add backend-server.js
+          git commit -m "Integrar assistente com cenários de compras programadas"
+          git push origin feat/assistente-compras-programadas
