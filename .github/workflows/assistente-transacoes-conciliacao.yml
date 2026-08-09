@@ -33,6 +33,7 @@ jobs:
           else
             python3 changes/apply-assistente-transacoes-conciliacao.py
           fi
+          python3 changes/fix-assistente-conciliacao.py
 
       - name: Validate backend syntax
         run: node --check backend-server.js
@@ -65,6 +66,7 @@ jobs:
               "tipo: 'CATEGORIZAR_TRANSACAO'",
               'nunca altere o status diretamente',
               'Não edite nem exclua transações por meio do assistente neste fluxo.',
+              'const identificacaoExplicita = Boolean(termoTransacao) && candidatas.length === 1;',
           ]
           for item in required_backend:
               assert item in backend, f'Backend sem marcador obrigatório: {item}'
