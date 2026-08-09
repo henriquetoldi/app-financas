@@ -2096,7 +2096,7 @@ function HeaderPrincipal({ usuario, token, onLogout, onAbrirMenu }) {
 function TelaAssistenteFinanceiro({ token, onVoltar }) {
   const boasVindas = {
     role: 'assistant',
-    content: 'Sou o assistente financeiro do seu app. Nesta primeira versão eu posso consultar seus dados e responder perguntas, mas não altero nenhum lançamento, categoria ou previsão.',
+    content: 'Sou o assistente financeiro do seu app. Posso consultar seus dados, comparar cenários e preparar uma Compra Programada. Nenhuma compra é criada sem sua confirmação explícita.',
     consultas: [],
   };
   const exemplos = [
@@ -2104,10 +2104,12 @@ function TelaAssistenteFinanceiro({ token, onVoltar }) {
     'Tenho lançamentos não categorizados?',
     'Qual a projeção das compras programadas nos próximos 6 meses?',
     'Como estão minhas contas previstas nos próximos 3 meses?',
+    'Quero comprar uma TV de R$ 4.500 até novembro. Qual a melhor forma?',
   ];
   const [mensagens, setMensagens] = useState([boasVindas]);
   const [texto, setTexto] = useState('');
   const [enviando, setEnviando] = useState(false);
+  const [acaoSalvandoIndice, setAcaoSalvandoIndice] = useState(null);
   const fimRef = useRef(null);
 
   useEffect(() => {
@@ -2138,6 +2140,7 @@ function TelaAssistenteFinanceiro({ token, onVoltar }) {
         role: 'assistant',
         content: response.data.resposta || 'Não consegui montar uma resposta.',
         consultas: response.data.consultas || [],
+        acaoPendente: response.data.acaoPendente || null,
       }]);
     } catch (error) {
       const codigo = error.response?.data?.codigo;
@@ -2148,6 +2151,33 @@ function TelaAssistenteFinanceiro({ token, onVoltar }) {
     } finally {
       setEnviando(false);
     }
+  };
+
+  const confirmarCompraSugerida = (acao, indice) => {
+    if (!acao?.payload || acao.confirmada || acaoSalvandoIndice !== null) return;
+    const payload = acao.payload;
+    const pagamento = payload.formaPagamento === 'PARCELADO' ? `${payload.parcelas}x de ${formatarMoeda(Number(payload.valorEstimado || 0) / Number(payload.parcelas || 1))}` : 'à vista';
+    pedirConfirmacao(
+      'Adicionar compra programada',
+      `Cadastrar "${payload.descricao}" por ${formatarMoeda(payload.valorEstimado)}, para ${formatarData(payload.dataDesejada)}, ${pagamento}?`,
+      async () => {
+        setAcaoSalvandoIndice(indice);
+        try {
+          await axios.post(`${API_URL}/compras-programadas`, payload, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          setMensagens((atuais) => atuais.map((item, posicao) => posicao === indice
+            ? { ...item, acaoPendente: { ...item.acaoPendente, confirmada: true } }
+            : item));
+          mostrarToast('Compra adicionada às Compras Programadas.');
+        } catch (error) {
+          mostrarToast(error.response?.data?.erro || 'Não foi possível adicionar a compra programada.', 'erro');
+        } finally {
+          setAcaoSalvandoIndice(null);
+        }
+      },
+      { labelConfirmar: 'Adicionar compra', corConfirmar: '#2563eb' }
+    );
   };
 
   return (
@@ -2167,6 +2197,11 @@ function TelaAssistenteFinanceiro({ token, onVoltar }) {
         .assistente-exemplo:hover { border-color: #3b82f6; color: #1d4ed8; background: #eff6ff; }
         .assistente-composer { margin-top: 12px; border: 1px solid #cbd5e1; border-radius: 14px; padding: 10px; background: white; display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: end; }
         .assistente-composer textarea { width: 100%; min-height: 54px; max-height: 150px; resize: vertical; border: 0; outline: none; padding: 8px; font: inherit; font-size: 14px; box-sizing: border-box; }
+        .assistente-acao { margin-top: 12px; border: 1px solid #bfdbfe; background: #eff6ff; border-radius: 12px; padding: 12px; white-space: normal; }
+        .assistente-acao-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(135px, 1fr)); gap: 8px; margin: 10px 0; }
+        .assistente-acao-item { background: white; border: 1px solid #dbeafe; border-radius: 9px; padding: 8px; }
+        .assistente-acao-item small { display: block; color: #64748b; font-size: 10px; margin-bottom: 3px; }
+        .assistente-acao-confirmada { display: inline-flex; align-items: center; gap: 6px; color: #166534; background: #dcfce7; border-radius: 999px; padding: 6px 10px; font-size: 12px; font-weight: 700; }
         .assistente-disclaimer { margin-top: 9px; color: #64748b; font-size: 11px; line-height: 1.4; }
         @media (max-width: 720px) {
           .assistente-msg { max-width: 94%; }
@@ -2181,7 +2216,7 @@ function TelaAssistenteFinanceiro({ token, onVoltar }) {
           titulo="Assistente Financeiro"
           descricao="Pergunte sobre seus gastos, categorias, previsões e compras usando os dados reais do app."
           breadcrumb={<Breadcrumb atual="Assistente" onVoltar={onVoltar} />}
-          action={<span className="assistente-status">🆓 Free tier · somente leitura</span>}
+          action={<span className="assistente-status">🆓 Free tier · ações com confirmação</span>}
         />
 
         <div className="assistente-exemplos">
@@ -2193,6 +2228,24 @@ function TelaAssistenteFinanceiro({ token, onVoltar }) {
             <div key={`${mensagem.role}-${indice}`} className={`assistente-msg ${mensagem.role === 'user' ? 'assistente-msg-user' : 'assistente-msg-assistant'} ${mensagem.erro ? 'assistente-msg-error' : ''}`}>
               {mensagem.content}
               {mensagem.consultas?.length > 0 && <div className="assistente-consultas">{mensagem.consultas.map((consulta) => <span key={consulta} className="assistente-consulta">Consultou: {consulta}</span>)}</div>}
+              {mensagem.acaoPendente?.tipo === 'CRIAR_COMPRA_PROGRAMADA' && (() => {
+                const payload = mensagem.acaoPendente.payload || {};
+                const cenario = mensagem.acaoPendente.analise?.melhorCenario || {};
+                return <div className="assistente-acao">
+                  <strong>🛒 Proposta de Compra Programada</strong>
+                  <div className="assistente-acao-grid">
+                    <div className="assistente-acao-item"><small>Compra</small><strong>{payload.descricao}</strong></div>
+                    <div className="assistente-acao-item"><small>Valor</small><strong>{formatarMoeda(payload.valorEstimado)}</strong></div>
+                    <div className="assistente-acao-item"><small>Data sugerida</small><strong>{formatarData(payload.dataDesejada)}</strong></div>
+                    <div className="assistente-acao-item"><small>Pagamento</small><strong>{payload.formaPagamento === 'PARCELADO' ? `${payload.parcelas}x de ${formatarMoeda(Number(payload.valorEstimado || 0) / Number(payload.parcelas || 1))}` : 'À vista'}</strong></div>
+                    <div className="assistente-acao-item"><small>Menor saldo projetado</small><strong>{formatarMoeda(cenario.menorSaldoComCompra)}</strong></div>
+                    <div className="assistente-acao-item"><small>Reserva mínima</small><strong>{formatarMoeda(mensagem.acaoPendente.analise?.reservaMinima || 0)}</strong></div>
+                  </div>
+                  {mensagem.acaoPendente.confirmada
+                    ? <span className="assistente-acao-confirmada">✅ Adicionada às Compras Programadas</span>
+                    : <Btn variant="primary" size="sm" onClick={() => confirmarCompraSugerida(mensagem.acaoPendente, indice)} disabled={acaoSalvandoIndice !== null}>{acaoSalvandoIndice === indice ? 'Adicionando...' : 'Adicionar às Compras Programadas'}</Btn>}
+                </div>;
+              })()}
             </div>
           ))}
           {enviando && <div className="assistente-msg assistente-msg-assistant"><Spinner texto="Consultando seus dados..." /></div>}
@@ -2215,7 +2268,7 @@ function TelaAssistenteFinanceiro({ token, onVoltar }) {
           />
           <Btn variant="primary" onClick={() => enviarPergunta()} disabled={enviando || !texto.trim()}>{enviando ? 'Analisando...' : 'Enviar'}</Btn>
         </div>
-        <div className="assistente-disclaimer">A IA só acessa consultas de leitura autorizadas pelo backend e nunca recebe acesso direto ao banco. O assistente usa o nível gratuito do Gemini; nesse nível, o Google informa que o conteúdo enviado pode ser usado para melhorar seus produtos. Nesta etapa a IA não pode alterar seus dados.</div>
+        <div className="assistente-disclaimer">A IA consulta dados por ferramentas autorizadas e não recebe acesso direto ao banco. Ela pode preparar uma sugestão de Compra Programada, mas nenhuma gravação ocorre automaticamente: o app só cadastra após você clicar em adicionar e confirmar no modal. O assistente usa o nível gratuito do Gemini; nesse nível, o Google informa que o conteúdo enviado pode ser usado para melhorar seus produtos.</div>
       </div>
     </div>
   );
