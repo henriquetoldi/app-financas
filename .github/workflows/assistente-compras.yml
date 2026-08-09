@@ -11,6 +11,10 @@ on:
     branches:
       - main
 
+concurrency:
+  group: assistente-compras-programadas
+  cancel-in-progress: true
+
 permissions:
   contents: write
 
@@ -57,6 +61,7 @@ jobs:
             'horizonteMeses: 18',
             'melhorCenario: melhor',
             'melhoresAlternativas: cenarios.slice(0, 5)',
+            'indice += 3',
           ];
           for (const trecho of required) {
             if (!backend.includes(trecho)) throw new Error(`Trecho obrigatório ausente: ${trecho}`);
@@ -78,4 +83,5 @@ jobs:
         run: |
           git add backend-server.js
           git commit -m "Integrar assistente com cenários de compras programadas"
+          git pull --rebase origin feat/assistente-compras-programadas
           git push origin feat/assistente-compras-programadas
