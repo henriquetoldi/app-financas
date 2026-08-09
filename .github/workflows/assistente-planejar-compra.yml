@@ -1,0 +1,112 @@
+name: Assistente planejar nova compra
+
+on:
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: assistente-planejar-compra
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: feat/assistente-planejar-compra
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Apply feature when needed
+        run: |
+          if grep -q "async function ferramentaPlanejarCompraHipotetica" backend-server.js; then
+            echo "Feature already applied."
+          else
+            node changes/apply-assistente-planejar-compra.mjs
+          fi
+
+      - name: Validate backend syntax
+        run: node --check backend-server.js
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Run safety and integration assertions
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const backend = fs.readFileSync('backend-server.js', 'utf8');
+          const app = fs.readFileSync('App.jsx', 'utf8');
+
+          const requiredBackend = [
+            'async function simularCompraProgramada(usuarioId, compraId, parametros = {}, compraVirtual = null)',
+            'async function ferramentaPlanejarCompraHipotetica(usuarioId, args = {})',
+            "name: 'planejar_compra_hipotetica'",
+            "planejar_compra_hipotetica: 'planejamento de nova compra'",
+            "if (nome === 'planejar_compra_hipotetica') return ferramentaPlanejarCompraHipotetica(usuarioId, args);",
+            "tipo: 'CRIAR_COMPRA_PROGRAMADA'",
+            'acaoPendente,',
+            'propostaCadastro',
+            'Promise.all(lote.map',
+            "app.post('/api/compras-programadas', verificarToken",
+          ];
+          for (const trecho of requiredBackend) {
+            if (!backend.includes(trecho)) throw new Error(`Backend sem trecho obrigatório: ${trecho}`);
+          }
+
+          const inicioFerramenta = backend.indexOf('async function ferramentaPlanejarCompraHipotetica');
+          const fimFerramenta = backend.indexOf('const FERRAMENTAS_ASSISTENTE = [', inicioFerramenta);
+          const ferramenta = backend.slice(inicioFerramenta, fimFerramenta);
+          if (/\bINSERT\s+INTO\b/i.test(ferramenta) || /\bUPDATE\s+compras_programadas\b/i.test(ferramenta) || /\bDELETE\s+FROM\s+compras_programadas\b/i.test(ferramenta)) {
+            throw new Error('A ferramenta hipotética não pode gravar no banco.');
+          }
+          if (!ferramenta.includes('simularCompraProgramada(usuarioId, null')) throw new Error('Planejamento hipotético não reutiliza o motor financeiro.');
+
+          const requiredApp = [
+            'const confirmarCompraSugerida = (acao, indice) => {',
+            "'Adicionar compra programada'",
+            'Adicionar às Compras Programadas',
+            'acaoPendente: response.data.acaoPendente || null',
+            "mensagem.acaoPendente?.tipo === 'CRIAR_COMPRA_PROGRAMADA'",
+            'ações com confirmação',
+          ];
+          for (const trecho of requiredApp) {
+            if (!app.includes(trecho)) throw new Error(`Frontend sem trecho obrigatório: ${trecho}`);
+          }
+          const inicioConfirmacao = app.indexOf('const confirmarCompraSugerida');
+          const fimConfirmacao = app.indexOf('  return (', inicioConfirmacao);
+          const confirmacao = app.slice(inicioConfirmacao, fimConfirmacao);
+          if (!confirmacao.includes('pedirConfirmacao(')) throw new Error('Cadastro assistido não exige modal de confirmação.');
+          if (!confirmacao.includes('axios.post(`${API_URL}/compras-programadas`, payload')) throw new Error('Confirmação não reutiliza o endpoint nativo de Compras Programadas.');
+
+          console.log('Assertions do planejamento assistido aprovadas.');
+          NODE
+
+      - name: Check diff
+        run: |
+          git diff --check
+          git diff --check origin/main...HEAD
+
+      - name: Commit validated feature
+        run: |
+          if git diff --quiet; then
+            echo "No working tree changes to commit."
+          else
+            git add App.jsx backend-server.js
+            git commit -m "Permitir planejar compras pelo assistente com confirmação"
+            git pull --rebase origin feat/assistente-planejar-compra
+            git push origin feat/assistente-planejar-compra
+          fi
