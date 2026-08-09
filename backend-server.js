@@ -3025,30 +3025,29 @@ function adicionarImpactosCompra(destino, origem) {
   for (const [mes, valor] of origem.entries()) destino.set(mes, (destino.get(mes) || 0) + Number(valor || 0));
 }
 
-app.post('/api/compras-programadas/:id/simular', verificarToken, async (req, res) => {
-  try {
+async function simularCompraProgramada(usuarioId, compraId, parametros = {}) {
     const compraResult = await pool.query(
       'SELECT * FROM compras_programadas WHERE id = $1 AND usuario_id = $2',
-      [req.params.id, req.usuario.usuario_id]
+      [compraId, usuarioId]
     );
-    if (compraResult.rows.length === 0) return res.status(404).json({ erro: 'Compra programada não encontrada.' });
+    if (compraResult.rows.length === 0) throw new Error('Compra programada não encontrada.');
 
     const compra = compraResult.rows[0];
-    const dataDesejada = normalizarDataImportacao(req.body?.dataDesejada ?? req.body?.data_desejada ?? compra.data_desejada);
-    const formaPagamento = String(req.body?.formaPagamento ?? req.body?.forma_pagamento ?? compra.forma_pagamento ?? 'A_VISTA').toUpperCase();
-    const parcelas = formaPagamento === 'PARCELADO' ? Number(req.body?.parcelas ?? compra.parcelas ?? 2) : 1;
+    const dataDesejada = normalizarDataImportacao(parametros?.dataDesejada ?? parametros?.data_desejada ?? compra.data_desejada);
+    const formaPagamento = String(parametros?.formaPagamento ?? parametros?.forma_pagamento ?? compra.forma_pagamento ?? 'A_VISTA').toUpperCase();
+    const parcelas = formaPagamento === 'PARCELADO' ? Number(parametros?.parcelas ?? compra.parcelas ?? 2) : 1;
 
-    if (!dataDesejada) return res.status(400).json({ erro: 'Data simulada inválida.' });
-    if (!FORMAS_PAGAMENTO_COMPRA.includes(formaPagamento)) return res.status(400).json({ erro: 'Forma de pagamento inválida.' });
-    if (!Number.isInteger(parcelas) || parcelas < 1 || parcelas > 60) return res.status(400).json({ erro: 'Quantidade de parcelas inválida.' });
-    if (formaPagamento === 'PARCELADO' && parcelas < 2) return res.status(400).json({ erro: 'Compra parcelada deve ter pelo menos 2 parcelas.' });
+    if (!dataDesejada) throw new Error('Data simulada inválida.');
+    if (!FORMAS_PAGAMENTO_COMPRA.includes(formaPagamento)) throw new Error('Forma de pagamento inválida.');
+    if (!Number.isInteger(parcelas) || parcelas < 1 || parcelas > 60) throw new Error('Quantidade de parcelas inválida.');
+    if (formaPagamento === 'PARCELADO' && parcelas < 2) throw new Error('Compra parcelada deve ter pelo menos 2 parcelas.');
 
     const hoje = new Date().toISOString().slice(0, 10);
     const mesAtual = chaveMesCompra(hoje);
     const mesDesejadoOriginal = chaveMesCompra(dataDesejada);
     const mesCompra = diferencaMesesCompra(mesAtual, mesDesejadoOriginal) < 0 ? mesAtual : mesDesejadoOriginal;
     const mesesAteCompra = Math.max(0, diferencaMesesCompra(mesAtual, mesCompra));
-    const horizonteSolicitado = Number(req.body?.horizonteMeses || 0);
+    const horizonteSolicitado = Number(parametros?.horizonteMeses || 0);
     const horizonteAuto = Math.max(6, mesesAteCompra + parcelas + 2);
     const horizonteMeses = Math.min(36, Math.max(3, Number.isInteger(horizonteSolicitado) && horizonteSolicitado > 0 ? horizonteSolicitado : horizonteAuto));
     const mesDepoisDoHorizonte = somarMesesChaveCompra(mesAtual, horizonteMeses);
@@ -3058,7 +3057,7 @@ app.post('/api/compras-programadas/:id/simular', verificarToken, async (req, res
       `SELECT COALESCE(SUM(COALESCE(saldo_atual, saldo_inicial, 0)), 0)::numeric AS saldo
        FROM contas
        WHERE usuario_id = $1 AND ativo = true`,
-      [req.usuario.usuario_id]
+      [usuarioId]
     );
     const saldoInicial = Number(saldoResult.rows[0]?.saldo || 0);
 
@@ -3069,7 +3068,7 @@ app.post('/api/compras-programadas/:id/simular', verificarToken, async (req, res
          AND status IN ('PENDENTE', 'ATRASADA')
          AND data_prevista < $2::date
        ORDER BY data_prevista ASC`,
-      [req.usuario.usuario_id, dataLimiteExclusiva]
+      [usuarioId, dataLimiteExclusiva]
     );
 
     const outrasComprasResult = await pool.query(
@@ -3078,7 +3077,7 @@ app.post('/api/compras-programadas/:id/simular', verificarToken, async (req, res
        WHERE usuario_id = $1
          AND status = 'PLANEJADA'
          AND id <> $2`,
-      [req.usuario.usuario_id, compra.id]
+      [usuarioId, compra.id]
     );
 
     const entradasPorMes = new Map();
@@ -3144,7 +3143,7 @@ app.post('/api/compras-programadas/:id/simular', verificarToken, async (req, res
     const primeiroMesNegativo = mesesNegativos[0] || null;
     const valorParcela = formaPagamento === 'PARCELADO' ? Number((Number(compra.valor_estimado) / parcelas).toFixed(2)) : Number(compra.valor_estimado);
 
-    res.json({
+    return {
       compra: { id: compra.id, descricao: compra.descricao, valorEstimado: Number(compra.valor_estimado), dataOriginal: String(compra.data_desejada).slice(0, 10) },
       parametros: { dataDesejada, formaPagamento, parcelas, horizonteMeses, valorParcela },
       base: {
@@ -3168,9 +3167,16 @@ app.post('/api/compras-programadas/:id/simular', verificarToken, async (req, res
         'Outras compras programadas com status PLANEJADA entram no cenário base.',
         'Orçamento mensal ainda não entra no cálculo para evitar dupla contagem com contas previstas.',
       ],
-    });
+    };
+}
+
+app.post('/api/compras-programadas/:id/simular', verificarToken, async (req, res) => {
+  try {
+    const resultado = await simularCompraProgramada(req.usuario.usuario_id, req.params.id, req.body || {});
+    res.json(resultado);
   } catch (error) {
-    res.status(400).json({ erro: error.message });
+    const status = error.message === 'Compra programada não encontrada.' ? 404 : 400;
+    res.status(status).json({ erro: error.message });
   }
 });
 
@@ -3426,6 +3432,126 @@ async function ferramentaSaldos(usuarioId) {
   };
 }
 
+async function ferramentaCompararCompraProgramada(usuarioId, args = {}) {
+  const termo = String(args.termo || '').trim();
+  const reservaMinima = Math.max(0, Number(args.reservaMinima || 0));
+  if (!termo) return { encontrada: false, motivo: 'Informe uma descrição ou parte do nome da compra programada.' };
+
+  const comprasResult = await pool.query(
+    `SELECT id, descricao, valor_estimado, data_desejada, prioridade, forma_pagamento, parcelas, status
+     FROM compras_programadas
+     WHERE usuario_id = $1
+       AND status IN ('PLANEJADA', 'ADIADA')
+       AND LOWER(descricao) LIKE LOWER($2)
+     ORDER BY CASE WHEN LOWER(descricao) = LOWER($3) THEN 0 ELSE 1 END, data_desejada ASC
+     LIMIT 5`,
+    [usuarioId, `%${termo}%`, termo]
+  );
+
+  if (comprasResult.rows.length === 0) {
+    return { encontrada: false, motivo: `Nenhuma compra programada ativa corresponde a "${termo}".` };
+  }
+
+  if (comprasResult.rows.length > 1) {
+    return {
+      encontrada: false,
+      ambigua: true,
+      motivo: 'Há mais de uma compra correspondente. Peça ao usuário para indicar qual delas deseja analisar.',
+      opcoes: comprasResult.rows.map((item) => ({
+        descricao: item.descricao,
+        valorEstimado: Number(item.valor_estimado || 0),
+        dataDesejada: String(item.data_desejada).slice(0, 10),
+        status: item.status,
+      })),
+    };
+  }
+
+  const compra = comprasResult.rows[0];
+  const hoje = new Date().toISOString().slice(0, 10);
+  const dataOriginal = String(compra.data_desejada || '').slice(0, 10);
+  const dataBase = dataOriginal && dataOriginal > hoje ? dataOriginal : hoje;
+  const adicionarMeses = (dataIso, quantidade) => {
+    const [ano, mes, dia] = dataIso.split('-').map(Number);
+    const indice = (ano * 12) + (mes - 1) + quantidade;
+    const novoAno = Math.floor(indice / 12);
+    const novoMes = indice % 12;
+    const ultimoDia = new Date(Date.UTC(novoAno, novoMes + 1, 0)).getUTCDate();
+    return `${novoAno}-${String(novoMes + 1).padStart(2, '0')}-${String(Math.min(dia, ultimoDia)).padStart(2, '0')}`;
+  };
+
+  const parcelasAtuais = Number(compra.parcelas || 1);
+  const opcoesParcelas = Array.from(new Set([1, 3, 6, 10, 12, parcelasAtuais]))
+    .filter((item) => Number.isInteger(item) && item >= 1 && item <= 12)
+    .sort((a, b) => a - b);
+  const parametrosCenarios = [];
+  for (let adiamentoMeses = 0; adiamentoMeses <= 2; adiamentoMeses += 1) {
+    const dataDesejada = adicionarMeses(dataBase, adiamentoMeses);
+    for (const parcelas of opcoesParcelas) {
+      parametrosCenarios.push({ dataDesejada, adiamentoMeses, parcelas });
+    }
+  }
+
+  const cenarios = [];
+  for (let indice = 0; indice < parametrosCenarios.length; indice += 3) {
+    const lote = parametrosCenarios.slice(indice, indice + 3);
+    const resultados = await Promise.all(lote.map(async (cenario) => {
+      const simulacao = await simularCompraProgramada(usuarioId, compra.id, {
+        dataDesejada: cenario.dataDesejada,
+        formaPagamento: cenario.parcelas === 1 ? 'A_VISTA' : 'PARCELADO',
+        parcelas: cenario.parcelas,
+        horizonteMeses: 18,
+      });
+      return {
+        ...cenario,
+        formaPagamento: cenario.parcelas === 1 ? 'A_VISTA' : 'PARCELADO',
+        valorParcela: Number(simulacao.parametros.valorParcela || 0),
+        menorSaldoComCompra: Number(simulacao.resumo.menorSaldoComCompra || 0),
+        menorSaldoSemCompra: Number(simulacao.resumo.menorSaldoSemCompra || 0),
+        mesesNegativos: simulacao.resumo.mesesNegativos || [],
+        atendeReserva: Number(simulacao.resumo.menorSaldoComCompra || 0) >= reservaMinima,
+      };
+    }));
+    cenarios.push(...resultados);
+  }
+
+  cenarios.sort((a, b) => {
+    if (a.atendeReserva !== b.atendeReserva) return a.atendeReserva ? -1 : 1;
+    if (a.atendeReserva && b.atendeReserva) {
+      if (a.adiamentoMeses !== b.adiamentoMeses) return a.adiamentoMeses - b.adiamentoMeses;
+      if (a.parcelas !== b.parcelas) return a.parcelas - b.parcelas;
+      return b.menorSaldoComCompra - a.menorSaldoComCompra;
+    }
+    if (a.menorSaldoComCompra !== b.menorSaldoComCompra) return b.menorSaldoComCompra - a.menorSaldoComCompra;
+    if (a.mesesNegativos.length !== b.mesesNegativos.length) return a.mesesNegativos.length - b.mesesNegativos.length;
+    if (a.adiamentoMeses !== b.adiamentoMeses) return a.adiamentoMeses - b.adiamentoMeses;
+    return a.parcelas - b.parcelas;
+  });
+
+  const melhor = cenarios[0] || null;
+  return {
+    encontrada: true,
+    compra: {
+      descricao: compra.descricao,
+      valorEstimado: Number(compra.valor_estimado || 0),
+      dataDesejadaOriginal: dataOriginal,
+      prioridade: compra.prioridade,
+      status: compra.status,
+    },
+    reservaMinima,
+    criterio: melhor?.atendeReserva
+      ? 'Prioriza a data mais próxima que preserva a reserva e, depois, o menor número de parcelas.'
+      : 'Nenhum cenário preserva a reserva; prioriza o maior saldo mínimo projetado e menor exposição a meses negativos.',
+    melhorCenario: melhor,
+    melhoresAlternativas: cenarios.slice(0, 5),
+    premissas: [
+      'Horizonte de projeção de 18 meses.',
+      'Compara a data desejada e os dois meses seguintes.',
+      'Compara à vista e parcelamentos de até 12x sem estimar juros, taxas ou descontos.',
+      'Usa o mesmo motor financeiro da tela de Compras Programadas.',
+    ],
+  };
+}
+
 const FERRAMENTAS_ASSISTENTE = [
   {
     type: 'function',
@@ -3472,6 +3598,21 @@ const FERRAMENTAS_ASSISTENTE = [
   },
   {
     type: 'function',
+    name: 'comparar_cenarios_compra_programada',
+    description: 'Analisa uma compra programada específica e compara datas e parcelamentos usando o mesmo motor financeiro do simulador. Use quando o usuário perguntar se pode comprar algo, quando comprar, em quantas parcelas ou qual opção preserva melhor o caixa.',
+    strict: true,
+    parameters: {
+      type: 'object',
+      properties: {
+        termo: { type: 'string', description: 'Descrição ou parte do nome da compra programada a analisar.' },
+        reservaMinima: { type: 'number', minimum: 0, description: 'Saldo mínimo em BRL que o usuário deseja preservar. Use 0 se ele não informar uma reserva.' },
+      },
+      required: ['termo', 'reservaMinima'],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: 'function',
     name: 'contas_previstas_por_mes',
     description: 'Consulta créditos e débitos previstos pendentes ou atrasados nos próximos meses.',
     strict: true,
@@ -3495,6 +3636,7 @@ const ROTULOS_FERRAMENTAS_ASSISTENTE = {
   gastos_por_categoria: 'gastos por categoria',
   lancamentos_nao_categorizados: 'não categorizados',
   compras_programadas_por_mes: 'compras programadas',
+  comparar_cenarios_compra_programada: 'comparação de cenários de compra',
   contas_previstas_por_mes: 'contas previstas',
   saldos_das_contas: 'saldos das contas',
 };
@@ -3503,6 +3645,7 @@ async function executarFerramentaAssistente(usuarioId, nome, args) {
   if (nome === 'gastos_por_categoria') return ferramentaGastosPorCategoria(usuarioId, args);
   if (nome === 'lancamentos_nao_categorizados') return ferramentaNaoCategorizados(usuarioId, args);
   if (nome === 'compras_programadas_por_mes') return ferramentaComprasProgramadas(usuarioId, args);
+  if (nome === 'comparar_cenarios_compra_programada') return ferramentaCompararCompraProgramada(usuarioId, args);
   if (nome === 'contas_previstas_por_mes') return ferramentaContasPrevistas(usuarioId, args);
   if (nome === 'saldos_das_contas') return ferramentaSaldos(usuarioId);
   throw new Error('Ferramenta não autorizada para o assistente.');
@@ -3602,9 +3745,9 @@ app.post('/api/assistente', verificarToken, async (req, res) => {
   const instructions = `Você é o Assistente Financeiro de um aplicativo de finanças pessoais. Data atual do servidor: ${hoje}.
 Responda em português do Brasil, de forma direta, clara e útil.
 Você está em MODO SOMENTE LEITURA. Nunca afirme que criou, editou, excluiu, categorizou ou alterou dados.
-Para perguntas sobre dados financeiros do usuário, use as ferramentas disponíveis. Não invente números, categorias, saldos ou lançamentos.
+Para perguntas sobre dados financeiros do usuário, use as ferramentas disponíveis. Não invente números, categorias, saldos ou lançamentos. Se o usuário perguntar se pode realizar uma compra programada, quando comprar, qual parcelamento escolher ou qual cenário preserva melhor o caixa, use obrigatoriamente a ferramenta comparar_cenarios_compra_programada antes de recomendar.
 Se os dados disponíveis não forem suficientes para responder, diga exatamente o que falta.
-Valores são em BRL. Diferencie fatos encontrados nos dados de interpretações ou sugestões.
+Valores são em BRL. Diferencie fatos encontrados nos dados de interpretações ou sugestões. Ao explicar uma compra, cite a data, forma de pagamento, menor saldo projetado e se a reserva informada é preservada. Não trate o ranking como garantia de liquidez futura.
 Não exponha IDs internos, SQL, tokens, chaves ou detalhes técnicos do banco.
 Não use tabelas Markdown complexas; prefira conclusão curta, números principais e bullets quando ajudarem.
 As ferramentas disponíveis são exclusivamente de consulta e já estão limitadas ao usuário autenticado.`;
