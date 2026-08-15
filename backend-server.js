@@ -5461,12 +5461,21 @@ async function executarFerramentaAssistente(usuarioId, nome, args) {
   throw new Error('Ferramenta não autorizada para o assistente.');
 }
 
-function declaracoesGeminiAssistente() {
-  return FERRAMENTAS_ASSISTENTE.map(({ name, description, parameters }) => ({
-    name,
-    description,
-    parameters,
-  }));
+function declaracoesGeminiAssistente(nomesPermitidos = null) {
+  const filtro = Array.isArray(nomesPermitidos) && nomesPermitidos.length > 0
+    ? new Set(nomesPermitidos)
+    : null;
+
+  return FERRAMENTAS_ASSISTENTE
+    .filter(({ name }) => !filtro || filtro.has(name))
+    .map(({ name, description, parameters }) => {
+      const declaracao = { name, description };
+      const propriedades = parameters?.properties && typeof parameters.properties === 'object'
+        ? Object.keys(parameters.properties)
+        : [];
+      if (propriedades.length > 0) declaracao.parameters = parameters;
+      return declaracao;
+    });
 }
 
 function extrairTextoRespostaAssistente(response) {
@@ -5491,6 +5500,8 @@ function extrairChamadasGeminiAssistente(response) {
 
 async function chamarGeminiAssistente({ contents, instructions, toolConfig = null }) {
   const modelo = encodeURIComponent(ASSISTENTE_GEMINI_MODEL);
+  const nomesPermitidos = toolConfig?.functionCallingConfig?.allowedFunctionNames || null;
+  const functionDeclarations = declaracoesGeminiAssistente(nomesPermitidos);
   let response;
   try {
     response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent`, {
@@ -5502,7 +5513,7 @@ async function chamarGeminiAssistente({ contents, instructions, toolConfig = nul
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: instructions }] },
         contents,
-        tools: [{ functionDeclarations: declaracoesGeminiAssistente() }],
+        tools: [{ functionDeclarations }],
         toolConfig: toolConfig || { functionCallingConfig: { mode: 'AUTO' } },
         generationConfig: {
           temperature: 0.2,
@@ -5518,6 +5529,7 @@ async function chamarGeminiAssistente({ contents, instructions, toolConfig = nul
   if (!response.ok) {
     const erro = new Error(data?.error?.message || `Falha no serviço Gemini (${response.status}).`);
     erro.statusGemini = response.status;
+    erro.codigoGemini = data?.error?.status || null;
     throw erro;
   }
   return data;
@@ -5662,7 +5674,17 @@ As ferramentas disponíveis são exclusivamente de consulta e já estão limitad
 
     return res.status(502).json({ erro: 'A análise exigiu chamadas demais. Tente fazer uma pergunta mais específica.' });
   } catch (error) {
-    console.error('Erro no assistente financeiro gratuito:', error.message);
+    console.error('Erro no assistente financeiro gratuito:', {
+      mensagem: error.message,
+      statusGemini: error.statusGemini || null,
+      codigoGemini: error.codigoGemini || null,
+    });
+    if (error.statusGemini === 400) {
+      return res.status(502).json({
+        erro: 'O serviço de IA recusou a configuração desta solicitação. Tente novamente; se persistir, revise as ferramentas do Assistente.',
+        codigo: 'GEMINI_REQUISICAO_INVALIDA',
+      });
+    }
     if (error.statusGemini === 429) {
       return res.status(503).json({
         erro: 'A cota gratuita da IA foi atingida por enquanto. Nenhuma cobrança será feita. Tente novamente depois.',
