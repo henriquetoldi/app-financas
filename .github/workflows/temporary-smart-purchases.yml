@@ -6,6 +6,7 @@ on:
       - agent/assistente-compras-inteligente
     paths:
       - scripts/temporary-smart-purchases.js
+      - scripts/fix-temporary-smart-purchases.js
       - .github/workflows/temporary-smart-purchases.yml
 
 permissions:
@@ -26,6 +27,9 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Repair temporary transformer
+        run: node scripts/fix-temporary-smart-purchases.js
 
       - name: Apply transformation
         run: node scripts/temporary-smart-purchases.js
@@ -58,9 +62,9 @@ jobs:
 
       - name: Remove temporary files and commit result
         run: |
-          rm -f scripts/temporary-smart-purchases.js .github/workflows/temporary-smart-purchases.yml
+          rm -f scripts/temporary-smart-purchases.js scripts/fix-temporary-smart-purchases.js .github/workflows/temporary-smart-purchases.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add App.jsx backend-server.js scripts/temporary-smart-purchases.js .github/workflows/temporary-smart-purchases.yml
+          git add App.jsx backend-server.js scripts/temporary-smart-purchases.js scripts/fix-temporary-smart-purchases.js .github/workflows/temporary-smart-purchases.yml
           git commit -m "Tornar Assistente mais inteligente para compras"
           git push
