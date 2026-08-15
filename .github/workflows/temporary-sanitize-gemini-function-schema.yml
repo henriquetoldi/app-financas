@@ -1,0 +1,72 @@
+name: Temporary sanitize Gemini function schema
+
+on:
+  push:
+    branches:
+      - fix/gemini-sanitizar-schema-function-calling
+    paths:
+      - scripts/temporary-sanitize-gemini-function-schema.js
+      - .github/workflows/temporary-sanitize-gemini-function-schema.yml
+
+permissions:
+  contents: write
+
+jobs:
+  transform-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Apply schema sanitizer
+        run: node scripts/temporary-sanitize-gemini-function-schema.js
+
+      - name: Validate backend syntax
+        run: node --check backend-server.js
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Validate diff
+        run: git diff --check
+
+      - name: Validate Gemini function schema guardrails
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+          const text = fs.readFileSync('backend-server.js', 'utf8');
+          const start = text.indexOf('function sanitizarSchemaFunctionCallingGemini(schema)');
+          const end = text.indexOf('function extrairTextoRespostaAssistente', start);
+          if (start < 0 || end < 0) throw new Error('Sanitizador Gemini não encontrado.');
+          const bloco = text.slice(start, end);
+          for (const proibido of ['sanitizado.minimum', 'sanitizado.maximum', 'sanitizado.additionalProperties']) {
+            if (bloco.includes(proibido)) throw new Error(`Campo incompatível ainda é enviado: ${proibido}`);
+          }
+          for (const esperado of ['sanitizado.type', 'sanitizado.description', 'sanitizado.enum', 'sanitizado.properties', 'sanitizado.items', 'sanitizado.required']) {
+            if (!bloco.includes(esperado)) throw new Error(`Campo suportado ausente do sanitizador: ${esperado}`);
+          }
+          if (!text.includes('declaracao.parameters = sanitizarSchemaFunctionCallingGemini(parameters);')) throw new Error('Declarações não usam o sanitizador.');
+          const toolStart = text.indexOf("name: 'buscar_transacoes_para_compra_realizada'");
+          const toolEnd = text.indexOf("name: 'preparar_novas_compras'", toolStart);
+          const tool = text.slice(toolStart, toolEnd);
+          if (!tool.includes('minimum: 30') || !tool.includes('maximum: 365')) throw new Error('Validação de domínio original foi alterada; deve continuar no schema interno/backend.');
+          console.log('Guardrails de schema Gemini OK');
+          NODE
+
+      - name: Remove temporary files and commit result
+        run: |
+          rm -f scripts/temporary-sanitize-gemini-function-schema.js .github/workflows/temporary-sanitize-gemini-function-schema.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add backend-server.js scripts/temporary-sanitize-gemini-function-schema.js .github/workflows/temporary-sanitize-gemini-function-schema.yml
+          git commit -m "Sanitizar schema de function calling do Gemini"
+          git push
