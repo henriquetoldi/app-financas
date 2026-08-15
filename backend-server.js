@@ -6829,7 +6829,7 @@ async function buscarTransacoesUsuario(usuarioId, filtros = {}) {
      LEFT JOIN conciliacoes ca ON ca.transacao_id = t.id AND ca.status = 'CONFIRMADA'
      LEFT JOIN provisoes p ON p.id = ca.provisao_id
      WHERE ${where.join(' AND ')}
-     ORDER BY t.data DESC, t.criado_em DESC
+     ORDER BY t.data DESC, t.criado_em DESC, t.id DESC
      LIMIT $${limiteParam} OFFSET $${offsetParam}`,
     valoresPaginados
   );
