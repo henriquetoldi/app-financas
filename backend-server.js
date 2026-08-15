@@ -1364,7 +1364,7 @@ async function resolverCategoriasImportacao(usuarioId, tx, { criar = false } = {
 async function listarCategoriasComparacao(usuarioId, { nivel, categoriaPaiId = null } = {}) {
   const params = [usuarioId, nivel];
   const wherePai = categoriaPaiId
-    ? `AND categoria_pai_id = $3`
+    ? `AND c.categoria_pai_id = $3`
     : '';
   if (categoriaPaiId) params.push(categoriaPaiId);
 
