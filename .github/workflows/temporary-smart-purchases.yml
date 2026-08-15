@@ -1,0 +1,66 @@
+name: Temporary smart purchases transform
+
+on:
+  push:
+    branches:
+      - agent/assistente-compras-inteligente
+    paths:
+      - scripts/temporary-smart-purchases.js
+      - .github/workflows/temporary-smart-purchases.yml
+
+permissions:
+  contents: write
+
+jobs:
+  transform-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Apply transformation
+        run: node scripts/temporary-smart-purchases.js
+
+      - name: Validate backend syntax
+        run: node --check backend-server.js
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Validate diff
+        run: git diff --check
+
+      - name: Security assertions
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+          const backend = fs.readFileSync('backend-server.js', 'utf8');
+          const start = backend.indexOf('async function ferramentaPrepararNovasCompras');
+          const end = backend.indexOf('async function ferramentaPrepararNovaProvisao', start);
+          if (start < 0 || end < 0) throw new Error('Ferramenta preparar_novas_compras não encontrada.');
+          const body = backend.slice(start, end);
+          for (const token of ['INSERT INTO', 'UPDATE compras_programadas', 'DELETE FROM compras_programadas']) {
+            if (body.includes(token)) throw new Error(`Ferramenta Gemini possui escrita direta: ${token}`);
+          }
+          if (!backend.includes("app.post('/api/compras-programadas/lote'")) throw new Error('Endpoint em lote ausente.');
+          if (!backend.includes("payload.status || 'PLANEJADA'")) throw new Error('Cadastro unitário não respeita status preparado.');
+          console.log('Security assertions OK');
+          NODE
+
+      - name: Remove temporary files and commit result
+        run: |
+          rm -f scripts/temporary-smart-purchases.js .github/workflows/temporary-smart-purchases.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add App.jsx backend-server.js scripts/temporary-smart-purchases.js .github/workflows/temporary-smart-purchases.yml
+          git commit -m "Tornar Assistente mais inteligente para compras"
+          git push
