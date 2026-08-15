@@ -27,6 +27,16 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Repair temporary transformer
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/temporary-purchase-reconciliation.py')
+          s = p.read_text(encoding='utf-8')
+          s = s.replace('    """",\n    \'remoção da data inventada\',', '    "",\n    \'remoção da data inventada\',')
+          p.write_text(s, encoding='utf-8')
+          PY
+
       - name: Apply transformation
         run: python3 scripts/temporary-purchase-reconciliation.py
 
