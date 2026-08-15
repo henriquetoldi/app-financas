@@ -4678,6 +4678,9 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
   const [limite, setLimite] = useState(50);
   const [abaTransacoes, setAbaTransacoes] = useState('lancamentos');
   const [paginacao, setPaginacao] = useState({ total: 0, pagina: 1, limite: 50, totalPaginas: 1 });
+  const [transacoesResumo, setTransacoesResumo] = useState(null);
+  const [carregandoResumoBase, setCarregandoResumoBase] = useState(false);
+  const [exportandoExcel, setExportandoExcel] = useState(false);
   const tabelaRef = useRef(null);
 
   useEffect(() => {
@@ -4688,21 +4691,74 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
     Authorization: `Bearer ${token}`
   };
 
+  const montarParamsTransacoes = (paginaDesejada = pagina, limiteDesejado = limite) => {
+    const params = new URLSearchParams();
+    params.set('pagina', String(paginaDesejada));
+    params.set('limite', String(limiteDesejado));
+    if (filtros.busca) params.set('busca', filtros.busca);
+    if (filtros.conta !== 'todas') params.set('contaId', filtros.conta);
+    if (filtros.categoriaMacro !== 'todas' && filtros.categoriaMacro !== 'sem') params.set('categoriaMacroId', filtros.categoriaMacro);
+    if (filtros.categoriaDetalhada !== 'todas' && filtros.categoriaDetalhada !== 'sem') params.set('categoriaDetalhadaId', filtros.categoriaDetalhada);
+    if (filtros.status !== 'todas') params.set('status', filtros.status);
+    if (filtros.tipo !== 'todos') params.set('tipo', filtros.tipo);
+    if (dataInicial) params.set('dataInicial', dataInicial);
+    if (dataFinal) params.set('dataFinal', dataFinal);
+    return params;
+  };
+
+  const filtrarPendenciasEspeciais = (items) => items.filter((tx) => {
+    const correspondeMacroSem = filtros.categoriaMacro !== 'sem' || (!tx.categoria_macro_id && !tx.categoria_id);
+    const correspondeDetalhadaSem = filtros.categoriaDetalhada !== 'sem' || !tx.categoria_detalhada_id;
+    return correspondeMacroSem && correspondeDetalhadaSem;
+  });
+
+  const normalizarSaldoBackend = (items) => items.map((tx) => {
+    const saldoBackend = tx.saldo_acumulado === null || tx.saldo_acumulado === undefined ? null : Number(tx.saldo_acumulado);
+    const configurado = Number.isFinite(saldoBackend);
+    return {
+      ...tx,
+      saldo_acumulado_calculado: configurado ? saldoBackend : null,
+      saldo_acumulado_configurado: configurado,
+    };
+  });
+
+  const carregarTodasTransacoesFiltradas = async () => {
+    const limiteCompleto = 500;
+    const primeiraResponse = await axios.get(`${API_URL}/transacoes?${montarParamsTransacoes(1, limiteCompleto).toString()}`, { headers: authHeaders });
+    const primeiraPagina = primeiraResponse.data.transacoes || [];
+    const totalPaginas = Number(primeiraResponse.data.paginacao?.totalPaginas || 1);
+    const todas = [...primeiraPagina];
+
+    for (let inicio = 2; inicio <= totalPaginas; inicio += 4) {
+      const paginas = Array.from({ length: Math.min(4, totalPaginas - inicio + 1) }, (_, indice) => inicio + indice);
+      const respostas = await Promise.all(paginas.map((paginaAtual) => (
+        axios.get(`${API_URL}/transacoes?${montarParamsTransacoes(paginaAtual, limiteCompleto).toString()}`, { headers: authHeaders })
+      )));
+      respostas.forEach((response) => todas.push(...(response.data.transacoes || [])));
+    }
+
+    return normalizarSaldoBackend(filtrarPendenciasEspeciais(todas));
+  };
+
+  useEffect(() => {
+    if (abaTransacoes !== 'resumo') return undefined;
+    let ativo = true;
+    setTransacoesResumo(null);
+    setCarregandoResumoBase(true);
+    carregarTodasTransacoesFiltradas()
+      .then((items) => { if (ativo) setTransacoesResumo(items); })
+      .catch((error) => {
+        if (ativo) mostrarToast('Erro ao carregar resumo completo: ' + (error.response?.data?.erro || error.message), 'erro');
+      })
+      .finally(() => { if (ativo) setCarregandoResumoBase(false); });
+    return () => { ativo = false; };
+  }, [abaTransacoes, filtros, dataInicial, dataFinal]);
+
   const carregarDados = async () => {
     setCarregando(true);
 
     try {
-      const params = new URLSearchParams();
-      params.set('pagina', String(pagina));
-      params.set('limite', String(limite));
-      if (filtros.busca) params.set('busca', filtros.busca);
-      if (filtros.conta !== 'todas') params.set('contaId', filtros.conta);
-      if (filtros.categoriaMacro !== 'todas' && filtros.categoriaMacro !== 'sem') params.set('categoriaMacroId', filtros.categoriaMacro);
-      if (filtros.categoriaDetalhada !== 'todas' && filtros.categoriaDetalhada !== 'sem') params.set('categoriaDetalhadaId', filtros.categoriaDetalhada);
-      if (filtros.status !== 'todas') params.set('status', filtros.status);
-      if (filtros.tipo !== 'todos') params.set('tipo', filtros.tipo);
-      if (dataInicial) params.set('dataInicial', dataInicial);
-      if (dataFinal) params.set('dataFinal', dataFinal);
+      const params = montarParamsTransacoes();
       const [transacoesResponse, categoriasResponse] = await Promise.all([
         axios.get(`${API_URL}/transacoes?${params.toString()}`, { headers: authHeaders }),
         axios.get(`${API_URL}/categorias`, { headers: authHeaders })
@@ -4890,12 +4946,14 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
   const inicioPaginacao = totalTransacoesPaginacao === 0 ? 0 : ((paginaAtualPaginacao - 1) * limiteAtualPaginacao) + 1;
   const fimPaginacao = totalTransacoesPaginacao === 0 ? 0 : Math.min(totalTransacoesPaginacao, inicioPaginacao + transacoesOrdenadas.length - 1);
 
+  const transacoesBaseResumo = transacoesResumo ?? transacoesFiltradas;
+
   const resumoBase = useMemo(() => {
-    if (transacoesFiltradas.length === 0) return null;
-    const porDataAsc = [...transacoesFiltradas].sort((a, b) => compararTransacoes(a, b, 'data', 'asc'));
-    const totalCreditos = transacoesFiltradas.filter((tx) => tx.tipo === 'CREDITO').reduce((soma, tx) => soma + Number(tx.valor || 0), 0);
-    const totalDebitos = transacoesFiltradas.filter((tx) => tx.tipo === 'DEBITO').reduce((soma, tx) => soma + Number(tx.valor || 0), 0);
-    const porConta = Array.from(transacoesFiltradas.reduce((mapa, tx) => {
+    if (transacoesBaseResumo.length === 0) return null;
+    const porDataAsc = [...transacoesBaseResumo].sort((a, b) => compararTransacoes(a, b, 'data', 'asc'));
+    const totalCreditos = transacoesBaseResumo.filter((tx) => tx.tipo === 'CREDITO').reduce((soma, tx) => soma + Number(tx.valor || 0), 0);
+    const totalDebitos = transacoesBaseResumo.filter((tx) => tx.tipo === 'DEBITO').reduce((soma, tx) => soma + Number(tx.valor || 0), 0);
+    const porConta = Array.from(transacoesBaseResumo.reduce((mapa, tx) => {
       const chave = tx.conta_id || 'sem-conta';
       if (!mapa.has(chave)) mapa.set(chave, { contaId: tx.conta_id, contaNome: tx.conta_nome || 'Conta', transacoes: [] });
       mapa.get(chave).transacoes.push(tx);
@@ -4903,8 +4961,10 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
     }, new Map()).values()).map((item) => {
       const ordenadas = [...item.transacoes].sort((a, b) => compararTransacoes(a, b, 'data', 'asc'));
       const conta = contas.find((contaItem) => contaItem.id === item.contaId);
-      const dataReferenciaAntes = dataInicial || normalizarDataFiltro(ordenadas[0]?.data);
-      const saldoAntesPeriodo = calcularSaldoAntesDaData(item.contaId, dataReferenciaAntes);
+      const primeiraComSaldo = ordenadas.find((tx) => Number.isFinite(tx.saldo_acumulado_calculado));
+      const saldoAntesPeriodo = primeiraComSaldo
+        ? Number(primeiraComSaldo.saldo_acumulado_calculado) - (primeiraComSaldo.tipo === 'CREDITO' ? Number(primeiraComSaldo.valor || 0) : -Number(primeiraComSaldo.valor || 0))
+        : null;
       const ultimaComSaldo = [...ordenadas].reverse().find((tx) => Number.isFinite(tx.saldo_acumulado_calculado));
       return {
         ...item,
@@ -4924,7 +4984,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
     return {
       primeira: porDataAsc[0],
       ultima: porDataAsc[porDataAsc.length - 1],
-      quantidade: transacoesFiltradas.length,
+      quantidade: transacoesBaseResumo.length,
       saldoCalculadoPeriodo: totalCreditos - totalDebitos,
       saldoInicial: contaResumo?.saldoInicial ?? null,
       dataSaldoInicial: contaResumo?.dataSaldoInicial ?? null,
@@ -4933,7 +4993,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
       saldoFinalConsolidado: contasComSaldo.reduce((total, item) => total + Number(item.saldoFinalCalculado || 0), 0),
       porConta,
     };
-  }, [transacoesFiltradas, contas, dataInicial, contaSelecionadaFiltro]);
+  }, [transacoesBaseResumo, contas, contaSelecionadaFiltro]);
 
   const primeiraTransacaoBase = resumoBase?.primeira || null;
 
@@ -5145,18 +5205,20 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
     tx.categoria_origem || '',
   ]);
 
-  const exportarExcel = (apenasSelecionadas = false) => {
-    const selecionadasSet = new Set(selecionadas);
-    const baseExportacao = apenasSelecionadas
-      ? transacoesOrdenadas.filter((tx) => selecionadasSet.has(tx.id))
-      : transacoesOrdenadas;
-
-    if (baseExportacao.length === 0) {
-      mostrarToast('Não há transações para exportar com os filtros atuais.');
-      return;
-    }
-
+  const exportarExcel = async (apenasSelecionadas = false) => {
+    if (exportandoExcel) return;
+    setExportandoExcel(true);
     try {
+      const selecionadasSet = new Set(selecionadas);
+      const baseExportacao = apenasSelecionadas
+        ? transacoesOrdenadas.filter((tx) => selecionadasSet.has(tx.id))
+        : (await carregarTodasTransacoesFiltradas()).sort((a, b) => compararTransacoes(a, b, sortField || 'data', sortDirection || 'desc'));
+
+      if (baseExportacao.length === 0) {
+        mostrarToast('Não há transações para exportar com os filtros atuais.');
+        return;
+      }
+
       const linhas = montarLinhasExportacao(baseExportacao);
       const bytes = criarXlsxTransacoes(linhas);
       const nomeArquivo = nomeArquivoExportacao(dataInicial, dataFinal, apenasSelecionadas);
@@ -5164,6 +5226,8 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
     } catch (error) {
       console.error('Erro ao exportar transações:', error);
       mostrarToast('Erro ao exportar transações. Tente novamente.');
+    } finally {
+      setExportandoExcel(false);
     }
   };
 
@@ -5288,7 +5352,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
               <Btn variant="primary" size="sm" onClick={onImportar}>📥 Importar dados / conciliar</Btn>
               {contaSelecionadaFiltro && primeiraTransacaoBase && <Btn variant="ghost" size="sm" onClick={abrirModalSaldoInicial}>Configurar saldo inicial</Btn>}
               <div className="more-actions">
-                <Btn variant="secondary" size="sm" onClick={() => setMaisAcoesAberto((aberto) => !aberto)}>⬇️ Exportar Excel ▾</Btn>
+                <Btn variant="secondary" size="sm" onClick={() => setMaisAcoesAberto((aberto) => !aberto)} disabled={exportandoExcel}>{exportandoExcel ? 'Exportando...' : '⬇️ Exportar Excel ▾'}</Btn>
                 {maisAcoesAberto && <div className="more-actions-menu">
                   <Btn variant="ghost" size="sm" onClick={() => { exportarExcel(false); setMaisAcoesAberto(false); }} disabled={transacoesOrdenadas.length === 0}>Exportar todas filtradas</Btn>
                   <Btn variant="ghost" size="sm" onClick={() => { exportarExcel(true); setMaisAcoesAberto(false); }} disabled={selecionadas.length === 0}>Exportar selecionadas</Btn>
@@ -5322,7 +5386,11 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
           </div>
         </div>}
 
-        {abaTransacoes === 'resumo' && resumoBase && (
+        {abaTransacoes === 'resumo' && carregandoResumoBase && <Spinner texto="Carregando resumo completo da base..." />}
+        {abaTransacoes === 'resumo' && !carregandoResumoBase && !resumoBase && (
+          <div style={{ background: 'white', borderRadius: '12px', padding: '28px', textAlign: 'center', color: '#64748b', marginBottom: '16px' }}>Nenhuma transação encontrada para os filtros atuais.</div>
+        )}
+        {abaTransacoes === 'resumo' && !carregandoResumoBase && resumoBase && (
           <div style={{ background: 'white', border: '1px solid #dbeafe', borderRadius: '12px', padding: '16px', marginBottom: '16px', boxShadow: '0 2px 8px rgba(0,0,0,0.06)' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap', alignItems: 'flex-start' }}>
               <div>
