@@ -133,7 +133,8 @@ pattern = re.compile(r"function parseValorMonetario\(valorOriginal\) \{.*?\n\}\n
 for filename in ['App.jsx', 'backend-server.js']:
     path = Path(filename)
     content = path.read_text(encoding='utf-8')
-    updated, count = pattern.subn(NEW_FUNCTION + '\n\n', content, count=1)
+    replacement = NEW_FUNCTION + '\n\n'
+    updated, count = pattern.subn(lambda _match: replacement, content, count=1)
     if count != 1:
         raise SystemExit(f'Não foi possível localizar exatamente um parser em {filename}: {count}')
     path.write_text(updated, encoding='utf-8')
