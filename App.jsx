@@ -2108,6 +2108,8 @@ function TelaAssistenteFinanceiro({ token, onVoltar }) {
     'A conta de internet já foi paga. Procure o lançamento e concilie.',
     'O lançamento da Smart Fit é Saúde. Categoriza pra mim.',
     'Quero comprar uma TV de R$ 4.500 até novembro. Qual a melhor forma?',
+    'Comprei um micro-ondas usado por R$ 250 no PIX hoje.',
+    'Cadastre uma mesa de R$ 800 e uma cadeira de R$ 1.200 para o apartamento.',
   ];
   const [mensagens, setMensagens] = useState([boasVindas]);
   const [texto, setTexto] = useState('');
@@ -2180,6 +2182,38 @@ function TelaAssistenteFinanceiro({ token, onVoltar }) {
         }
       },
       { labelConfirmar: 'Adicionar compra', corConfirmar: '#2563eb' }
+    );
+  };
+
+  const confirmarComprasLoteSugeridas = (acao, indice) => {
+    const itens = Array.isArray(acao?.itens) ? acao.itens : [];
+    if (itens.length === 0 || acao.confirmada || acaoSalvandoIndice !== null) return;
+    const compradas = itens.filter((item) => item?.payload?.status === 'COMPRADA').length;
+    const planejadas = itens.length - compradas;
+    const resumo = [
+      compradas ? `${compradas} já ${compradas === 1 ? 'comprada' : 'compradas'}` : null,
+      planejadas ? `${planejadas} ${planejadas === 1 ? 'planejada' : 'planejadas'}` : null,
+    ].filter(Boolean).join(' e ');
+    pedirConfirmacao(
+      acao.rotuloAcao || 'Registrar compras',
+      `Cadastrar ${itens.length} ${itens.length === 1 ? 'compra' : 'compras'} (${resumo})? Você poderá revisar os itens no card antes de confirmar.`,
+      async () => {
+        setAcaoSalvandoIndice(indice);
+        try {
+          await axios.post(`${API_URL}/compras-programadas/lote`, {
+            itens: itens.map((item) => item.payload),
+          }, { headers: { Authorization: `Bearer ${token}` } });
+          setMensagens((atuais) => atuais.map((item, posicao) => posicao === indice
+            ? { ...item, acaoPendente: { ...item.acaoPendente, confirmada: true } }
+            : item));
+          mostrarToast(itens.length === 1 ? 'Compra registrada.' : `${itens.length} compras registradas.`);
+        } catch (error) {
+          mostrarToast(error.response?.data?.erro || 'Não foi possível registrar as compras.', 'erro');
+        } finally {
+          setAcaoSalvandoIndice(null);
+        }
+      },
+      { labelConfirmar: itens.length === 1 ? 'Registrar compra' : 'Registrar compras', corConfirmar: '#2563eb' }
     );
   };
 
@@ -2331,6 +2365,10 @@ function TelaAssistenteFinanceiro({ token, onVoltar }) {
         .assistente-acao-confirmada { display: inline-flex; align-items: center; gap: 6px; color: #166534; background: #dcfce7; border-radius: 999px; padding: 6px 10px; font-size: 12px; font-weight: 700; }
         .assistente-acao-detalhes { margin: 10px 0 12px; padding-left: 18px; color: #334155; font-size: 12px; }
         .assistente-acao-detalhes li { margin: 4px 0; }
+        .assistente-lote-lista { display: grid; gap: 8px; margin: 10px 0 12px; }
+        .assistente-lote-item { background: white; border: 1px solid #dbeafe; border-radius: 10px; padding: 10px; }
+        .assistente-lote-item-topo { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; }
+        .assistente-lote-item small { color: #64748b; }
         .assistente-disclaimer { margin-top: 9px; color: #64748b; font-size: 11px; line-height: 1.4; }
         @media (max-width: 720px) {
           .assistente-msg { max-width: 94%; }
@@ -2357,6 +2395,32 @@ function TelaAssistenteFinanceiro({ token, onVoltar }) {
             <div key={`${mensagem.role}-${indice}`} className={`assistente-msg ${mensagem.role === 'user' ? 'assistente-msg-user' : 'assistente-msg-assistant'} ${mensagem.erro ? 'assistente-msg-error' : ''}`}>
               {mensagem.content}
               {mensagem.consultas?.length > 0 && <div className="assistente-consultas">{mensagem.consultas.map((consulta) => <span key={consulta} className="assistente-consulta">Consultou: {consulta}</span>)}</div>}
+              {mensagem.acaoPendente?.tipo === 'CRIAR_COMPRAS_LOTE' && (() => {
+                const acao = mensagem.acaoPendente;
+                const itens = Array.isArray(acao.itens) ? acao.itens : [];
+                return <div className="assistente-acao">
+                  <strong>🛒 {acao.quantidade === 1 ? 'Compra para registrar' : 'Compras para registrar'}</strong>
+                  <div className="assistente-lote-lista">
+                    {itens.map((item, itemIndice) => {
+                      const payload = item.payload || {};
+                      const pagamento = payload.formaPagamento === 'PARCELADO'
+                        ? `${payload.parcelas}x de ${formatarMoeda(Number(payload.valorEstimado || 0) / Number(payload.parcelas || 1))}`
+                        : 'À vista';
+                      return <div className="assistente-lote-item" key={`${payload.descricao || 'compra'}-${itemIndice}`}>
+                        <div className="assistente-lote-item-topo">
+                          <strong>{payload.descricao}</strong>
+                          <span>{payload.status === 'COMPRADA' ? '✅ Comprada' : '🗓️ Planejada'}</span>
+                        </div>
+                        <div>{formatarMoeda(payload.valorEstimado)} · {formatarData(payload.dataDesejada)} · {pagamento}</div>
+                        {(item.detalhes || []).slice(4).map((detalhe) => <small key={detalhe}> · {detalhe}</small>)}
+                      </div>;
+                    })}
+                  </div>
+                  {acao.confirmada
+                    ? <span className="assistente-acao-confirmada">✅ {itens.length === 1 ? 'Compra registrada' : 'Compras registradas'}</span>
+                    : <Btn variant="primary" size="sm" onClick={() => confirmarComprasLoteSugeridas(acao, indice)} disabled={acaoSalvandoIndice !== null}>{acaoSalvandoIndice === indice ? 'Registrando...' : (acao.rotuloAcao || 'Registrar compras')}</Btn>}
+                </div>;
+              })()}
               {mensagem.acaoPendente?.tipo === 'CRIAR_COMPRA_PROGRAMADA' && (() => {
                 const payload = mensagem.acaoPendente.payload || {};
                 const cenario = mensagem.acaoPendente.analise?.melhorCenario || {};
