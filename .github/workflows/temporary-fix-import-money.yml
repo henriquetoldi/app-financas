@@ -1,0 +1,101 @@
+name: Temporary fix import money parser
+
+on:
+  push:
+    branches:
+      - fix/importacao-valores-excel
+
+permissions:
+  contents: write
+
+jobs:
+  transform-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/importacao-valores-excel
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Apply import parser fix
+        run: python .tmp-fix-import-money.py
+
+      - name: Validate parser regression cases
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const vm = require('vm');
+
+          function carregarParser(arquivo) {
+            const texto = fs.readFileSync(arquivo, 'utf8');
+            const match = texto.match(/(function parseValorMonetario\(valorOriginal\) \{.*?\n\})\n\nfunction /s);
+            if (!match) throw new Error(`Parser não encontrado em ${arquivo}`);
+            return vm.runInNewContext(`(${match[1]})`);
+          }
+
+          const casos = [
+            ['7.000000000000002E-2', 0.07],
+            ['0.14000000000000001', 0.14],
+            ['21128.959999999999', 21128.96],
+            ['1.234,56', 1234.56],
+            ['1,234.56', 1234.56],
+            ['1234.56', 1234.56],
+            ['0.140', 0.14],
+            ['1.234', 1234],
+            ['R$ 1.234,56', 1234.56],
+            ['-45,67', -45.67],
+            ['(123,45)', -123.45],
+            [1234.567, 1234.57],
+          ];
+
+          for (const arquivo of ['App.jsx', 'backend-server.js']) {
+            const parse = carregarParser(arquivo);
+            for (const [entrada, esperado] of casos) {
+              const resultado = parse(entrada);
+              if (resultado.erro || Math.abs(resultado.valor - esperado) > 0.000001) {
+                throw new Error(`${arquivo}: ${JSON.stringify(entrada)} => ${JSON.stringify(resultado)}, esperado ${esperado}`);
+              }
+            }
+            const invalido = parse('abc');
+            if (!invalido.erro || invalido.valor !== null) throw new Error(`${arquivo}: valor inválido deveria falhar`);
+          }
+          console.log('Casos de regressão do parser monetário: OK');
+          NODE
+
+      - name: Validate backend syntax
+        run: node --check backend-server.js
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Validate diff
+        run: git diff --check
+
+      - name: Validate scope
+        shell: bash
+        run: |
+          changed=$(git diff --name-only | sort)
+          echo "$changed"
+          test "$changed" = $'App.jsx\nbackend-server.js'
+          grep -q "7E-2" App.jsx
+          grep -q "Muitas casas decimais" backend-server.js
+
+      - name: Remove temporary files and commit result
+        shell: bash
+        run: |
+          rm -f .tmp-fix-import-money.py .github/workflows/temporary-fix-import-money.yml
+          git add App.jsx backend-server.js .tmp-fix-import-money.py .github/workflows/temporary-fix-import-money.yml
+          git diff --cached --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Corrigir leitura de valores monetários do Excel"
+          git push origin HEAD:fix/importacao-valores-excel
