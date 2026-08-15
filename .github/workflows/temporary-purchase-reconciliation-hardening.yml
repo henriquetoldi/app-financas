@@ -1,0 +1,58 @@
+name: Temporary purchase reconciliation hardening
+
+on:
+  push:
+    branches:
+      - agent/conciliar-compras-transacoes
+    paths:
+      - scripts/temporary-purchase-reconciliation-hardening.py
+      - .github/workflows/temporary-purchase-reconciliation-hardening.yml
+
+permissions:
+  contents: write
+
+jobs:
+  harden-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Apply hardening
+        run: python3 scripts/temporary-purchase-reconciliation-hardening.py
+      - name: Validate backend syntax
+        run: node --check backend-server.js
+      - name: Build frontend
+        run: npm run build
+      - name: Validate diff
+        run: git diff --check
+      - name: Validate guardrails
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+          const backend = fs.readFileSync('backend-server.js', 'utf8');
+          const toolStart = backend.indexOf('async function ferramentaBuscarTransacoesCompraRealizada');
+          const toolEnd = backend.indexOf('async function ferramentaPrepararNovasCompras', toolStart);
+          const toolBody = backend.slice(toolStart, toolEnd);
+          if (!toolBody.includes('let comprasResult = null;')) throw new Error('Autodetecção de compra existente ausente.');
+          if (!backend.includes('possivelDuplicada')) throw new Error('Proteção contra duplicidade na confirmação ausente.');
+          if (!backend.includes('compraVinculada')) throw new Error('Proteção de exclusão de transação vinculada ausente.');
+          for (const token of ['INSERT INTO compras_programadas', 'UPDATE compras_programadas', 'DELETE FROM compras_programadas', 'INSERT INTO conciliacoes_compras']) {
+            if (toolBody.includes(token)) throw new Error(`Ferramenta Gemini possui escrita direta: ${token}`);
+          }
+          console.log('Hardening guardrails OK');
+          NODE
+      - name: Remove temporary files and commit result
+        run: |
+          rm -f scripts/temporary-purchase-reconciliation-hardening.py .github/workflows/temporary-purchase-reconciliation-hardening.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add backend-server.js scripts/temporary-purchase-reconciliation-hardening.py .github/workflows/temporary-purchase-reconciliation-hardening.yml
+          git commit -m "Evitar duplicidade e proteger vínculos de compras"
+          git push
