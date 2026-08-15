@@ -391,8 +391,36 @@ async function inicializarBanco() {
     )
   `);
 
+  await pool.query(`
+    ALTER TABLE compras_programadas
+      ADD COLUMN IF NOT EXISTS valor_realizado DECIMAL(12, 2),
+      ADD COLUMN IF NOT EXISTS data_realizada DATE
+  `);
+
   await pool.query('CREATE INDEX IF NOT EXISTS idx_compras_programadas_usuario_data ON compras_programadas(usuario_id, data_desejada)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_compras_programadas_usuario_status ON compras_programadas(usuario_id, status)');
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS conciliacoes_compras (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      usuario_id UUID NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+      compra_id UUID NOT NULL REFERENCES compras_programadas(id) ON DELETE CASCADE,
+      transacao_id UUID NOT NULL REFERENCES transacoes(id) ON DELETE CASCADE,
+      status VARCHAR(20) NOT NULL DEFAULT 'CONFIRMADA',
+      confianca VARCHAR(20),
+      score DECIMAL(5, 2),
+      motivos JSONB DEFAULT '[]'::jsonb,
+      criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      confirmado_em TIMESTAMP,
+      desfeito_em TIMESTAMP
+    )
+  `);
+
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_conciliacoes_compras_usuario_status ON conciliacoes_compras(usuario_id, status)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_conciliacoes_compras_compra ON conciliacoes_compras(compra_id)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_conciliacoes_compras_transacao ON conciliacoes_compras(transacao_id)');
+  await pool.query("CREATE UNIQUE INDEX IF NOT EXISTS idx_conciliacoes_compras_compra_confirmada ON conciliacoes_compras(compra_id) WHERE status = 'CONFIRMADA'");
+  await pool.query("CREATE UNIQUE INDEX IF NOT EXISTS idx_conciliacoes_compras_transacao_confirmada ON conciliacoes_compras(transacao_id) WHERE status = 'CONFIRMADA'");
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS conciliacoes (
@@ -2878,11 +2906,21 @@ app.get('/api/compras-programadas', verificarToken, async (req, res) => {
       `SELECT cp.*,
               c.nome AS conta_nome,
               cm.nome AS categoria_macro_nome,
-              cd.nome AS categoria_detalhada_nome
+              cd.nome AS categoria_detalhada_nome,
+              cc.id AS conciliacao_compra_id,
+              cc.transacao_id AS transacao_conciliada_id,
+              cc.confianca AS conciliacao_confianca,
+              tx.descricao AS transacao_conciliada_descricao,
+              tx.data AS transacao_conciliada_data,
+              tx.valor AS transacao_conciliada_valor,
+              conta_tx.nome AS transacao_conciliada_conta
        FROM compras_programadas cp
        LEFT JOIN contas c ON c.id = cp.conta_id
        LEFT JOIN categorias cm ON cm.id = cp.categoria_macro_id
        LEFT JOIN categorias cd ON cd.id = cp.categoria_detalhada_id
+       LEFT JOIN conciliacoes_compras cc ON cc.compra_id = cp.id AND cc.status = 'CONFIRMADA'
+       LEFT JOIN transacoes tx ON tx.id = cc.transacao_id
+       LEFT JOIN contas conta_tx ON conta_tx.id = tx.conta_id
        WHERE cp.usuario_id = $1
        ORDER BY
          CASE cp.status WHEN 'PLANEJADA' THEN 0 WHEN 'ADIADA' THEN 1 WHEN 'COMPRADA' THEN 2 ELSE 3 END,
@@ -2968,6 +3006,278 @@ app.post('/api/compras-programadas/lote', verificarToken, async (req, res) => {
     }
     await client.query('COMMIT');
     res.status(201).json({ compras });
+  } catch (error) {
+    if (client) await client.query('ROLLBACK').catch(() => {});
+    res.status(400).json({ erro: error.message });
+  } finally {
+    client?.release();
+  }
+});
+
+
+function normalizarMetodoPagamentoCompra(texto) {
+  return String(texto || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase()
+    .trim();
+}
+
+function calcularSugestaoConciliacaoCompra(compra, transacao, contexto = {}) {
+  if (!compra || !transacao || String(transacao.tipo).toUpperCase() !== 'DEBITO') return null;
+  if (transacao.eh_transferencia_interna) return null;
+
+  const valorCompra = Math.abs(Number(compra.valor_estimado ?? compra.valorEstimado ?? 0));
+  const valorTransacao = Math.abs(Number(transacao.valor || 0));
+  if (!valorCompra || !valorTransacao) return null;
+
+  const diferenca = Math.abs(valorCompra - valorTransacao);
+  const percentual = diferenca / valorCompra;
+  const compraExistente = Boolean(contexto.compraExistente);
+  const limitePercentual = compraExistente ? 0.15 : 0.02;
+  const limiteAbsoluto = compraExistente ? Math.max(5, Math.min(100, valorCompra * limitePercentual)) : Math.max(0.05, Math.min(5, valorCompra * limitePercentual));
+  if (diferenca > limiteAbsoluto) return null;
+
+  const motivos = [];
+  let score = 0;
+  if (diferenca <= 0.05) {
+    score += 0.58;
+    motivos.push('Mesmo valor');
+  } else if (percentual <= 0.005) {
+    score += 0.52;
+    motivos.push('Valor praticamente igual');
+  } else if (percentual <= 0.02) {
+    score += 0.42;
+    motivos.push('Valor muito próximo');
+  } else if (percentual <= 0.10) {
+    score += 0.32;
+    motivos.push('Valor próximo do planejado');
+  } else {
+    score += 0.24;
+    motivos.push('Valor dentro da tolerância do planejado');
+  }
+
+  const dataReferencia = contexto.dataReferencia ? normalizarDataImportacao(contexto.dataReferencia) : null;
+  const dataTransacao = transacao.data instanceof Date ? transacao.data.toISOString().slice(0, 10) : String(transacao.data || '').slice(0, 10);
+  if (dataReferencia) {
+    const dias = diasEntreConciliacao(dataReferencia, dataTransacao);
+    if (dias === 0) {
+      score += 0.20;
+      motivos.push('Mesma data informada');
+    } else if (dias <= 2) {
+      score += 0.15;
+      motivos.push(`Data próxima (${dias} dia${dias > 1 ? 's' : ''})`);
+    } else if (dias <= 7) {
+      score += 0.08;
+      motivos.push(`Data na mesma janela (${dias} dias)`);
+    }
+  }
+
+  const descricaoCompra = compra.descricao || contexto.descricao || '';
+  const similaridade = similaridadeTextoConciliacao(descricaoCompra, transacao.descricao);
+  if (similaridade >= 0.60) {
+    score += 0.16;
+    motivos.push('Descrição semelhante');
+  } else if (similaridade >= 0.25) {
+    score += 0.08;
+    motivos.push('Descrição parcialmente semelhante');
+  }
+
+  const metodo = normalizarMetodoPagamentoCompra(contexto.metodoPagamento);
+  const descricaoTransacao = normalizarMetodoPagamentoCompra(transacao.descricao);
+  if (metodo.includes('PIX') && descricaoTransacao.includes('PIX')) {
+    score += 0.12;
+    motivos.push('Lançamento identificado como PIX');
+  } else if ((metodo.includes('CARTAO') || metodo.includes('CRÉDITO') || metodo.includes('CREDITO')) && /CARTAO|COMPRA|CREDITO/.test(descricaoTransacao)) {
+    score += 0.08;
+    motivos.push('Descrição compatível com cartão');
+  }
+
+  score = Math.max(0, Math.min(0.99, Number(score.toFixed(2))));
+  const confianca = score >= 0.82 ? 'ALTA' : score >= 0.62 ? 'MEDIA' : 'BAIXA';
+  return { score, confianca, motivos, diferenca: Number(diferenca.toFixed(2)), dataTransacao };
+}
+
+async function buscarCandidatasTransacaoCompra(usuarioId, compra, contexto = {}) {
+  const valorCompra = Math.abs(Number(compra.valor_estimado ?? compra.valorEstimado ?? 0));
+  if (!Number.isFinite(valorCompra) || valorCompra <= 0) return [];
+
+  const compraExistente = Boolean(contexto.compraExistente);
+  const limiteAbsoluto = compraExistente
+    ? Math.max(5, Math.min(100, valorCompra * 0.15))
+    : Math.max(0.05, Math.min(5, valorCompra * 0.02));
+  const dataReferencia = contexto.dataReferencia ? normalizarDataImportacao(contexto.dataReferencia) : null;
+  const diasBusca = Math.min(365, Math.max(30, Number(contexto.diasBusca || 180)));
+
+  const valores = [usuarioId, valorCompra, limiteAbsoluto];
+  let filtroData;
+  if (dataReferencia) {
+    valores.push(dataReferencia);
+    filtroData = `AND t.data BETWEEN ($${valores.length}::date - INTERVAL '7 days') AND ($${valores.length}::date + INTERVAL '7 days')`;
+  } else {
+    valores.push(diasBusca);
+    filtroData = `AND t.data >= CURRENT_DATE - ($${valores.length}::int * INTERVAL '1 day')`;
+  }
+
+  const result = await pool.query(
+    `SELECT t.*, c.nome AS conta_nome,
+            cm.nome AS categoria_macro_nome,
+            cd.nome AS categoria_detalhada_nome
+     FROM transacoes t
+     JOIN contas c ON c.id = t.conta_id
+     LEFT JOIN categorias cm ON cm.id = t.categoria_macro_id
+     LEFT JOIN categorias cd ON cd.id = t.categoria_detalhada_id
+     WHERE c.usuario_id = $1
+       AND t.deletado_em IS NULL
+       AND t.tipo = 'DEBITO'
+       AND COALESCE(t.eh_transferencia_interna, false) = false
+       AND ABS(ABS(t.valor) - ABS($2::numeric)) <= $3::numeric
+       ${filtroData}
+       AND NOT EXISTS (
+         SELECT 1 FROM conciliacoes_compras cc
+         WHERE cc.transacao_id = t.id AND cc.status = 'CONFIRMADA'
+       )
+     ORDER BY ABS(ABS(t.valor) - ABS($2::numeric)) ASC, t.data DESC
+     LIMIT 20`,
+    valores
+  );
+
+  return result.rows
+    .map((transacao) => ({
+      transacao,
+      analise: calcularSugestaoConciliacaoCompra(compra, transacao, contexto),
+    }))
+    .filter((item) => item.analise)
+    .sort((a, b) => b.analise.score - a.analise.score || String(b.analise.dataTransacao).localeCompare(String(a.analise.dataTransacao)))
+    .slice(0, 8);
+}
+
+app.post('/api/compras-programadas/conciliar-transacao', verificarToken, async (req, res) => {
+  const usuarioId = req.usuario.usuario_id;
+  const compraId = req.body?.compraId || null;
+  const transacaoId = req.body?.transacaoId;
+  const compraNova = req.body?.compra || null;
+  if (!transacaoId) return res.status(400).json({ erro: 'Selecione um lançamento para associar à compra.' });
+  if (!compraId && !compraNova) return res.status(400).json({ erro: 'Informe a compra que será associada.' });
+
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('BEGIN');
+
+    const transacaoResult = await client.query(
+      `SELECT t.*, c.nome AS conta_nome
+       FROM transacoes t
+       JOIN contas c ON c.id = t.conta_id
+       WHERE t.id = $1
+         AND c.usuario_id = $2
+         AND t.deletado_em IS NULL
+         AND t.tipo = 'DEBITO'
+         AND COALESCE(t.eh_transferencia_interna, false) = false
+       FOR UPDATE`,
+      [transacaoId, usuarioId]
+    );
+    const transacao = transacaoResult.rows[0];
+    if (!transacao) throw new Error('Lançamento de débito não encontrado para este usuário.');
+
+    const vinculoExistente = await client.query(
+      `SELECT id FROM conciliacoes_compras
+       WHERE transacao_id = $1 AND status = 'CONFIRMADA'
+       LIMIT 1`,
+      [transacaoId]
+    );
+    if (vinculoExistente.rows.length > 0) throw new Error('Este lançamento já está associado a outra compra.');
+
+    let compra;
+    if (compraId) {
+      const compraResult = await client.query(
+        `SELECT * FROM compras_programadas
+         WHERE id = $1 AND usuario_id = $2
+         FOR UPDATE`,
+        [compraId, usuarioId]
+      );
+      compra = compraResult.rows[0];
+      if (!compra) throw new Error('Compra Programada não encontrada.');
+      if (compra.status === 'CANCELADA') throw new Error('Não é possível associar uma compra cancelada.');
+
+      const jaVinculada = await client.query(
+        `SELECT id FROM conciliacoes_compras
+         WHERE compra_id = $1 AND status = 'CONFIRMADA'
+         LIMIT 1`,
+        [compraId]
+      );
+      if (jaVinculada.rows.length > 0) throw new Error('Esta compra já possui um lançamento associado.');
+    } else {
+      const payload = validarPayloadCompraProgramada({
+        ...compraNova,
+        dataDesejada: transacao.data,
+        status: 'COMPRADA',
+      });
+      await validarRelacionamentosCompraProgramada(usuarioId, payload);
+      const insert = await client.query(
+        `INSERT INTO compras_programadas (
+          usuario_id, descricao, valor_estimado, data_desejada, prioridade, forma_pagamento,
+          parcelas, conta_id, categoria_macro_id, categoria_detalhada_id, status, observacao,
+          valor_realizado, data_realizada
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'COMPRADA',$11,$12,$13)
+        RETURNING *`,
+        [
+          usuarioId,
+          payload.descricao,
+          payload.valorEstimado,
+          payload.dataDesejada,
+          payload.prioridade,
+          payload.formaPagamento,
+          payload.parcelas,
+          payload.contaId || transacao.conta_id || null,
+          payload.categoriaMacroId || null,
+          payload.categoriaDetalhadaId || null,
+          payload.observacao || null,
+          Math.abs(Number(transacao.valor || 0)),
+          transacao.data,
+        ]
+      );
+      compra = insert.rows[0];
+    }
+
+    const analise = calcularSugestaoConciliacaoCompra(compra, transacao, {
+      compraExistente: Boolean(compraId),
+      dataReferencia: compraId ? compra.data_desejada : null,
+    }) || { confianca: 'BAIXA', score: 0.5, motivos: ['Associação confirmada manualmente pelo usuário'] };
+
+    if (compraId) {
+      const update = await client.query(
+        `UPDATE compras_programadas
+         SET status = 'COMPRADA',
+             valor_realizado = $1,
+             data_realizada = $2,
+             atualizado_em = NOW()
+         WHERE id = $3 AND usuario_id = $4
+         RETURNING *`,
+        [Math.abs(Number(transacao.valor || 0)), transacao.data, compra.id, usuarioId]
+      );
+      compra = update.rows[0];
+    }
+
+    const conciliacao = await client.query(
+      `INSERT INTO conciliacoes_compras (
+        usuario_id, compra_id, transacao_id, status, confianca, score, motivos, confirmado_em
+       ) VALUES ($1,$2,$3,'CONFIRMADA',$4,$5,$6::jsonb,NOW())
+       RETURNING *`,
+      [usuarioId, compra.id, transacao.id, analise.confianca, analise.score, JSON.stringify(analise.motivos || [])]
+    );
+
+    await client.query('COMMIT');
+    res.status(201).json({
+      compra,
+      conciliacao: conciliacao.rows[0],
+      transacao: {
+        descricao: transacao.descricao,
+        valor: Number(transacao.valor || 0),
+        data: transacao.data instanceof Date ? transacao.data.toISOString().slice(0, 10) : String(transacao.data || '').slice(0, 10),
+        conta: transacao.conta_nome,
+      },
+    });
   } catch (error) {
     if (client) await client.query('ROLLBACK').catch(() => {});
     res.status(400).json({ erro: error.message });
@@ -3917,6 +4227,148 @@ async function ferramentaPrepararAlteracaoCompraProgramada(usuarioId, args = {})
   };
 }
 
+async function ferramentaBuscarTransacoesCompraRealizada(usuarioId, args = {}) {
+  const termoCompraExistente = String(args.termoCompraExistente || '').trim();
+  const descricaoInformada = String(args.descricao || '').trim();
+  const valorInformado = Number(args.valor || 0);
+  const dataInformada = String(args.dataCompra || '').trim();
+  const dataCompra = dataInformada ? normalizarDataImportacao(dataInformada) : null;
+  const metodoPagamento = String(args.metodoPagamento || '').trim();
+  const prioridade = String(args.prioridade || 'MEDIA').trim().toUpperCase();
+  const formaPagamento = String(args.formaPagamento || 'A_VISTA').trim().toUpperCase();
+  const parcelas = formaPagamento === 'PARCELADO' ? Number(args.parcelas || 0) : 1;
+  const condicao = String(args.condicao || 'NAO_INFORMADO').trim().toUpperCase();
+  const link = String(args.link || '').trim();
+  const observacao = String(args.observacao || '').trim();
+  const diasBusca = inteiroAssistente(args.diasBusca, 30, 365, 180);
+
+  if (dataInformada && !dataCompra) return { encontrada: false, motivo: 'A data informada é inválida.' };
+  if (!PRIORIDADES_COMPRA.includes(prioridade)) return { encontrada: false, motivo: 'Prioridade inválida.' };
+  if (!FORMAS_PAGAMENTO_COMPRA.includes(formaPagamento)) return { encontrada: false, motivo: 'Forma de pagamento inválida.' };
+  if (formaPagamento === 'PARCELADO' && (!Number.isInteger(parcelas) || parcelas < 2 || parcelas > 60)) {
+    return { encontrada: false, motivo: 'Informe a quantidade de parcelas da compra.' };
+  }
+
+  let compraExistente = null;
+  if (termoCompraExistente) {
+    const comprasResult = await pool.query(
+      `SELECT * FROM compras_programadas
+       WHERE usuario_id = $1
+         AND status IN ('PLANEJADA', 'ADIADA', 'COMPRADA')
+         AND LOWER(descricao) LIKE LOWER($2)
+       ORDER BY CASE WHEN LOWER(descricao) = LOWER($3) THEN 0 ELSE 1 END, criado_em DESC
+       LIMIT 5`,
+      [usuarioId, `%${termoCompraExistente}%`, termoCompraExistente]
+    );
+    if (comprasResult.rows.length === 0) {
+      return { encontrada: false, motivo: `Nenhuma Compra Programada corresponde a "${termoCompraExistente}".` };
+    }
+    if (comprasResult.rows.length > 1) {
+      return {
+        encontrada: false,
+        ambigua: true,
+        motivo: 'Há mais de uma Compra Programada correspondente. Peça ao usuário para indicar qual delas foi comprada.',
+        opcoes: comprasResult.rows.map((item) => ({
+          descricao: item.descricao,
+          valor: Number(item.valor_estimado || 0),
+          dataDesejada: String(item.data_desejada || '').slice(0, 10),
+          status: item.status,
+        })),
+      };
+    }
+    compraExistente = comprasResult.rows[0];
+    const jaVinculada = await pool.query(
+      `SELECT id FROM conciliacoes_compras WHERE compra_id = $1 AND status = 'CONFIRMADA' LIMIT 1`,
+      [compraExistente.id]
+    );
+    if (jaVinculada.rows.length > 0) return { encontrada: false, motivo: 'Essa compra já possui um lançamento associado.' };
+  }
+
+  const descricao = compraExistente?.descricao || descricaoInformada;
+  const valor = compraExistente ? Number(compraExistente.valor_estimado || 0) : valorInformado;
+  if (!descricao) return { encontrada: false, motivo: 'Informe o que foi comprado.' };
+  if (!Number.isFinite(valor) || valor <= 0) return { encontrada: false, motivo: 'Informe quanto foi pago para procurar o lançamento.' };
+
+  const compraBusca = compraExistente || { descricao, valor_estimado: valor };
+  const candidatas = await buscarCandidatasTransacaoCompra(usuarioId, compraBusca, {
+    compraExistente: Boolean(compraExistente),
+    dataReferencia: dataCompra || null,
+    metodoPagamento,
+    diasBusca,
+  });
+
+  if (candidatas.length === 0) {
+    return {
+      encontrada: false,
+      motivo: dataCompra
+        ? 'Não encontrei lançamento de débito compatível com o valor e a data informados. Confira se a transação já foi importada.'
+        : `Não encontrei lançamento de débito compatível nos últimos ${diasBusca} dias. Não vou assumir que a compra foi hoje. Informe uma data aproximada ou importe o extrato correspondente.`,
+      compra: { descricao, valor, dataCompra: dataCompra || null },
+    };
+  }
+
+  const observacoes = [];
+  if (observacao) observacoes.push(observacao);
+  if (condicao === 'NOVO') observacoes.push('Condição: novo.');
+  if (condicao === 'USADO') observacoes.push('Condição: usado.');
+  if (metodoPagamento) observacoes.push(`Método de pagamento: ${metodoPagamento}.`);
+  if (link) observacoes.push(`Referência: ${link}`);
+
+  const compraNova = compraExistente ? null : {
+    descricao,
+    valorEstimado: Number(valor.toFixed(2)),
+    prioridade,
+    formaPagamento,
+    parcelas: formaPagamento === 'PARCELADO' ? parcelas : 1,
+    contaId: null,
+    categoriaMacroId: null,
+    categoriaDetalhadaId: null,
+    observacao: observacoes.join(' ').trim() || null,
+  };
+
+  const candidatos = candidatas.map(({ transacao, analise }) => ({
+    transacaoId: transacao.id,
+    descricao: transacao.descricao,
+    valor: Number(transacao.valor || 0),
+    data: analise.dataTransacao,
+    conta: transacao.conta_nome,
+    categoria: transacao.categoria_detalhada_nome || transacao.categoria_macro_nome || null,
+    confianca: analise.confianca,
+    score: analise.score,
+    motivos: analise.motivos,
+    diferenca: analise.diferenca,
+  }));
+
+  return {
+    encontrada: true,
+    preparada: true,
+    quantidadeCandidatos: candidatos.length,
+    compra: {
+      descricao,
+      valor: Number(valor.toFixed(2)),
+      existente: Boolean(compraExistente),
+      dataInformada: dataCompra,
+    },
+    candidatos: candidatos.map(({ transacaoId, ...visivel }) => visivel),
+    observacao: candidatos.length === 1
+      ? 'Confira o lançamento encontrado antes de associar.'
+      : 'Há mais de um lançamento plausível. Escolha o correto no card de confirmação.',
+    requerConfirmacao: true,
+    _acaoPendente: {
+      tipo: 'CONCILIAR_COMPRA_TRANSACAO',
+      rotuloAcao: compraExistente ? 'Associar compra ao lançamento' : 'Registrar compra pelo lançamento',
+      compraId: compraExistente?.id || null,
+      compraNova,
+      compra: {
+        descricao,
+        valor: Number(valor.toFixed(2)),
+        existente: Boolean(compraExistente),
+      },
+      candidatos,
+    },
+  };
+}
+
 async function ferramentaPrepararNovasCompras(usuarioId, args = {}) {
   const itens = Array.isArray(args.itens) ? args.itens : [];
   if (itens.length === 0) return { preparada: false, motivo: 'Informe pelo menos uma compra.' };
@@ -3935,7 +4387,7 @@ async function ferramentaPrepararNovasCompras(usuarioId, args = {}) {
     const status = String(item.status || 'PLANEJADA').trim().toUpperCase();
     const prioridade = String(item.prioridade || 'MEDIA').trim().toUpperCase();
     const dataInformada = String(item.dataDesejada || '').trim();
-    const dataDesejada = dataInformada ? normalizarDataImportacao(dataInformada) : hoje;
+    const dataDesejada = dataInformada ? normalizarDataImportacao(dataInformada) : null;
     const formaInformada = String(item.formaPagamento || '').trim().toUpperCase();
     const parcelasInformadas = Number(item.parcelas || 0);
     const formaPagamento = formaInformada || (parcelasInformadas >= 2 ? 'PARCELADO' : 'A_VISTA');
@@ -3950,7 +4402,11 @@ async function ferramentaPrepararNovasCompras(usuarioId, args = {}) {
     if (!Number.isFinite(valorEstimado) || valorEstimado <= 0) faltas.push('valor positivo');
     if (!statusPermitidos.includes(status)) faltas.push('status PLANEJADA ou COMPRADA');
     if (!PRIORIDADES_COMPRA.includes(prioridade)) faltas.push('prioridade válida');
-    if (!dataDesejada) faltas.push('data válida');
+    if (!dataDesejada) {
+      faltas.push(status === 'COMPRADA'
+        ? 'data da compra ou associação com um lançamento real'
+        : 'data desejada');
+    }
     if (!FORMAS_PAGAMENTO_COMPRA.includes(formaPagamento)) faltas.push('forma de pagamento válida');
     if (formaPagamento === 'PARCELADO' && (!Number.isInteger(parcelas) || parcelas < 2 || parcelas > 60)) faltas.push('parcelas entre 2 e 60');
     if (!condicoesPermitidas.includes(condicao)) faltas.push('condição NOVO, USADO ou NAO_INFORMADO');
@@ -3986,7 +4442,6 @@ async function ferramentaPrepararNovasCompras(usuarioId, args = {}) {
     if (condicao === 'USADO') observacoes.push('Condição: usado.');
     if (metodoPagamento) observacoes.push(`Método de pagamento: ${metodoPagamento}.`);
     if (link) observacoes.push(`Referência: ${link}`);
-    if (!dataInformada) observacoes.push(`Data não informada; usada a data atual (${hoje}) como referência.`);
 
     const payload = {
       descricao,
@@ -4741,8 +5196,33 @@ const FERRAMENTAS_ASSISTENTE = [
   },
   {
     type: 'function',
+    name: 'buscar_transacoes_para_compra_realizada',
+    description: 'Procura lançamentos reais de débito para uma compra que já aconteceu e prepara a associação sem gravar. Use obrigatoriamente quando o usuário disser que já comprou/pagou algo mas não souber a data, quando pedir para localizar o pagamento no extrato ou quando quiser associar uma Compra Programada a uma transação. Não assuma hoje como data.',
+    strict: true,
+    parameters: {
+      type: 'object',
+      properties: {
+        termoCompraExistente: { type: 'string', description: 'Parte do nome da Compra Programada existente. Use string vazia quando a compra ainda não estava cadastrada.' },
+        descricao: { type: 'string', description: 'Descrição do item comprado. Use string vazia quando termoCompraExistente identificar a compra.' },
+        valor: { type: 'number', minimum: 0, description: 'Valor pago ou estimado em BRL. Use 0 quando uma compra existente fornecer o valor.' },
+        dataCompra: { type: 'string', description: 'Data AAAA-MM-DD ou string vazia quando o usuário não souber.' },
+        metodoPagamento: { type: 'string', description: 'PIX, cartão, débito, dinheiro etc., ou string vazia.' },
+        prioridade: { type: 'string', enum: ['BAIXA', 'MEDIA', 'ALTA', 'ESSENCIAL'], description: 'Use MEDIA quando não informada.' },
+        formaPagamento: { type: 'string', enum: ['A_VISTA', 'PARCELADO'], description: 'PIX/débito/dinheiro = A_VISTA. Cartão parcelado = PARCELADO.' },
+        parcelas: { type: 'integer', minimum: 0, maximum: 60, description: '1 para à vista; quantidade real para parcelado; 0 se desconhecida.' },
+        condicao: { type: 'string', enum: ['NOVO', 'USADO', 'NAO_INFORMADO'] },
+        link: { type: 'string', description: 'URL de referência ou string vazia.' },
+        observacao: { type: 'string', description: 'Contexto adicional ou string vazia.' },
+        diasBusca: { type: 'integer', minimum: 30, maximum: 365, description: 'Janela de busca quando a data for desconhecida. Use 180 por padrão.' },
+      },
+      required: ['termoCompraExistente', 'descricao', 'valor', 'dataCompra', 'metodoPagamento', 'prioridade', 'formaPagamento', 'parcelas', 'condicao', 'link', 'observacao', 'diasBusca'],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: 'function',
     name: 'preparar_novas_compras',
-    description: 'Prepara, sem gravar, uma ou várias Compras Programadas para cadastro direto. Use quando o usuário já comprou/pagou algo, quando pedir apenas para cadastrar uma compra futura sem solicitar simulação, ou quando trouxer vários itens de uma vez. Compras já realizadas devem usar status COMPRADA; compras futuras, PLANEJADA. Links, condição e método de pagamento são preservados na observação. Não use para decidir melhor data ou parcelamento: nesse caso use planejar_compra_hipotetica.',
+    description: 'Prepara, sem gravar, uma ou várias Compras Programadas para cadastro direto quando a data da compra já é conhecida ou quando se trata de compra futura com data desejada informada. Não invente a data atual. Para compra já realizada sem data conhecida ou quando o usuário quiser associar ao extrato, use buscar_transacoes_para_compra_realizada.',
     strict: true,
     parameters: {
       type: 'object',
@@ -4755,7 +5235,7 @@ const FERRAMENTAS_ASSISTENTE = [
             properties: {
               descricao: { type: 'string', description: 'Descrição clara da compra.' },
               valorEstimado: { type: 'number', minimum: 0, description: 'Valor total em BRL. Use 0 se não foi informado para que a ferramenta peça o dado faltante.' },
-              dataDesejada: { type: 'string', description: 'Data AAAA-MM-DD. Use string vazia se não informada; a ferramenta usará a data atual como referência.' },
+              dataDesejada: { type: 'string', description: 'Data AAAA-MM-DD. Use string vazia se não informada; a ferramenta não deve inventar uma data.' },
               status: { type: 'string', enum: ['PLANEJADA', 'COMPRADA'], description: 'COMPRADA quando o usuário disser que já comprou/pagou/adquiriu; PLANEJADA para intenção futura.' },
               prioridade: { type: 'string', enum: ['BAIXA', 'MEDIA', 'ALTA', 'ESSENCIAL'], description: 'Use MEDIA quando não informada.' },
               formaPagamento: { type: 'string', enum: ['A_VISTA', 'PARCELADO'], description: 'PIX, débito, dinheiro ou pagamento único devem ser A_VISTA; use PARCELADO quando houver 2 ou mais parcelas.' },
@@ -4911,6 +5391,7 @@ const ROTULOS_FERRAMENTAS_ASSISTENTE = {
   compras_programadas_por_mes: 'compras programadas',
   comparar_cenarios_compra_programada: 'comparação de cenários de compra',
   planejar_compra_hipotetica: 'planejamento de nova compra',
+  buscar_transacoes_para_compra_realizada: 'busca de lançamento para compra realizada',
   preparar_novas_compras: 'cadastro de compras',
   preparar_alteracao_compra_programada: 'alteração de compra programada',
   preparar_nova_conta_prevista: 'nova conta prevista',
@@ -4928,6 +5409,7 @@ async function executarFerramentaAssistente(usuarioId, nome, args) {
   if (nome === 'compras_programadas_por_mes') return ferramentaComprasProgramadas(usuarioId, args);
   if (nome === 'comparar_cenarios_compra_programada') return ferramentaCompararCompraProgramada(usuarioId, args);
   if (nome === 'planejar_compra_hipotetica') return ferramentaPlanejarCompraHipotetica(usuarioId, args);
+  if (nome === 'buscar_transacoes_para_compra_realizada') return ferramentaBuscarTransacoesCompraRealizada(usuarioId, args);
   if (nome === 'preparar_novas_compras') return ferramentaPrepararNovasCompras(usuarioId, args);
   if (nome === 'preparar_alteracao_compra_programada') return ferramentaPrepararAlteracaoCompraProgramada(usuarioId, args);
   if (nome === 'preparar_nova_conta_prevista') return ferramentaPrepararNovaProvisao(usuarioId, args);
@@ -4968,7 +5450,7 @@ function extrairChamadasGeminiAssistente(response) {
     }));
 }
 
-async function chamarGeminiAssistente({ contents, instructions }) {
+async function chamarGeminiAssistente({ contents, instructions, toolConfig = null }) {
   const modelo = encodeURIComponent(ASSISTENTE_GEMINI_MODEL);
   let response;
   try {
@@ -4982,7 +5464,7 @@ async function chamarGeminiAssistente({ contents, instructions }) {
         systemInstruction: { parts: [{ text: instructions }] },
         contents,
         tools: [{ functionDeclarations: declaracoesGeminiAssistente() }],
-        toolConfig: { functionCallingConfig: { mode: 'AUTO' } },
+        toolConfig: toolConfig || { functionCallingConfig: { mode: 'AUTO' } },
         generationConfig: {
           temperature: 0.2,
           maxOutputTokens: 1200,
@@ -5010,6 +5492,37 @@ function normalizarHistoricoAssistente(historico) {
     .map((item) => ({ role: item.role, content: item.content.slice(0, ASSISTENTE_MAX_MENSAGEM) }));
 }
 
+function normalizarIntencaoAssistente(texto) {
+  return String(texto || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+}
+
+function detectarRoteamentoOperacionalAssistente(mensagem) {
+  const texto = normalizarIntencaoAssistente(mensagem);
+  const compraRealizada = /\b(comprei|paguei|adquiri|ja comprei|ja paguei)\b/.test(texto);
+  const querAssociar = /\b(associ|concili|lancamento|transacao|extrato|procura|localiza|encontra)\w*/.test(texto);
+  const dataExplicita = /\b(hoje|ontem|anteontem)\b|\b\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?\b|\b\d{4}-\d{2}-\d{2}\b/.test(texto);
+  const naoSabeData = /nao (lembro|sei).*\b(data|quando)\b|nao lembro quando|nao sei quando|sem data/.test(texto);
+  const alteraCompra = /\b(adiar|adie|edite|editar|cancele|cancelar|desisti|marque|marcar)\b/.test(texto) && /\b(compra|compras|lista)\b/.test(texto);
+  const cadastroCompra = /\b(cadastre|cadastrar|adicione|adicionar|coloque|planeje|planejar)\b/.test(texto) && /\b(compra|comprar|compras|programada|programadas)\b/.test(texto);
+
+  if (compraRealizada && (naoSabeData || !dataExplicita || querAssociar)) {
+    return { functionCallingConfig: { mode: 'ANY', allowedFunctionNames: ['buscar_transacoes_para_compra_realizada'] } };
+  }
+  if (compraRealizada && dataExplicita) {
+    return { functionCallingConfig: { mode: 'ANY', allowedFunctionNames: ['preparar_novas_compras', 'buscar_transacoes_para_compra_realizada', 'preparar_alteracao_compra_programada'] } };
+  }
+  if (alteraCompra) {
+    return { functionCallingConfig: { mode: 'ANY', allowedFunctionNames: ['preparar_alteracao_compra_programada', 'buscar_transacoes_para_compra_realizada'] } };
+  }
+  if (cadastroCompra) {
+    return { functionCallingConfig: { mode: 'ANY', allowedFunctionNames: ['preparar_novas_compras', 'planejar_compra_hipotetica'] } };
+  }
+  return null;
+}
+
 app.post('/api/assistente', verificarToken, async (req, res) => {
   if (!process.env.GEMINI_API_KEY) {
     return res.status(503).json({
@@ -5031,11 +5544,12 @@ app.post('/api/assistente', verificarToken, async (req, res) => {
 
   const ferramentasUsadas = new Set();
   let acaoPendente = null;
+  const roteamentoOperacional = detectarRoteamentoOperacionalAssistente(mensagem);
   const hoje = new Date().toISOString().slice(0, 10);
   const instructions = `Você é o Assistente Financeiro de um aplicativo de finanças pessoais. Data atual do servidor: ${hoje}.
 Responda em português do Brasil, de forma direta, clara e útil.
 Você não pode alterar dados diretamente. Nunca afirme que criou, editou, excluiu, categorizou, conciliou ou alterou dados. Você pode preparar propostas estruturadas de criação ou alteração de Compras Programadas e Contas Previstas, categorização de lançamentos e conciliação de Contas Previstas com transações reais, mas qualquer gravação só ocorre depois de confirmação explícita do usuário na interface.
-Para perguntas sobre dados financeiros do usuário, use as ferramentas disponíveis. Não invente números, categorias, saldos ou lançamentos. Se o usuário perguntar sobre uma compra que já está cadastrada, quando comprar, qual parcelamento escolher ou qual cenário preserva melhor o caixa, use comparar_cenarios_compra_programada antes de recomendar. Se o usuário estiver PEDINDO UMA DECISÃO sobre uma compra nova, como melhor data, melhor parcelamento, impacto no caixa ou se cabe no orçamento, use planejar_compra_hipotetica. Se ele apenas pedir para cadastrar/adicionar uma compra futura sem solicitar otimização, use preparar_novas_compras com status PLANEJADA. Se disser que já comprou, pagou ou adquiriu algo que ainda não estava cadastrado, use preparar_novas_compras com status COMPRADA e não simule uma compra que já aconteceu. Se trouxer várias compras na mesma mensagem, use preparar_novas_compras em lote. Quando disser que comprou algo que claramente já estava em Compras Programadas, como "a cadeira que estava na lista", use preparar_alteracao_compra_programada com MARCAR_COMPRADA para evitar duplicidade. Se o usuário pedir para adiar, editar, marcar como comprada ou cancelar uma compra programada existente, use obrigatoriamente preparar_alteracao_compra_programada. Se pedir para criar uma Conta Prevista, use preparar_nova_conta_prevista. Se pedir para adiar, editar ou cancelar uma Conta Prevista existente, use preparar_alteracao_conta_prevista. Se disser que uma Conta Prevista foi paga, recebida ou realizada, use preparar_conciliacao_conta_prevista para localizar a transação real; nunca altere o status diretamente. Se perguntar se existem Contas Previstas provavelmente já realizadas, use sugerir_conciliacoes_pendentes. Se pedir para categorizar um lançamento existente, use preparar_categorizacao_transacao e nunca invente uma categoria inexistente. Só peça criação de regra automática quando o usuário solicitar explicitamente que lançamentos semelhantes sejam categorizados da mesma forma. Não edite nem exclua transações por meio do assistente neste fluxo. Para campos que não serão alterados nessas ferramentas, use os sentinelas indicados no schema, como string vazia, 0 ou MANTER. Se faltarem dados indispensáveis para a alteração, peça-os antes de preparar. Para simulação de compra nova, se faltarem descrição, valor ou prazo/data limite, peça esses dados antes de planejar; na ausência de reserva mínima use 0, na ausência de prioridade use MEDIA e na ausência de limite de parcelas use 12. Para cadastro direto, descrição e valor positivo são obrigatórios; se a data não vier informada, preparar_novas_compras usa a data atual como referência. Interprete PIX, débito, dinheiro e pagamento único como A_VISTA e preserve o método em metodoPagamento. Preserve URLs recebidas no campo link e informações como usado/novo em condicao.
+Para perguntas sobre dados financeiros do usuário, use as ferramentas disponíveis. Não invente números, categorias, saldos ou lançamentos. Se o usuário perguntar sobre uma compra que já está cadastrada, quando comprar, qual parcelamento escolher ou qual cenário preserva melhor o caixa, use comparar_cenarios_compra_programada antes de recomendar. Se o usuário estiver PEDINDO UMA DECISÃO sobre uma compra nova, como melhor data, melhor parcelamento, impacto no caixa ou se cabe no orçamento, use planejar_compra_hipotetica. Se ele apenas pedir para cadastrar/adicionar uma compra futura sem solicitar otimização, use preparar_novas_compras com status PLANEJADA e exija data desejada. Se disser que já comprou, pagou ou adquiriu algo e a data real NÃO estiver clara, ou se pedir para localizar/associar o pagamento no extrato, use obrigatoriamente buscar_transacoes_para_compra_realizada; NUNCA assuma que foi hoje. Se a compra realizada já estiver em Compras Programadas, informe termoCompraExistente para a ferramenta localizar a compra antes de buscar o lançamento. Se a data real estiver explicitamente informada e não houver pedido de associação ao extrato, preparar_novas_compras pode ser usado com status COMPRADA. Se trouxer várias compras futuras na mesma mensagem, use preparar_novas_compras em lote. Se o usuário pedir para adiar, editar ou cancelar uma compra programada existente, use obrigatoriamente preparar_alteracao_compra_programada. Comandos operacionais claros como cadastrar, adicionar, marcar, associar, conciliar, cancelar ou adiar devem resultar em chamada de ferramenta; não responda apenas com instruções genéricas sobre como o usuário poderia fazer isso manualmente. Se pedir para criar uma Conta Prevista, use preparar_nova_conta_prevista. Se pedir para adiar, editar ou cancelar uma Conta Prevista existente, use preparar_alteracao_conta_prevista. Se disser que uma Conta Prevista foi paga, recebida ou realizada, use preparar_conciliacao_conta_prevista para localizar a transação real; nunca altere o status diretamente. Se perguntar se existem Contas Previstas provavelmente já realizadas, use sugerir_conciliacoes_pendentes. Se pedir para categorizar um lançamento existente, use preparar_categorizacao_transacao e nunca invente uma categoria inexistente. Só peça criação de regra automática quando o usuário solicitar explicitamente que lançamentos semelhantes sejam categorizados da mesma forma. Não edite nem exclua transações por meio do assistente neste fluxo. Para campos que não serão alterados nessas ferramentas, use os sentinelas indicados no schema, como string vazia, 0 ou MANTER. Se faltarem dados indispensáveis para a alteração, peça-os antes de preparar. Para simulação de compra nova, se faltarem descrição, valor ou prazo/data limite, peça esses dados antes de planejar; na ausência de reserva mínima use 0, na ausência de prioridade use MEDIA e na ausência de limite de parcelas use 12. Para cadastro direto, descrição, valor positivo e data são obrigatórios. Se uma compra já realizada não tiver data conhecida, não invente data: procure uma transação real com buscar_transacoes_para_compra_realizada. Interprete PIX, débito, dinheiro e pagamento único como A_VISTA e preserve o método em metodoPagamento. Preserve URLs recebidas no campo link e informações como usado/novo em condicao.
 Se os dados disponíveis não forem suficientes para responder, diga exatamente o que falta.
 Valores são em BRL. Diferencie fatos encontrados nos dados de interpretações ou sugestões. Ao explicar uma compra, cite a data, forma de pagamento, menor saldo projetado e se a reserva informada é preservada. Não trate o ranking como garantia de liquidez futura.
 Não exponha IDs internos, SQL, tokens, chaves ou detalhes técnicos do banco.
@@ -5045,7 +5559,11 @@ As ferramentas disponíveis são exclusivamente de consulta e já estão limitad
   try {
     let response = null;
     for (let rodada = 0; rodada < 5; rodada += 1) {
-      response = await chamarGeminiAssistente({ contents, instructions });
+      response = await chamarGeminiAssistente({
+        contents,
+        instructions,
+        toolConfig: rodada === 0 ? roteamentoOperacional : null,
+      });
 
       const conteudoModelo = response?.candidates?.[0]?.content;
       if (!conteudoModelo?.parts?.length) {

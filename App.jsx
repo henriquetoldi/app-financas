@@ -2217,6 +2217,33 @@ function TelaAssistenteFinanceiro({ token, onVoltar }) {
     );
   };
 
+  const confirmarConciliacaoCompraSugerida = (acao, candidato, indice) => {
+    if (!acao || !candidato || acao.confirmada || acaoSalvandoIndice !== null) return;
+    pedirConfirmacao(
+      acao.compraId ? 'Associar compra ao lançamento' : 'Registrar compra pelo lançamento',
+      `Usar ${candidato.descricao} · ${formatarMoeda(candidato.valor)} · ${formatarData(candidato.data)} como pagamento de ${acao.compra?.descricao}?`,
+      async () => {
+        setAcaoSalvandoIndice(indice);
+        try {
+          await axios.post(`${API_URL}/compras-programadas/conciliar-transacao`, {
+            compraId: acao.compraId || null,
+            compra: acao.compraNova || null,
+            transacaoId: candidato.transacaoId,
+          }, { headers: { Authorization: `Bearer ${token}` } });
+          setMensagens((atuais) => atuais.map((item, posicao) => posicao === indice
+            ? { ...item, acaoPendente: { ...item.acaoPendente, confirmada: true, candidatoConfirmado: candidato } }
+            : item));
+          mostrarToast(acao.compraId ? 'Compra associada ao lançamento.' : 'Compra registrada e associada ao lançamento.');
+        } catch (error) {
+          mostrarToast(error.response?.data?.erro || 'Não foi possível associar a compra ao lançamento.', 'erro');
+        } finally {
+          setAcaoSalvandoIndice(null);
+        }
+      },
+      { labelConfirmar: 'Confirmar associação', corConfirmar: '#2563eb' }
+    );
+  };
+
   const confirmarAlteracaoSugerida = (acao, indice) => {
     if (!acao?.compraId || !acao?.payload || acao.confirmada || acaoSalvandoIndice !== null) return;
     const ehCancelamento = acao.acao === 'CANCELAR';
@@ -2369,6 +2396,10 @@ function TelaAssistenteFinanceiro({ token, onVoltar }) {
         .assistente-lote-item { background: white; border: 1px solid #dbeafe; border-radius: 10px; padding: 10px; }
         .assistente-lote-item-topo { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; }
         .assistente-lote-item small { color: #64748b; }
+        .assistente-candidatos { display: grid; gap: 8px; margin: 10px 0 12px; }
+        .assistente-candidato { background: white; border: 1px solid #dbeafe; border-radius: 10px; padding: 10px; }
+        .assistente-candidato-topo { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; }
+        .assistente-candidato-motivos { color: #64748b; font-size: 12px; margin: 5px 0 8px; }
         .assistente-disclaimer { margin-top: 9px; color: #64748b; font-size: 11px; line-height: 1.4; }
         @media (max-width: 720px) {
           .assistente-msg { max-width: 94%; }
@@ -2395,6 +2426,28 @@ function TelaAssistenteFinanceiro({ token, onVoltar }) {
             <div key={`${mensagem.role}-${indice}`} className={`assistente-msg ${mensagem.role === 'user' ? 'assistente-msg-user' : 'assistente-msg-assistant'} ${mensagem.erro ? 'assistente-msg-error' : ''}`}>
               {mensagem.content}
               {mensagem.consultas?.length > 0 && <div className="assistente-consultas">{mensagem.consultas.map((consulta) => <span key={consulta} className="assistente-consulta">Consultou: {consulta}</span>)}</div>}
+              {mensagem.acaoPendente?.tipo === 'CONCILIAR_COMPRA_TRANSACAO' && (() => {
+                const acao = mensagem.acaoPendente;
+                const candidatos = Array.isArray(acao.candidatos) ? acao.candidatos : [];
+                return <div className="assistente-acao">
+                  <strong>🔎 {acao.compraId ? 'Associar compra a um lançamento' : 'Encontrei possíveis pagamentos'}</strong>
+                  <div className="assistente-acao-grid">
+                    <div className="assistente-acao-item"><small>Compra</small><strong>{acao.compra?.descricao}</strong><div>{formatarMoeda(acao.compra?.valor)}</div></div>
+                    <div className="assistente-acao-item"><small>Candidatos</small><strong>{candidatos.length}</strong><div>Escolha o lançamento correto</div></div>
+                  </div>
+                  <div className="assistente-candidatos">
+                    {candidatos.map((candidato) => <div className="assistente-candidato" key={candidato.transacaoId}>
+                      <div className="assistente-candidato-topo">
+                        <div><strong>{candidato.descricao}</strong><div>{formatarMoeda(candidato.valor)} · {formatarData(candidato.data)} · {candidato.conta || '-'}</div></div>
+                        <span>{candidato.confianca === 'ALTA' ? '🟢' : candidato.confianca === 'MEDIA' ? '🟡' : '⚪'} {candidato.confianca}</span>
+                      </div>
+                      <div className="assistente-candidato-motivos">{(candidato.motivos || []).join(' · ')}</div>
+                      {!acao.confirmada && <Btn variant="secondary" size="sm" onClick={() => confirmarConciliacaoCompraSugerida(acao, candidato, indice)} disabled={acaoSalvandoIndice !== null}>{acaoSalvandoIndice === indice ? 'Associando...' : 'Usar este lançamento'}</Btn>}
+                    </div>)}
+                  </div>
+                  {acao.confirmada && <span className="assistente-acao-confirmada">✅ Compra associada a {acao.candidatoConfirmado?.descricao || 'lançamento confirmado'}</span>}
+                </div>;
+              })()}
               {mensagem.acaoPendente?.tipo === 'CRIAR_COMPRAS_LOTE' && (() => {
                 const acao = mensagem.acaoPendente;
                 const itens = Array.isArray(acao.itens) ? acao.itens : [];
