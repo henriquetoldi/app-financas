@@ -3214,6 +3214,22 @@ app.post('/api/compras-programadas/conciliar-transacao', verificarToken, async (
         status: 'COMPRADA',
       });
       await validarRelacionamentosCompraProgramada(usuarioId, payload);
+
+      const possivelDuplicada = await client.query(
+        `SELECT id, descricao, valor_estimado, status
+         FROM compras_programadas
+         WHERE usuario_id = $1
+           AND status IN ('PLANEJADA', 'ADIADA', 'COMPRADA')
+           AND LOWER(descricao) = LOWER($2)
+           AND ABS(valor_estimado - $3::numeric) <= GREATEST(5, ABS($3::numeric) * 0.15)
+         ORDER BY criado_em DESC
+         LIMIT 1`,
+        [usuarioId, payload.descricao, payload.valorEstimado]
+      );
+      if (possivelDuplicada.rows.length > 0) {
+        throw new Error('Já existe uma Compra Programada compatível com essa descrição e valor. Associe o lançamento à compra existente em vez de criar uma duplicata.');
+      }
+
       const insert = await client.query(
         `INSERT INTO compras_programadas (
           usuario_id, descricao, valor_estimado, data_desejada, prioridade, forma_pagamento,
@@ -4250,8 +4266,9 @@ async function ferramentaBuscarTransacoesCompraRealizada(usuarioId, args = {}) {
   }
 
   let compraExistente = null;
+  let comprasResult = null;
   if (termoCompraExistente) {
-    const comprasResult = await pool.query(
+    comprasResult = await pool.query(
       `SELECT * FROM compras_programadas
        WHERE usuario_id = $1
          AND status IN ('PLANEJADA', 'ADIADA', 'COMPRADA')
@@ -4263,20 +4280,42 @@ async function ferramentaBuscarTransacoesCompraRealizada(usuarioId, args = {}) {
     if (comprasResult.rows.length === 0) {
       return { encontrada: false, motivo: `Nenhuma Compra Programada corresponde a "${termoCompraExistente}".` };
     }
-    if (comprasResult.rows.length > 1) {
-      return {
-        encontrada: false,
-        ambigua: true,
-        motivo: 'Há mais de uma Compra Programada correspondente. Peça ao usuário para indicar qual delas foi comprada.',
-        opcoes: comprasResult.rows.map((item) => ({
-          descricao: item.descricao,
-          valor: Number(item.valor_estimado || 0),
-          dataDesejada: String(item.data_desejada || '').slice(0, 10),
-          status: item.status,
-        })),
-      };
+  } else if (descricaoInformada) {
+    const valoresCompra = [usuarioId, descricaoInformada];
+    let filtroValor = '';
+    if (Number.isFinite(valorInformado) && valorInformado > 0) {
+      valoresCompra.push(valorInformado);
+      const indiceValor = valoresCompra.length;
+      filtroValor = `AND ABS(valor_estimado - $${indiceValor}::numeric) <= GREATEST(5, ABS($${indiceValor}::numeric) * 0.15)`;
     }
-    compraExistente = comprasResult.rows[0];
+    comprasResult = await pool.query(
+      `SELECT * FROM compras_programadas
+       WHERE usuario_id = $1
+         AND status IN ('PLANEJADA', 'ADIADA', 'COMPRADA')
+         AND LOWER(descricao) = LOWER($2)
+         ${filtroValor}
+       ORDER BY criado_em DESC
+       LIMIT 5`,
+      valoresCompra
+    );
+  }
+
+  if (comprasResult?.rows?.length > 1) {
+    return {
+      encontrada: false,
+      ambigua: true,
+      motivo: 'Há mais de uma Compra Programada correspondente. Peça ao usuário para indicar qual delas foi comprada.',
+      opcoes: comprasResult.rows.map((item) => ({
+        descricao: item.descricao,
+        valor: Number(item.valor_estimado || 0),
+        dataDesejada: String(item.data_desejada || '').slice(0, 10),
+        status: item.status,
+      })),
+    };
+  }
+  if (comprasResult?.rows?.length === 1) compraExistente = comprasResult.rows[0];
+
+  if (compraExistente) {
     const jaVinculada = await pool.query(
       `SELECT id FROM conciliacoes_compras WHERE compra_id = $1 AND status = 'CONFIRMADA' LIMIT 1`,
       [compraExistente.id]
@@ -6837,8 +6876,22 @@ app.delete('/api/transacoes/:id', verificarToken, async (req, res) => {
        WHERE ca.transacao_id = $1 AND ca.status = 'CONFIRMADA' AND c.usuario_id = $2`,
       [req.params.id, req.usuario.usuario_id]
     );
-    if (conciliada.rows.length > 0 && req.query.confirmar !== 'true') {
-      return res.status(409).json({ erro: 'Transação conciliada. Confirme a exclusão para remover o vínculo.' });
+    const compraVinculada = await pool.query(
+      `SELECT cc.id, cp.descricao
+       FROM conciliacoes_compras cc
+       JOIN compras_programadas cp ON cp.id = cc.compra_id
+       WHERE cc.transacao_id = $1
+         AND cc.status = 'CONFIRMADA'
+         AND cc.usuario_id = $2
+       LIMIT 1`,
+      [req.params.id, req.usuario.usuario_id]
+    );
+    if ((conciliada.rows.length > 0 || compraVinculada.rows.length > 0) && req.query.confirmar !== 'true') {
+      const detalhes = [
+        conciliada.rows.length > 0 ? 'uma Conta Prevista' : null,
+        compraVinculada.rows.length > 0 ? `a compra “${compraVinculada.rows[0].descricao}”` : null,
+      ].filter(Boolean).join(' e ');
+      return res.status(409).json({ erro: `Transação vinculada a ${detalhes}. Confirme a exclusão para remover o vínculo.` });
     }
 
     const result = await pool.query(
