@@ -3571,7 +3571,8 @@ app.post('/api/compras-programadas/:id/simular', verificarToken, async (req, res
 // ASSISTENTE FINANCEIRO — SOMENTE LEITURA
 // ============================================================================
 
-const ASSISTENTE_GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite';
+const ASSISTENTE_GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite';
+const ASSISTENTE_GEMINI_MODEL_FALLBACK = 'gemini-3.1-flash-lite';
 const ASSISTENTE_MAX_HISTORICO = 10;
 const ASSISTENTE_MAX_MENSAGEM = 2000;
 
@@ -5530,41 +5531,63 @@ function extrairChamadasGeminiAssistente(response) {
     }));
 }
 
+function modelosGeminiAssistente() {
+  return Array.from(new Set([ASSISTENTE_GEMINI_MODEL, ASSISTENTE_GEMINI_MODEL_FALLBACK].filter(Boolean)));
+}
+
 async function chamarGeminiAssistente({ contents, instructions, toolConfig = null }) {
-  const modelo = encodeURIComponent(ASSISTENTE_GEMINI_MODEL);
   const nomesPermitidos = toolConfig?.functionCallingConfig?.allowedFunctionNames || null;
   const functionDeclarations = declaracoesGeminiAssistente(nomesPermitidos);
-  let response;
-  try {
-    response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent`, {
-      method: 'POST',
-      headers: {
-        'x-goog-api-key': process.env.GEMINI_API_KEY,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: instructions }] },
-        contents,
-        tools: [{ functionDeclarations }],
-        toolConfig: toolConfig || { functionCallingConfig: { mode: 'AUTO' } },
-        generationConfig: {
-          temperature: 0.2,
-          maxOutputTokens: 1200,
-        },
-      }),
-    });
-  } catch (error) {
-    throw new Error('Não foi possível conectar ao serviço gratuito de IA.');
-  }
+  const modelos = modelosGeminiAssistente();
+  let ultimoErro = null;
 
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
+  for (let indiceModelo = 0; indiceModelo < modelos.length; indiceModelo += 1) {
+    const nomeModelo = modelos[indiceModelo];
+    const modelo = encodeURIComponent(nomeModelo);
+    let response;
+    try {
+      response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent`, {
+        method: 'POST',
+        headers: {
+          'x-goog-api-key': process.env.GEMINI_API_KEY,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: instructions }] },
+          contents,
+          tools: [{ functionDeclarations }],
+          toolConfig: toolConfig || { functionCallingConfig: { mode: 'AUTO' } },
+          generationConfig: {
+            maxOutputTokens: 1200,
+          },
+        }),
+      });
+    } catch (error) {
+      throw new Error('Não foi possível conectar ao serviço gratuito de IA.');
+    }
+
+    const data = await response.json().catch(() => ({}));
+    if (response.ok) return { ...data, _modeloUsado: nomeModelo };
+
     const erro = new Error(data?.error?.message || `Falha no serviço Gemini (${response.status}).`);
     erro.statusGemini = response.status;
     erro.codigoGemini = data?.error?.status || null;
+    erro.modeloGemini = nomeModelo;
+    ultimoErro = erro;
+
+    const podeUsarFallback = response.status === 404 && indiceModelo < modelos.length - 1;
+    if (podeUsarFallback) {
+      console.warn('Modelo Gemini indisponível; tentando fallback compatível:', {
+        modelo: nomeModelo,
+        fallback: modelos[indiceModelo + 1],
+      });
+      continue;
+    }
+
     throw erro;
   }
-  return data;
+
+  throw ultimoErro || new Error('Nenhum modelo Gemini disponível para o Assistente.');
 }
 
 function normalizarHistoricoAssistente(historico) {
@@ -5665,7 +5688,7 @@ As ferramentas disponíveis são exclusivamente de consulta e já estão limitad
         if (!resposta) throw new Error('A IA não retornou uma resposta em texto.');
         return res.json({
           resposta,
-          modelo: ASSISTENTE_GEMINI_MODEL,
+          modelo: response?._modeloUsado || ASSISTENTE_GEMINI_MODEL,
           provedor: 'gemini-free-tier',
           consultas: Array.from(ferramentasUsadas).map((nome) => ROTULOS_FERRAMENTAS_ASSISTENTE[nome] || nome),
           acaoPendente,
@@ -5710,11 +5733,18 @@ As ferramentas disponíveis são exclusivamente de consulta e já estão limitad
       mensagem: error.message,
       statusGemini: error.statusGemini || null,
       codigoGemini: error.codigoGemini || null,
+      modeloGemini: error.modeloGemini || null,
     });
     if (error.statusGemini === 400) {
       return res.status(502).json({
         erro: 'O serviço de IA recusou a configuração desta solicitação. Tente novamente; se persistir, revise as ferramentas do Assistente.',
         codigo: 'GEMINI_REQUISICAO_INVALIDA',
+      });
+    }
+    if (error.statusGemini === 404) {
+      return res.status(503).json({
+        erro: 'O modelo configurado para o Assistente não está disponível. Tente novamente após atualizar a configuração do Gemini.',
+        codigo: 'GEMINI_MODELO_INDISPONIVEL',
       });
     }
     if (error.statusGemini === 429) {
