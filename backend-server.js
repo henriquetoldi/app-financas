@@ -2904,7 +2904,7 @@ app.post('/api/compras-programadas', verificarToken, async (req, res) => {
       `INSERT INTO compras_programadas (
         usuario_id, descricao, valor_estimado, data_desejada, prioridade, forma_pagamento,
         parcelas, conta_id, categoria_macro_id, categoria_detalhada_id, status, observacao
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'PLANEJADA', $11)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
       RETURNING *`,
       [
         req.usuario.usuario_id,
@@ -2917,12 +2917,62 @@ app.post('/api/compras-programadas', verificarToken, async (req, res) => {
         payload.contaId || null,
         payload.categoriaMacroId || null,
         payload.categoriaDetalhadaId || null,
+        payload.status || 'PLANEJADA',
         payload.observacao || null,
       ]
     );
     res.status(201).json({ compra: result.rows[0] });
   } catch (error) {
     res.status(400).json({ erro: error.message });
+  }
+});
+
+app.post('/api/compras-programadas/lote', verificarToken, async (req, res) => {
+  const itens = Array.isArray(req.body?.itens) ? req.body.itens : [];
+  if (itens.length === 0) return res.status(400).json({ erro: 'Informe pelo menos uma compra para cadastrar.' });
+  if (itens.length > 30) return res.status(400).json({ erro: 'Cadastre no máximo 30 compras por vez.' });
+
+  let client;
+  try {
+    const payloads = itens.map((item) => validarPayloadCompraProgramada(item));
+    for (const payload of payloads) {
+      await validarRelacionamentosCompraProgramada(req.usuario.usuario_id, payload);
+    }
+
+    client = await pool.connect();
+    await client.query('BEGIN');
+    const compras = [];
+    for (const payload of payloads) {
+      const result = await client.query(
+        `INSERT INTO compras_programadas (
+          usuario_id, descricao, valor_estimado, data_desejada, prioridade, forma_pagamento,
+          parcelas, conta_id, categoria_macro_id, categoria_detalhada_id, status, observacao
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        RETURNING *`,
+        [
+          req.usuario.usuario_id,
+          payload.descricao,
+          payload.valorEstimado,
+          payload.dataDesejada,
+          payload.prioridade,
+          payload.formaPagamento,
+          payload.parcelas,
+          payload.contaId || null,
+          payload.categoriaMacroId || null,
+          payload.categoriaDetalhadaId || null,
+          payload.status || 'PLANEJADA',
+          payload.observacao || null,
+        ]
+      );
+      compras.push(result.rows[0]);
+    }
+    await client.query('COMMIT');
+    res.status(201).json({ compras });
+  } catch (error) {
+    if (client) await client.query('ROLLBACK').catch(() => {});
+    res.status(400).json({ erro: error.message });
+  } finally {
+    client?.release();
   }
 });
 
@@ -3867,6 +3917,133 @@ async function ferramentaPrepararAlteracaoCompraProgramada(usuarioId, args = {})
   };
 }
 
+async function ferramentaPrepararNovasCompras(usuarioId, args = {}) {
+  const itens = Array.isArray(args.itens) ? args.itens : [];
+  if (itens.length === 0) return { preparada: false, motivo: 'Informe pelo menos uma compra.' };
+  if (itens.length > 30) return { preparada: false, motivo: 'Prepare no máximo 30 compras por vez.' };
+
+  const hoje = new Date().toISOString().slice(0, 10);
+  const preparados = [];
+  const pendencias = [];
+  const statusPermitidos = ['PLANEJADA', 'COMPRADA'];
+  const condicoesPermitidas = ['NOVO', 'USADO', 'NAO_INFORMADO'];
+
+  for (let indice = 0; indice < itens.length; indice += 1) {
+    const item = itens[indice] || {};
+    const descricao = String(item.descricao || '').trim();
+    const valorEstimado = Number(item.valorEstimado || 0);
+    const status = String(item.status || 'PLANEJADA').trim().toUpperCase();
+    const prioridade = String(item.prioridade || 'MEDIA').trim().toUpperCase();
+    const dataInformada = String(item.dataDesejada || '').trim();
+    const dataDesejada = dataInformada ? normalizarDataImportacao(dataInformada) : hoje;
+    const formaInformada = String(item.formaPagamento || '').trim().toUpperCase();
+    const parcelasInformadas = Number(item.parcelas || 0);
+    const formaPagamento = formaInformada || (parcelasInformadas >= 2 ? 'PARCELADO' : 'A_VISTA');
+    const parcelas = formaPagamento === 'PARCELADO' ? parcelasInformadas : 1;
+    const metodoPagamento = String(item.metodoPagamento || '').trim();
+    const condicao = String(item.condicao || 'NAO_INFORMADO').trim().toUpperCase();
+    const link = String(item.link || '').trim();
+    const observacaoOriginal = String(item.observacao || '').trim();
+
+    const faltas = [];
+    if (!descricao) faltas.push('descrição');
+    if (!Number.isFinite(valorEstimado) || valorEstimado <= 0) faltas.push('valor positivo');
+    if (!statusPermitidos.includes(status)) faltas.push('status PLANEJADA ou COMPRADA');
+    if (!PRIORIDADES_COMPRA.includes(prioridade)) faltas.push('prioridade válida');
+    if (!dataDesejada) faltas.push('data válida');
+    if (!FORMAS_PAGAMENTO_COMPRA.includes(formaPagamento)) faltas.push('forma de pagamento válida');
+    if (formaPagamento === 'PARCELADO' && (!Number.isInteger(parcelas) || parcelas < 2 || parcelas > 60)) faltas.push('parcelas entre 2 e 60');
+    if (!condicoesPermitidas.includes(condicao)) faltas.push('condição NOVO, USADO ou NAO_INFORMADO');
+    if (status === 'PLANEJADA' && dataInformada && dataDesejada && dataDesejada < hoje) faltas.push('data futura ou atual para compra planejada');
+
+    if (faltas.length > 0) {
+      pendencias.push({ item: indice + 1, descricao: descricao || 'Sem descrição', faltam: faltas });
+      continue;
+    }
+
+    const existente = await pool.query(
+      `SELECT descricao, valor_estimado, data_desejada, status
+       FROM compras_programadas
+       WHERE usuario_id = $1
+         AND status IN ('PLANEJADA', 'ADIADA')
+         AND LOWER(descricao) = LOWER($2)
+       ORDER BY data_desejada ASC
+       LIMIT 1`,
+      [usuarioId, descricao]
+    );
+    if (existente.rows.length > 0) {
+      pendencias.push({
+        item: indice + 1,
+        descricao,
+        faltam: ['já existe uma Compra Programada ativa com a mesma descrição; use a alteração da compra existente para evitar duplicidade'],
+      });
+      continue;
+    }
+
+    const observacoes = [];
+    if (observacaoOriginal) observacoes.push(observacaoOriginal);
+    if (condicao === 'NOVO') observacoes.push('Condição: novo.');
+    if (condicao === 'USADO') observacoes.push('Condição: usado.');
+    if (metodoPagamento) observacoes.push(`Método de pagamento: ${metodoPagamento}.`);
+    if (link) observacoes.push(`Referência: ${link}`);
+    if (!dataInformada) observacoes.push(`Data não informada; usada a data atual (${hoje}) como referência.`);
+
+    const payload = {
+      descricao,
+      valorEstimado: Number(valorEstimado.toFixed(2)),
+      dataDesejada,
+      prioridade,
+      formaPagamento,
+      parcelas: formaPagamento === 'PARCELADO' ? parcelas : 1,
+      contaId: null,
+      categoriaMacroId: null,
+      categoriaDetalhadaId: null,
+      status,
+      observacao: observacoes.join(' ').trim() || null,
+    };
+
+    const detalhes = [
+      `Status: ${status === 'COMPRADA' ? 'Comprada' : 'Planejada'}`,
+      `Valor: ${Number(valorEstimado).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}`,
+      `Data: ${dataDesejada.split('-').reverse().join('/')}`,
+      `Pagamento: ${formaPagamento === 'PARCELADO' ? `${parcelas}x` : 'À vista'}${metodoPagamento ? ` · ${metodoPagamento}` : ''}`,
+    ];
+    if (condicao !== 'NAO_INFORMADO') detalhes.push(`Condição: ${condicao === 'USADO' ? 'Usado' : 'Novo'}`);
+    if (link) detalhes.push('Link de referência preservado');
+
+    preparados.push({ payload, detalhes });
+  }
+
+  if (pendencias.length > 0) {
+    return {
+      preparada: false,
+      motivo: 'Ainda faltam dados ou há possível duplicidade em uma ou mais compras. Resolva os itens abaixo antes de confirmar o lote.',
+      pendencias,
+      quantidadePreparada: preparados.length,
+    };
+  }
+
+  return {
+    preparada: true,
+    quantidade: preparados.length,
+    compras: preparados.map(({ payload }) => ({
+      descricao: payload.descricao,
+      valorEstimado: payload.valorEstimado,
+      dataDesejada: payload.dataDesejada,
+      status: payload.status,
+      formaPagamento: payload.formaPagamento,
+      parcelas: payload.parcelas,
+    })),
+    requerConfirmacao: true,
+    _acaoPendente: {
+      tipo: 'CRIAR_COMPRAS_LOTE',
+      rotuloAcao: preparados.length === 1 ? 'Registrar compra' : `Registrar ${preparados.length} compras`,
+      quantidade: preparados.length,
+      itens: preparados,
+    },
+  };
+}
+
 async function ferramentaPrepararNovaProvisao(usuarioId, args = {}) {
   const descricao = String(args.descricao || '').trim();
   const valorPrevisto = Number(args.valorPrevisto);
@@ -4564,6 +4741,41 @@ const FERRAMENTAS_ASSISTENTE = [
   },
   {
     type: 'function',
+    name: 'preparar_novas_compras',
+    description: 'Prepara, sem gravar, uma ou várias Compras Programadas para cadastro direto. Use quando o usuário já comprou/pagou algo, quando pedir apenas para cadastrar uma compra futura sem solicitar simulação, ou quando trouxer vários itens de uma vez. Compras já realizadas devem usar status COMPRADA; compras futuras, PLANEJADA. Links, condição e método de pagamento são preservados na observação. Não use para decidir melhor data ou parcelamento: nesse caso use planejar_compra_hipotetica.',
+    strict: true,
+    parameters: {
+      type: 'object',
+      properties: {
+        itens: {
+          type: 'array',
+          description: 'Lista de compras a preparar. Use um único item quando houver apenas uma compra.',
+          items: {
+            type: 'object',
+            properties: {
+              descricao: { type: 'string', description: 'Descrição clara da compra.' },
+              valorEstimado: { type: 'number', minimum: 0, description: 'Valor total em BRL. Use 0 se não foi informado para que a ferramenta peça o dado faltante.' },
+              dataDesejada: { type: 'string', description: 'Data AAAA-MM-DD. Use string vazia se não informada; a ferramenta usará a data atual como referência.' },
+              status: { type: 'string', enum: ['PLANEJADA', 'COMPRADA'], description: 'COMPRADA quando o usuário disser que já comprou/pagou/adquiriu; PLANEJADA para intenção futura.' },
+              prioridade: { type: 'string', enum: ['BAIXA', 'MEDIA', 'ALTA', 'ESSENCIAL'], description: 'Use MEDIA quando não informada.' },
+              formaPagamento: { type: 'string', enum: ['A_VISTA', 'PARCELADO'], description: 'PIX, débito, dinheiro ou pagamento único devem ser A_VISTA; use PARCELADO quando houver 2 ou mais parcelas.' },
+              parcelas: { type: 'integer', minimum: 0, maximum: 60, description: '1 para à vista; quantidade real para parcelado. Use 0 apenas quando a forma ainda não puder ser inferida.' },
+              metodoPagamento: { type: 'string', description: 'Ex.: PIX, cartão de crédito, cartão de débito, dinheiro; string vazia se não informado.' },
+              condicao: { type: 'string', enum: ['NOVO', 'USADO', 'NAO_INFORMADO'], description: 'Condição do produto quando informada.' },
+              link: { type: 'string', description: 'URL de referência do produto ou string vazia.' },
+              observacao: { type: 'string', description: 'Contexto adicional, por exemplo Novo apartamento, ou string vazia.' },
+            },
+            required: ['descricao', 'valorEstimado', 'dataDesejada', 'status', 'prioridade', 'formaPagamento', 'parcelas', 'metodoPagamento', 'condicao', 'link', 'observacao'],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ['itens'],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: 'function',
     name: 'preparar_alteracao_compra_programada',
     description: 'Prepara, sem gravar, uma alteração em uma Compra Programada existente. Use para adiar, editar dados, marcar como comprada ou cancelar. A alteração só será aplicada depois de confirmação explícita no frontend.',
     strict: true,
@@ -4699,6 +4911,7 @@ const ROTULOS_FERRAMENTAS_ASSISTENTE = {
   compras_programadas_por_mes: 'compras programadas',
   comparar_cenarios_compra_programada: 'comparação de cenários de compra',
   planejar_compra_hipotetica: 'planejamento de nova compra',
+  preparar_novas_compras: 'cadastro de compras',
   preparar_alteracao_compra_programada: 'alteração de compra programada',
   preparar_nova_conta_prevista: 'nova conta prevista',
   preparar_alteracao_conta_prevista: 'alteração de conta prevista',
@@ -4715,6 +4928,7 @@ async function executarFerramentaAssistente(usuarioId, nome, args) {
   if (nome === 'compras_programadas_por_mes') return ferramentaComprasProgramadas(usuarioId, args);
   if (nome === 'comparar_cenarios_compra_programada') return ferramentaCompararCompraProgramada(usuarioId, args);
   if (nome === 'planejar_compra_hipotetica') return ferramentaPlanejarCompraHipotetica(usuarioId, args);
+  if (nome === 'preparar_novas_compras') return ferramentaPrepararNovasCompras(usuarioId, args);
   if (nome === 'preparar_alteracao_compra_programada') return ferramentaPrepararAlteracaoCompraProgramada(usuarioId, args);
   if (nome === 'preparar_nova_conta_prevista') return ferramentaPrepararNovaProvisao(usuarioId, args);
   if (nome === 'preparar_alteracao_conta_prevista') return ferramentaPrepararAlteracaoProvisao(usuarioId, args);
@@ -4821,7 +5035,7 @@ app.post('/api/assistente', verificarToken, async (req, res) => {
   const instructions = `Você é o Assistente Financeiro de um aplicativo de finanças pessoais. Data atual do servidor: ${hoje}.
 Responda em português do Brasil, de forma direta, clara e útil.
 Você não pode alterar dados diretamente. Nunca afirme que criou, editou, excluiu, categorizou, conciliou ou alterou dados. Você pode preparar propostas estruturadas de criação ou alteração de Compras Programadas e Contas Previstas, categorização de lançamentos e conciliação de Contas Previstas com transações reais, mas qualquer gravação só ocorre depois de confirmação explícita do usuário na interface.
-Para perguntas sobre dados financeiros do usuário, use as ferramentas disponíveis. Não invente números, categorias, saldos ou lançamentos. Se o usuário perguntar sobre uma compra que já está cadastrada, quando comprar, qual parcelamento escolher ou qual cenário preserva melhor o caixa, use comparar_cenarios_compra_programada antes de recomendar. Se ele estiver planejando uma compra nova que ainda não está cadastrada, use obrigatoriamente planejar_compra_hipotetica. Se o usuário pedir para adiar, editar, marcar como comprada ou cancelar uma compra programada existente, use obrigatoriamente preparar_alteracao_compra_programada. Se pedir para criar uma Conta Prevista, use preparar_nova_conta_prevista. Se pedir para adiar, editar ou cancelar uma Conta Prevista existente, use preparar_alteracao_conta_prevista. Se disser que uma Conta Prevista foi paga, recebida ou realizada, use preparar_conciliacao_conta_prevista para localizar a transação real; nunca altere o status diretamente. Se perguntar se existem Contas Previstas provavelmente já realizadas, use sugerir_conciliacoes_pendentes. Se pedir para categorizar um lançamento existente, use preparar_categorizacao_transacao e nunca invente uma categoria inexistente. Só peça criação de regra automática quando o usuário solicitar explicitamente que lançamentos semelhantes sejam categorizados da mesma forma. Não edite nem exclua transações por meio do assistente neste fluxo. Para campos que não serão alterados nessas ferramentas, use os sentinelas indicados no schema, como string vazia, 0 ou MANTER. Se faltarem dados indispensáveis para a alteração, peça-os antes de preparar. Se faltarem descrição, valor ou prazo/data limite para uma compra nova, peça esses dados antes de planejar. Na ausência de reserva mínima use 0, na ausência de prioridade use MEDIA e na ausência de limite de parcelas use 12.
+Para perguntas sobre dados financeiros do usuário, use as ferramentas disponíveis. Não invente números, categorias, saldos ou lançamentos. Se o usuário perguntar sobre uma compra que já está cadastrada, quando comprar, qual parcelamento escolher ou qual cenário preserva melhor o caixa, use comparar_cenarios_compra_programada antes de recomendar. Se o usuário estiver PEDINDO UMA DECISÃO sobre uma compra nova, como melhor data, melhor parcelamento, impacto no caixa ou se cabe no orçamento, use planejar_compra_hipotetica. Se ele apenas pedir para cadastrar/adicionar uma compra futura sem solicitar otimização, use preparar_novas_compras com status PLANEJADA. Se disser que já comprou, pagou ou adquiriu algo que ainda não estava cadastrado, use preparar_novas_compras com status COMPRADA e não simule uma compra que já aconteceu. Se trouxer várias compras na mesma mensagem, use preparar_novas_compras em lote. Quando disser que comprou algo que claramente já estava em Compras Programadas, como "a cadeira que estava na lista", use preparar_alteracao_compra_programada com MARCAR_COMPRADA para evitar duplicidade. Se o usuário pedir para adiar, editar, marcar como comprada ou cancelar uma compra programada existente, use obrigatoriamente preparar_alteracao_compra_programada. Se pedir para criar uma Conta Prevista, use preparar_nova_conta_prevista. Se pedir para adiar, editar ou cancelar uma Conta Prevista existente, use preparar_alteracao_conta_prevista. Se disser que uma Conta Prevista foi paga, recebida ou realizada, use preparar_conciliacao_conta_prevista para localizar a transação real; nunca altere o status diretamente. Se perguntar se existem Contas Previstas provavelmente já realizadas, use sugerir_conciliacoes_pendentes. Se pedir para categorizar um lançamento existente, use preparar_categorizacao_transacao e nunca invente uma categoria inexistente. Só peça criação de regra automática quando o usuário solicitar explicitamente que lançamentos semelhantes sejam categorizados da mesma forma. Não edite nem exclua transações por meio do assistente neste fluxo. Para campos que não serão alterados nessas ferramentas, use os sentinelas indicados no schema, como string vazia, 0 ou MANTER. Se faltarem dados indispensáveis para a alteração, peça-os antes de preparar. Para simulação de compra nova, se faltarem descrição, valor ou prazo/data limite, peça esses dados antes de planejar; na ausência de reserva mínima use 0, na ausência de prioridade use MEDIA e na ausência de limite de parcelas use 12. Para cadastro direto, descrição e valor positivo são obrigatórios; se a data não vier informada, preparar_novas_compras usa a data atual como referência. Interprete PIX, débito, dinheiro e pagamento único como A_VISTA e preserve o método em metodoPagamento. Preserve URLs recebidas no campo link e informações como usado/novo em condicao.
 Se os dados disponíveis não forem suficientes para responder, diga exatamente o que falta.
 Valores são em BRL. Diferencie fatos encontrados nos dados de interpretações ou sugestões. Ao explicar uma compra, cite a data, forma de pagamento, menor saldo projetado e se a reserva informada é preservada. Não trate o ranking como garantia de liquidez futura.
 Não exponha IDs internos, SQL, tokens, chaves ou detalhes técnicos do banco.
