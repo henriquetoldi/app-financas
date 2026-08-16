@@ -2083,7 +2083,7 @@ app.post('/api/importar/:arquivoId', verificarToken, async (req, res) => {
           } else {
             // Cartão: [data, descricao, categoria, valor, saldo]
             valor = parseValorNubank(partes[3] || partes[2]);
-            tipo = valor < 0 ? 'DEBITO' : 'CREDITO';
+            tipo = valor < 0 ? 'CREDITO' : 'DEBITO';
             valor = Math.abs(valor);
           }
 
@@ -2106,6 +2106,7 @@ app.post('/api/importar/:arquivoId', verificarToken, async (req, res) => {
 
         // Inserir transações
         let inseridas = 0, duplicadas = 0;
+        const transacoesImportadasIds = [];
 
         for (const tx of transacoes) {
           const existe = await pool.query(
@@ -2119,13 +2120,14 @@ app.post('/api/importar/:arquivoId', verificarToken, async (req, res) => {
           }
 
           const regra = await buscarRegraCompatível(req.usuario.usuario_id, tx.descricao);
+          const transacaoId = crypto.randomUUID();
 
           await pool.query(
             `INSERT INTO transacoes
              (id, conta_id, data, descricao, valor, tipo, categoria_id, categoria_origem, regra_categorizacao_id, hash_transacao, criado_em)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())`,
             [
-              crypto.randomUUID(),
+              transacaoId,
               contaId,
               tx.data,
               tx.descricao,
@@ -2139,13 +2141,17 @@ app.post('/api/importar/:arquivoId', verificarToken, async (req, res) => {
           );
 
           inseridas++;
+          transacoesImportadasIds.push(transacaoId);
         }
+
+        const pagamentosCartao = await conciliarPagamentosCartaoImportados(req.usuario.usuario_id, transacoesImportadasIds);
 
         res.json({
           sucesso: true,
           contaId,
           inseridas,
           duplicadas,
+          pagamentosCartaoPareados: pagamentosCartao.pareadas,
           total: transacoes.length
         });
       } catch (parseError) {
@@ -2600,6 +2606,7 @@ app.post('/api/importacoes/xlsx/confirmar', verificarToken, async (req, res) => 
     let atualizadas = 0;
     let ignoradas = 0;
     const transacaoPorTempId = new Map();
+    const transacoesImportadasIds = new Set();
 
     for (const tx of (preview.transacoesValidadas || [])) {
       const contaResolvida = contasResolvidas.get(String(tx.conta || '').trim());
@@ -2617,6 +2624,7 @@ app.post('/api/importacoes/xlsx/confirmar', verificarToken, async (req, res) => 
             tx.transacaoIdConfirmada = transacaoInseridaId;
             inseridas++;
             transacaoPorTempId.set(tx.hash_transacao || hash, transacaoInseridaId);
+            transacoesImportadasIds.add(transacaoInseridaId);
           }
         } else {
           ignoradas++;
@@ -2633,11 +2641,16 @@ app.post('/api/importacoes/xlsx/confirmar', verificarToken, async (req, res) => 
       transacaoPorTempId.set(tx.hash_transacao || hash, existente.id);
 
       if (alteracoes.length > 0 && atualizarExistentes) {
-        if (await atualizarTransacaoImportacao(req.usuario.usuario_id, { ...txComConta, transacaoId: existente.id })) atualizadas++;
+        if (await atualizarTransacaoImportacao(req.usuario.usuario_id, { ...txComConta, transacaoId: existente.id })) {
+          atualizadas++;
+          transacoesImportadasIds.add(existente.id);
+        }
       } else {
         ignoradas++;
       }
     }
+
+    const pagamentosCartao = await conciliarPagamentosCartaoImportados(req.usuario.usuario_id, [...transacoesImportadasIds]);
 
     let conciliacoesAplicadas = 0;
 
@@ -2670,6 +2683,7 @@ app.post('/api/importacoes/xlsx/confirmar', verificarToken, async (req, res) => 
       atualizadas,
       ignoradas,
       conciliacoesAplicadas,
+      pagamentosCartaoPareados: pagamentosCartao.pareadas,
       erros: preview.erros.length,
       mensagem: `Importação confirmada: ${inseridas} inserida(s), ${atualizadas} atualizada(s), ${ignoradas} sem alteração e ${conciliacoesAplicadas} conciliação(ões) aplicada(s).`,
     });
@@ -2719,6 +2733,7 @@ app.post('/api/importar', verificarToken, async (req, res) => {
 
     let inseridas = 0;
     let duplicadas = 0;
+    const transacoesImportadasIds = [];
 
     for (const tx of transacoesValidadas) {
       const hash = gerarHashTransacao(tx, contaId);
@@ -2750,8 +2765,11 @@ app.post('/api/importar', verificarToken, async (req, res) => {
         duplicadas++;
       } else {
         inseridas++;
+        transacoesImportadasIds.push(insert.rows[0].id);
       }
     }
+
+    const pagamentosCartao = await conciliarPagamentosCartaoImportados(req.usuario.usuario_id, transacoesImportadasIds);
 
     const arquivoHash = gerarHashArquivo(nome_arquivo, transacoesValidadas);
     const backup = await pool.query(
@@ -2784,6 +2802,7 @@ app.post('/api/importar', verificarToken, async (req, res) => {
       contaId,
       inseridas,
       duplicadas,
+      pagamentosCartaoPareados: pagamentosCartao.pareadas,
       total: transacoesValidadas.length,
       backupId: backup.rows[0].id,
       mensagem: `✅ ${inseridas} transações importadas. Backup agendado em segundo plano.`,
@@ -6717,12 +6736,158 @@ function descricaoIndicaTransferencia(descricao) {
   return /\b(PIX|TRANSFERENCIA|TRANSFERÊNCIA|TED|DOC|ENVIO|ENVIADO|RECEBIDA|RECEBIDO|ENTRE CONTAS)\b/i.test(String(descricao || '').normalize('NFD').replace(/[\u0300-\u036f]/g, ''));
 }
 
+function descricaoIndicaPagamentoCartao(descricao) {
+  const texto = String(descricao || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (/\bPAGAMENTO\s+(RECEBIDO|DE\s+FATURA|DA\s+FATURA|FATURA)\b/.test(texto)) return true;
+  return /\bPAGAMENTO\s+EM\s+\d{1,2}\s+(JAN|FEV|MAR|ABR|MAI|JUN|JUL|AGO|SET|OUT|NOV|DEZ)\b/.test(texto);
+}
+
+function contaEhCartao(conta) {
+  return String(conta?.conta_tipo || conta?.tipo || '').trim().toUpperCase() === 'CREDIT_CARD';
+}
+
+async function conciliarPagamentosCartaoImportados(usuarioId, transacaoIds = []) {
+  const ids = [...new Set((transacaoIds || [])
+    .map((id) => String(id || '').trim())
+    .filter((id) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)))];
+  if (ids.length === 0) return { pareadas: 0, ambiguas: 0, semContrapartida: 0 };
+
+  const importadas = new Set(ids);
+  const intervaloResult = await pool.query(
+    `SELECT MIN(t.data) AS data_inicial, MAX(t.data) AS data_final
+     FROM transacoes t
+     JOIN contas c ON c.id = t.conta_id
+     WHERE c.usuario_id = $1
+       AND t.id = ANY($2::uuid[])
+       AND t.deletado_em IS NULL`,
+    [usuarioId, ids]
+  );
+  const dataInicial = intervaloResult.rows[0]?.data_inicial;
+  const dataFinal = intervaloResult.rows[0]?.data_final;
+  if (!dataInicial || !dataFinal) return { pareadas: 0, ambiguas: 0, semContrapartida: 0 };
+
+  const pagamentosResult = await pool.query(
+    `SELECT t.id, t.data, t.descricao, t.valor, t.tipo, t.conta_id,
+            c.nome AS conta_nome, c.tipo AS conta_tipo
+     FROM transacoes t
+     JOIN contas c ON c.id = t.conta_id
+     WHERE c.usuario_id = $1
+       AND c.tipo = 'CREDIT_CARD'
+       AND t.tipo = 'CREDITO'
+       AND t.data BETWEEN $2::date AND $3::date
+       AND t.deletado_em IS NULL
+       AND COALESCE(t.eh_transferencia_interna, false) = false
+     ORDER BY t.data ASC, t.criado_em ASC, t.id ASC`,
+    [usuarioId, dataInicial, dataFinal]
+  );
+
+  let pareadas = 0;
+  let ambiguas = 0;
+  let semContrapartida = 0;
+
+  for (const pagamento of pagamentosResult.rows) {
+    if (!descricaoIndicaPagamentoCartao(pagamento.descricao)) continue;
+
+    const candidatosResult = await pool.query(
+      `SELECT t.id, t.data, t.descricao, t.valor, t.tipo, t.conta_id,
+              c.nome AS conta_nome, c.tipo AS conta_tipo
+       FROM transacoes t
+       JOIN contas c ON c.id = t.conta_id
+       WHERE c.usuario_id = $1
+         AND c.tipo <> 'CREDIT_CARD'
+         AND t.tipo = 'DEBITO'
+         AND t.data = $2::date
+         AND ABS(ABS(t.valor) - ABS($3::numeric)) <= 0.01
+         AND t.deletado_em IS NULL
+         AND COALESCE(t.eh_transferencia_interna, false) = false
+       ORDER BY t.criado_em ASC, t.id ASC`,
+      [usuarioId, pagamento.data, pagamento.valor]
+    );
+
+    let candidatos = candidatosResult.rows;
+    if (!importadas.has(String(pagamento.id))) {
+      candidatos = candidatos.filter((tx) => importadas.has(String(tx.id)));
+    }
+
+    if (candidatos.length === 0) {
+      if (importadas.has(String(pagamento.id))) semContrapartida++;
+      continue;
+    }
+
+    const pontuar = (tx) => descricaoIndicaPagamentoCartao(tx.descricao)
+      ? 3
+      : descricaoIndicaTransferencia(tx.descricao) ? 2 : 1;
+    const maiorPontuacao = Math.max(...candidatos.map(pontuar));
+    const melhores = candidatos.filter((tx) => pontuar(tx) === maiorPontuacao);
+    if (melhores.length !== 1) {
+      ambiguas++;
+      continue;
+    }
+
+    const debito = melhores[0];
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const bloqueadas = await client.query(
+        `SELECT t.id
+         FROM transacoes t
+         JOIN contas c ON c.id = t.conta_id
+         WHERE c.usuario_id = $1
+           AND t.id = ANY($2::uuid[])
+           AND t.deletado_em IS NULL
+           AND COALESCE(t.eh_transferencia_interna, false) = false
+         FOR UPDATE OF t`,
+        [usuarioId, [debito.id, pagamento.id]]
+      );
+
+      if (bloqueadas.rows.length !== 2) {
+        await client.query('ROLLBACK');
+        continue;
+      }
+
+      const grupoId = crypto.randomUUID();
+      const atualizadas = await client.query(
+        `UPDATE transacoes
+         SET eh_transferencia_interna = true,
+             transferencia_grupo_id = $1,
+             atualizado_em = NOW()
+         WHERE id = ANY($2::uuid[])
+         RETURNING id`,
+        [grupoId, [debito.id, pagamento.id]]
+      );
+
+      if (atualizadas.rows.length !== 2) {
+        await client.query('ROLLBACK');
+        continue;
+      }
+
+      await client.query('COMMIT');
+      pareadas++;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  return { pareadas, ambiguas, semContrapartida };
+}
+
 function montarTransacaoTransferencia(tx) {
   return {
     id: tx.id,
     data: tx.data,
     conta_id: tx.conta_id,
     conta_nome: tx.conta_nome,
+    conta_tipo: tx.conta_tipo || null,
     descricao: tx.descricao,
     valor: Number(tx.valor || 0),
     tipo: tx.tipo,
@@ -6789,6 +6954,7 @@ async function buscarTransacoesUsuario(usuarioId, filtros = {}) {
             COALESCE(t.categoria_macro_id, CASE WHEN cat.categoria_pai_id IS NULL THEN t.categoria_id ELSE cat.categoria_pai_id END) AS categoria_macro_id,
             COALESCE(t.categoria_detalhada_id, CASE WHEN cat.categoria_pai_id IS NOT NULL THEN t.categoria_id ELSE NULL END) AS categoria_detalhada_id,
             conta.nome AS conta_nome,
+            conta.tipo AS conta_tipo,
             cat.nome AS categoria_nome,
             COALESCE(cm.nome, cat_macro.nome, CASE WHEN cat.categoria_pai_id IS NULL THEN cat.nome ELSE NULL END) AS categoria_macro_nome,
             COALESCE(cd.nome, CASE WHEN cat.categoria_pai_id IS NOT NULL THEN cat.nome ELSE NULL END) AS categoria_detalhada_nome,
@@ -6880,7 +7046,9 @@ app.get('/api/transferencias-internas/sugestoes', verificarToken, async (req, re
       .filter((tx) => !tx.eh_transferencia_interna)
       .map((tx) => ({ ...tx, valor: Number(tx.valor || 0), data: tx.data instanceof Date ? tx.data.toISOString().slice(0, 10) : String(tx.data).slice(0, 10) }));
     const debitos = candidatas.filter((tx) => tx.tipo === 'DEBITO');
-    const creditos = candidatas.filter((tx) => tx.tipo === 'CREDITO');
+    const creditos = candidatas
+      .filter((tx) => tx.tipo === 'CREDITO')
+      .sort((a, b) => Number(contaEhCartao(b) && descricaoIndicaPagamentoCartao(b.descricao)) - Number(contaEhCartao(a) && descricaoIndicaPagamentoCartao(a.descricao)));
     const sugestoes = [];
     const usados = new Set();
 
@@ -6898,9 +7066,13 @@ app.get('/api/transferencias-internas/sugestoes', verificarToken, async (req, re
         const motivos = ['Mesmo valor', 'Contas diferentes'];
         if (dias === 0) motivos.push('Mesma data');
         if (dias > 0) motivos.push(`Datas próximas (${dias} dia${dias > 1 ? 's' : ''})`);
+        const pagamentoCartao = contaEhCartao(credito) && descricaoIndicaPagamentoCartao(credito.descricao);
         const descricaoTransferencia = descricaoIndicaTransferencia(debito.descricao) || descricaoIndicaTransferencia(credito.descricao);
+        if (pagamentoCartao) motivos.push('Pagamento de fatura do cartão');
         if (descricaoTransferencia) motivos.push('Descrição contém Pix/transferência');
-        const confianca = dias === 0 && descricaoTransferencia ? 'alta' : descricaoTransferencia ? 'média' : 'baixa';
+        const confianca = pagamentoCartao
+          ? (dias === 0 ? 'alta' : 'média')
+          : dias === 0 && descricaoTransferencia ? 'alta' : descricaoTransferencia ? 'média' : 'baixa';
 
         sugestoes.push({
           id: `sugestao-${sugestoes.length + 1}`,
