@@ -1,0 +1,414 @@
+name: Fix credit card payments
+
+on:
+  push:
+    branches:
+      - fix/pagamentos-cartao-transferencia-interna
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-validate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/pagamentos-cartao-transferencia-interna
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Aplicar regra de pagamentos de cartão
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('backend-server.js')
+          text = path.read_text()
+
+          old = """function descricaoIndicaTransferencia(descricao) {
+            return /\\b(PIX|TRANSFERENCIA|TRANSFERÊNCIA|TED|DOC|ENVIO|ENVIADO|RECEBIDA|RECEBIDO|ENTRE CONTAS)\\b/i.test(String(descricao || '').normalize('NFD').replace(/[\\u0300-\\u036f]/g, ''));
+          }
+
+          function montarTransacaoTransferencia(tx) {
+          """
+          new = """function descricaoIndicaTransferencia(descricao) {
+            return /\\b(PIX|TRANSFERENCIA|TRANSFERÊNCIA|TED|DOC|ENVIO|ENVIADO|RECEBIDA|RECEBIDO|ENTRE CONTAS)\\b/i.test(String(descricao || '').normalize('NFD').replace(/[\\u0300-\\u036f]/g, ''));
+          }
+
+          function descricaoIndicaPagamentoCartao(descricao) {
+            const texto = String(descricao || '')
+              .normalize('NFD')
+              .replace(/[\\u0300-\\u036f]/g, '')
+              .toUpperCase()
+              .replace(/[^A-Z0-9\\s]/g, ' ')
+              .replace(/\\s+/g, ' ')
+              .trim();
+
+            if (/\\bPAGAMENTO\\s+(RECEBIDO|DE\\s+FATURA|DA\\s+FATURA|FATURA)\\b/.test(texto)) return true;
+            return /\\bPAGAMENTO\\s+EM\\s+\\d{1,2}\\s+(JAN|FEV|MAR|ABR|MAI|JUN|JUL|AGO|SET|OUT|NOV|DEZ)\\b/.test(texto);
+          }
+
+          function contaEhCartao(conta) {
+            return String(conta?.conta_tipo || conta?.tipo || '').trim().toUpperCase() === 'CREDIT_CARD';
+          }
+
+          async function conciliarPagamentosCartaoImportados(usuarioId, transacaoIds = []) {
+            const ids = [...new Set((transacaoIds || [])
+              .map((id) => String(id || '').trim())
+              .filter((id) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)))];
+            if (ids.length === 0) return { pareadas: 0, ambiguas: 0, semContrapartida: 0 };
+
+            const pagamentosResult = await pool.query(
+              `SELECT t.id, t.data, t.descricao, t.valor, t.tipo, t.conta_id,
+                      c.nome AS conta_nome, c.tipo AS conta_tipo
+               FROM transacoes t
+               JOIN contas c ON c.id = t.conta_id
+               WHERE c.usuario_id = $1
+                 AND c.tipo = 'CREDIT_CARD'
+                 AND t.id = ANY($2::uuid[])
+                 AND t.tipo = 'CREDITO'
+                 AND t.deletado_em IS NULL
+                 AND COALESCE(t.eh_transferencia_interna, false) = false
+               ORDER BY t.data ASC, t.criado_em ASC, t.id ASC`,
+              [usuarioId, ids]
+            );
+
+            let pareadas = 0;
+            let ambiguas = 0;
+            let semContrapartida = 0;
+
+            for (const pagamento of pagamentosResult.rows) {
+              if (!descricaoIndicaPagamentoCartao(pagamento.descricao)) continue;
+
+              const candidatosResult = await pool.query(
+                `SELECT t.id, t.data, t.descricao, t.valor, t.tipo, t.conta_id,
+                        c.nome AS conta_nome, c.tipo AS conta_tipo
+                 FROM transacoes t
+                 JOIN contas c ON c.id = t.conta_id
+                 WHERE c.usuario_id = $1
+                   AND c.tipo <> 'CREDIT_CARD'
+                   AND t.tipo = 'DEBITO'
+                   AND t.data = $2::date
+                   AND ABS(ABS(t.valor) - ABS($3::numeric)) <= 0.01
+                   AND t.deletado_em IS NULL
+                   AND COALESCE(t.eh_transferencia_interna, false) = false
+                 ORDER BY t.criado_em ASC, t.id ASC`,
+                [usuarioId, pagamento.data, pagamento.valor]
+              );
+
+              if (candidatosResult.rows.length === 0) {
+                semContrapartida++;
+                continue;
+              }
+
+              const pontuar = (tx) => descricaoIndicaPagamentoCartao(tx.descricao) ? 3 : descricaoIndicaTransferencia(tx.descricao) ? 2 : 1;
+              const maiorPontuacao = Math.max(...candidatosResult.rows.map(pontuar));
+              const melhores = candidatosResult.rows.filter((tx) => pontuar(tx) === maiorPontuacao);
+              if (melhores.length !== 1) {
+                ambiguas++;
+                continue;
+              }
+
+              const debito = melhores[0];
+              const client = await pool.connect();
+              try {
+                await client.query('BEGIN');
+                const bloqueadas = await client.query(
+                  `SELECT t.id
+                   FROM transacoes t
+                   JOIN contas c ON c.id = t.conta_id
+                   WHERE c.usuario_id = $1
+                     AND t.id = ANY($2::uuid[])
+                     AND t.deletado_em IS NULL
+                     AND COALESCE(t.eh_transferencia_interna, false) = false
+                   FOR UPDATE`,
+                  [usuarioId, [debito.id, pagamento.id]]
+                );
+
+                if (bloqueadas.rows.length !== 2) {
+                  await client.query('ROLLBACK');
+                  continue;
+                }
+
+                const grupoId = crypto.randomUUID();
+                const atualizadas = await client.query(
+                  `UPDATE transacoes
+                   SET eh_transferencia_interna = true,
+                       transferencia_grupo_id = $1,
+                       atualizado_em = NOW()
+                   WHERE id = ANY($2::uuid[])
+                   RETURNING id`,
+                  [grupoId, [debito.id, pagamento.id]]
+                );
+
+                if (atualizadas.rows.length !== 2) {
+                  await client.query('ROLLBACK');
+                  continue;
+                }
+
+                await client.query('COMMIT');
+                pareadas++;
+              } catch (error) {
+                await client.query('ROLLBACK');
+                throw error;
+              } finally {
+                client.release();
+              }
+            }
+
+            return { pareadas, ambiguas, semContrapartida };
+          }
+
+          function montarTransacaoTransferencia(tx) {
+          """
+          if old not in text:
+              raise SystemExit('Bloco de helpers de transferência não encontrado')
+          text = text.replace(old, new, 1)
+
+          old = """    conta_id: tx.conta_id,
+              conta_nome: tx.conta_nome,
+              descricao: tx.descricao,
+          """
+          new = """    conta_id: tx.conta_id,
+              conta_nome: tx.conta_nome,
+              conta_tipo: tx.conta_tipo || null,
+              descricao: tx.descricao,
+          """
+          if old not in text:
+              raise SystemExit('Resumo de transação de transferência não encontrado')
+          text = text.replace(old, new, 1)
+
+          old = """            conta.nome AS conta_nome,
+                  cat.nome AS categoria_nome,
+          """
+          new = """            conta.nome AS conta_nome,
+                  conta.tipo AS conta_tipo,
+                  cat.nome AS categoria_nome,
+          """
+          if text.count(old) != 1:
+              raise SystemExit(f'SELECT principal esperado 1 vez, encontrado {text.count(old)}')
+          text = text.replace(old, new, 1)
+
+          old = """    const debitos = candidatas.filter((tx) => tx.tipo === 'DEBITO');
+              const creditos = candidatas.filter((tx) => tx.tipo === 'CREDITO');
+          """
+          new = """    const debitos = candidatas.filter((tx) => tx.tipo === 'DEBITO');
+              const creditos = candidatas
+                .filter((tx) => tx.tipo === 'CREDITO')
+                .sort((a, b) => Number(contaEhCartao(b) && descricaoIndicaPagamentoCartao(b.descricao)) - Number(contaEhCartao(a) && descricaoIndicaPagamentoCartao(a.descricao)));
+          """
+          if old not in text:
+              raise SystemExit('Separação de débitos/créditos não encontrada')
+          text = text.replace(old, new, 1)
+
+          old = """        const descricaoTransferencia = descricaoIndicaTransferencia(debito.descricao) || descricaoIndicaTransferencia(credito.descricao);
+                  if (descricaoTransferencia) motivos.push('Descrição contém Pix/transferência');
+                  const confianca = dias === 0 && descricaoTransferencia ? 'alta' : descricaoTransferencia ? 'média' : 'baixa';
+          """
+          new = """        const pagamentoCartao = contaEhCartao(credito) && descricaoIndicaPagamentoCartao(credito.descricao);
+                  const descricaoTransferencia = descricaoIndicaTransferencia(debito.descricao) || descricaoIndicaTransferencia(credito.descricao);
+                  if (pagamentoCartao) motivos.push('Pagamento de fatura do cartão');
+                  if (descricaoTransferencia) motivos.push('Descrição contém Pix/transferência');
+                  const confianca = pagamentoCartao
+                    ? (dias === 0 ? 'alta' : 'média')
+                    : dias === 0 && descricaoTransferencia ? 'alta' : descricaoTransferencia ? 'média' : 'baixa';
+          """
+          if old not in text:
+              raise SystemExit('Regra de confiança das sugestões não encontrada')
+          text = text.replace(old, new, 1)
+
+          old = """    let ignoradas = 0;
+              const transacaoPorTempId = new Map();
+          """
+          new = """    let ignoradas = 0;
+              const transacaoPorTempId = new Map();
+              const transacoesImportadasIds = new Set();
+          """
+          if old not in text:
+              raise SystemExit('Contadores do confirm não encontrados')
+          text = text.replace(old, new, 1)
+
+          old = """            transacaoPorTempId.set(tx.hash_transacao || hash, transacaoInseridaId);
+          """
+          new = """            transacaoPorTempId.set(tx.hash_transacao || hash, transacaoInseridaId);
+                    transacoesImportadasIds.add(transacaoInseridaId);
+          """
+          if old not in text:
+              raise SystemExit('Registro de transação inserida no confirm não encontrado')
+          text = text.replace(old, new, 1)
+
+          old = """      tx.transacaoIdConfirmada = existente.id;
+              transacaoPorTempId.set(tx.hash_transacao || hash, existente.id);
+          """
+          new = """      tx.transacaoIdConfirmada = existente.id;
+              transacaoPorTempId.set(tx.hash_transacao || hash, existente.id);
+              transacoesImportadasIds.add(existente.id);
+          """
+          if old not in text:
+              raise SystemExit('Registro de transação existente no confirm não encontrado')
+          text = text.replace(old, new, 1)
+
+          old = """    let conciliacoesAplicadas = 0;
+          """
+          new = """    const pagamentosCartao = await conciliarPagamentosCartaoImportados(
+              req.usuario.usuario_id,
+              [...transacoesImportadasIds]
+            );
+
+            let conciliacoesAplicadas = 0;
+          """
+          if old not in text:
+              raise SystemExit('Ponto de conciliação pós-importação não encontrado')
+          text = text.replace(old, new, 1)
+
+          old = """      conciliacoesAplicadas,
+              erros: preview.erros.length,
+          """
+          new = """      conciliacoesAplicadas,
+              pagamentosCartaoPareados: pagamentosCartao.pareadas,
+              erros: preview.erros.length,
+          """
+          if old not in text:
+              raise SystemExit('Resposta do confirm não encontrada')
+          text = text.replace(old, new, 1)
+
+          old = """    let inseridas = 0;
+              let duplicadas = 0;
+
+              for (const tx of transacoesValidadas) {
+          """
+          new = """    let inseridas = 0;
+              let duplicadas = 0;
+              const transacoesImportadasIds = [];
+
+              for (const tx of transacoesValidadas) {
+          """
+          if old not in text:
+              raise SystemExit('Contadores da rota legada não encontrados')
+          text = text.replace(old, new, 1)
+
+          old = """      } else {
+                inseridas++;
+              }
+            }
+
+            const arquivoHash = gerarHashArquivo(nome_arquivo, transacoesValidadas);
+          """
+          new = """      } else {
+                inseridas++;
+                transacoesImportadasIds.push(insert.rows[0].id);
+              }
+            }
+
+            const pagamentosCartao = await conciliarPagamentosCartaoImportados(
+              req.usuario.usuario_id,
+              transacoesImportadasIds
+            );
+
+            const arquivoHash = gerarHashArquivo(nome_arquivo, transacoesValidadas);
+          """
+          if old not in text:
+              raise SystemExit('Pós-loop da rota legada não encontrado')
+          text = text.replace(old, new, 1)
+
+          old = """      duplicadas,
+              total: transacoesValidadas.length,
+          """
+          new = """      duplicadas,
+              pagamentosCartaoPareados: pagamentosCartao.pareadas,
+              total: transacoesValidadas.length,
+          """
+          if old not in text:
+              raise SystemExit('Resposta da rota legada não encontrada')
+          text = text.replace(old, new, 1)
+
+          path.write_text(text)
+
+          parser = Path('drive-finance-parser.js')
+          parser_text = parser.read_text()
+
+          old = """    const tipo = parseFloat(valor.replace(/[.,]/g, (m, i) => m === ',' ? '.' : m)) < 0 
+                ? 'DEBITO' 
+                : 'CREDITO';
+          """
+          new = """    const valorNumerico = parseFloat(String(valor).replace(/\\s/g, '').replace(/\\.(?=\\d{3}(?:\\D|$))/g, '').replace(',', '.'));
+              const tipo = tipoConta === 'CREDIT_CARD'
+                ? (valorNumerico < 0 ? 'CREDITO' : 'DEBITO')
+                : (valorNumerico < 0 ? 'DEBITO' : 'CREDITO');
+          """
+          if old not in parser_text:
+              raise SystemExit('Regra de sinal do parser Nubank não encontrada')
+          parser_text = parser_text.replace(old, new, 1)
+
+          old = """      valor: Math.abs(parseFloat(valor.replace(/[.,]/g, (m, i) => m === ',' ? '.' : m))),
+          """
+          new = """      valor: Math.abs(valorNumerico),
+          """
+          if old not in parser_text:
+              raise SystemExit('Valor do parser Nubank não encontrado')
+          parser_text = parser_text.replace(old, new, 1)
+          parser.write_text(parser_text)
+          PY
+
+      - name: Validar sintaxe
+        run: |
+          node --check backend-server.js
+          node --check drive-finance-parser.js
+
+      - name: Instalar dependências
+        run: npm ci
+
+      - name: Validar build
+        run: npm run build
+
+      - name: Validar diff
+        run: git diff --check
+
+      - name: Guardrails de pagamentos de cartão
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          backend = Path('backend-server.js').read_text()
+          parser = Path('drive-finance-parser.js').read_text()
+          assert 'function descricaoIndicaPagamentoCartao' in backend
+          assert 'async function conciliarPagamentosCartaoImportados' in backend
+          assert "c.tipo = 'CREDIT_CARD'" in backend
+          assert "c.tipo <> 'CREDIT_CARD'" in backend
+          assert 'pagamentosCartaoPareados' in backend
+          assert 'Pagamento de fatura do cartão' in backend
+          assert "tipoConta === 'CREDIT_CARD'" in parser
+          assert "valorNumerico < 0 ? 'CREDITO' : 'DEBITO'" in parser
+          PY
+
+      - name: Testar descrições de pagamento e sinal de cartão
+        run: |
+          node - <<'NODE'
+          const normalizar = (descricao) => String(descricao || '')
+            .normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase()
+            .replace(/[^A-Z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+          const ehPagamento = (descricao) => {
+            const texto = normalizar(descricao);
+            if (/\bPAGAMENTO\s+(RECEBIDO|DE\s+FATURA|DA\s+FATURA|FATURA)\b/.test(texto)) return true;
+            return /\bPAGAMENTO\s+EM\s+\d{1,2}\s+(JAN|FEV|MAR|ABR|MAI|JUN|JUL|AGO|SET|OUT|NOV|DEZ)\b/.test(texto);
+          };
+          for (const descricao of ['Pagamento recebido', 'PAGAMENTO DE FATURA', 'Pagamento da fatura', 'Pagamento em 02 MAI']) {
+            if (!ehPagamento(descricao)) throw new Error(`Descrição não reconhecida: ${descricao}`);
+          }
+          if (ehPagamento('Supermercado')) throw new Error('Falso positivo em compra comum');
+          const tipoCartao = (valor) => valor < 0 ? 'CREDITO' : 'DEBITO';
+          if (tipoCartao(-1041.34) !== 'CREDITO' || tipoCartao(296) !== 'DEBITO') throw new Error('Sinal do cartão incorreto');
+          NODE
+
+      - name: Remover workflow temporário e commitar correção
+        run: |
+          rm -f .github/workflows/fix-credit-card-payments.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Corrigir pagamentos de cartão como transferências internas"
+          git push origin HEAD:fix/pagamentos-cartao-transferencia-interna
