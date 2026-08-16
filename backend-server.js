@@ -666,6 +666,23 @@ function gerarHashTransacaoLegado(tx) {
   return crypto.createHash('sha256').update(`${data}|${descricao}|${valor}|${tipo}`).digest('hex');
 }
 
+function normalizarReferenciaImportacao(tx) {
+  const referencia = String(tx?.referencia_banco || tx?.transacao_id || tx?.transacaoId || tx?.id || '').trim();
+  if (!referencia || referencia.length > 50) return null;
+  return referencia;
+}
+
+function referenciaImportacaoEhUuid(referencia) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(referencia || '').trim());
+}
+
+function gerarHashTransacaoImportacao(tx, contaId = tx.conta_id || tx.contaId || tx.conta) {
+  const referencia = normalizarReferenciaImportacao(tx);
+  if (!referencia) return gerarHashTransacao(tx, contaId);
+  const identidade = `${contaId || ''}|referencia_importacao|${referencia}`;
+  return crypto.createHash('sha256').update(identidade).digest('hex');
+}
+
 function gerarHashArquivo(nomeArquivo, transacoes = []) {
   const payload = JSON.stringify({ nomeArquivo, transacoes });
   return crypto.createHash('sha256').update(payload).digest('hex');
@@ -2354,34 +2371,88 @@ function montarAlteracoesTransacao(atual, novo) {
   }, []);
 }
 
-async function buscarTransacaoExistenteParaImportacao(usuarioId, tx, contaId, hash) {
-  if (tx.transacao_id || tx.id) {
+async function buscarTransacaoExistenteParaImportacao(usuarioId, tx, contaId, hash, idsConsumidos = new Set()) {
+  const referencia = normalizarReferenciaImportacao(tx);
+  const campos = `t.*, cm.nome AS categoria_macro_nome, cd.nome AS categoria_detalhada_nome`;
+  const joins = `FROM transacoes t
+     JOIN contas c ON c.id = t.conta_id
+     LEFT JOIN categorias cm ON cm.id = t.categoria_macro_id
+     LEFT JOIN categorias cd ON cd.id = t.categoria_detalhada_id`;
+
+  if (referencia && referenciaImportacaoEhUuid(referencia)) {
     const porId = await pool.query(
-      `SELECT t.*, cm.nome AS categoria_macro_nome, cd.nome AS categoria_detalhada_nome
-       FROM transacoes t
-       JOIN contas c ON c.id = t.conta_id
-       LEFT JOIN categorias cm ON cm.id = t.categoria_macro_id
-       LEFT JOIN categorias cd ON cd.id = t.categoria_detalhada_id
-       WHERE t.id = $1 AND c.usuario_id = $2 AND t.deletado_em IS NULL`,
-      [tx.transacao_id || tx.id, usuarioId]
+      `SELECT ${campos}
+       ${joins}
+       WHERE t.id = $1 AND t.conta_id = $2 AND c.usuario_id = $3 AND t.deletado_em IS NULL`,
+      [referencia, contaId, usuarioId]
     );
-    if (porId.rows[0]) return porId.rows[0];
+    if (porId.rows[0]) return { ...porId.rows[0], _match_importacao: 'REFERENCIA' };
+  }
+
+  if (referencia) {
+    const porReferencia = await pool.query(
+      `SELECT ${campos}
+       ${joins}
+       WHERE t.referencia_banco = $1 AND t.conta_id = $2 AND c.usuario_id = $3 AND t.deletado_em IS NULL
+       ORDER BY t.criado_em ASC, t.id ASC
+       LIMIT 1`,
+      [referencia, contaId, usuarioId]
+    );
+    if (porReferencia.rows[0]) return { ...porReferencia.rows[0], _match_importacao: 'REFERENCIA' };
+  }
+
+  const hashBase = gerarHashTransacao(tx, contaId);
+  if (hash && hash !== hashBase) {
+    const porHashImportacao = await pool.query(
+      `SELECT ${campos}
+       ${joins}
+       WHERE t.hash_transacao = $1 AND t.conta_id = $2 AND c.usuario_id = $3 AND t.deletado_em IS NULL
+       LIMIT 1`,
+      [hash, contaId, usuarioId]
+    );
+    if (porHashImportacao.rows[0]) return { ...porHashImportacao.rows[0], _match_importacao: 'REFERENCIA' };
   }
 
   const hashLegado = gerarHashTransacaoLegado(tx);
+  const params = [[hashBase, hashLegado], usuarioId, contaId];
+  let filtroReferencia = '';
+  if (referencia) {
+    params.push(referencia);
+    filtroReferencia = `AND (t.referencia_banco IS NULL OR t.referencia_banco = $4)`;
+  }
   const porHash = await pool.query(
-    `SELECT t.*, cm.nome AS categoria_macro_nome, cd.nome AS categoria_detalhada_nome
-     FROM transacoes t
-     JOIN contas c ON c.id = t.conta_id
-     LEFT JOIN categorias cm ON cm.id = t.categoria_macro_id
-     LEFT JOIN categorias cd ON cd.id = t.categoria_detalhada_id
-     WHERE t.hash_transacao = ANY($1::text[]) AND c.usuario_id = $2 AND t.deletado_em IS NULL
-     ORDER BY CASE WHEN t.hash_transacao = $3 THEN 0 ELSE 1 END
-     LIMIT 1`,
-    [[hash, hashLegado], usuarioId, hash]
+    `SELECT ${campos}
+     ${joins}
+     WHERE t.hash_transacao = ANY($1::text[])
+       AND c.usuario_id = $2
+       AND t.conta_id = $3
+       AND t.deletado_em IS NULL
+       ${filtroReferencia}
+     ORDER BY CASE WHEN t.hash_transacao = $1[1] THEN 0 ELSE 1 END, t.criado_em ASC, t.id ASC`,
+    params
   );
 
-  return porHash.rows[0] || null;
+  const disponivel = porHash.rows.find((row) => !idsConsumidos.has(row.id));
+  return disponivel ? { ...disponivel, _match_importacao: 'HASH_NATURAL' } : null;
+}
+
+async function associarReferenciaImportacao(usuarioId, transacaoId, contaId, referencia) {
+  if (!referencia) return false;
+  const result = await pool.query(
+    `UPDATE transacoes t
+     SET referencia_banco = $1,
+         atualizado_em = NOW()
+     FROM contas c
+     WHERE c.id = t.conta_id
+       AND c.usuario_id = $2
+       AND t.id = $3
+       AND t.conta_id = $4
+       AND t.deletado_em IS NULL
+       AND (t.referencia_banco IS NULL OR t.referencia_banco = $1)
+     RETURNING t.id`,
+    [referencia, usuarioId, transacaoId, contaId]
+  );
+  return result.rows.length > 0;
 }
 
 async function montarPreviewImportacao(usuarioId, dados) {
@@ -2405,6 +2476,8 @@ async function montarPreviewImportacao(usuarioId, dados) {
     transacoesValidadas,
   };
 
+  const idsExistentesConsumidos = new Set();
+
   for (const [index, tx] of transacoesValidadas.entries()) {
     const linha = tx._linha || index + 2;
     try {
@@ -2412,8 +2485,11 @@ async function montarPreviewImportacao(usuarioId, dados) {
       const contaPreview = contaPreviewPorNome.get(tx.conta) || { nomePlanilha: tx.conta };
       const contaIdPreview = contaPreview.contaEncontradaId || null;
       const contaHashKey = contaIdPreview || `planilha:${normalizarNomeConta(tx.conta)}`;
-      const hash = gerarHashTransacao(tx, contaHashKey);
-      const existente = contaIdPreview ? await buscarTransacaoExistenteParaImportacao(usuarioId, tx, contaIdPreview, hash) : null;
+      const hash = gerarHashTransacaoImportacao(tx, contaHashKey);
+      const existente = contaIdPreview
+        ? await buscarTransacaoExistenteParaImportacao(usuarioId, tx, contaIdPreview, hash, idsExistentesConsumidos)
+        : null;
+      if (existente?._match_importacao === 'HASH_NATURAL') idsExistentesConsumidos.add(existente.id);
       tx.hash_transacao = hash;
       const normalizada = {
         ...tx,
@@ -2524,18 +2600,20 @@ function validarMapeamentoCategoriasResolvido(preview, mapeamentoCategorias = []
 }
 
 async function inserirTransacaoImportacao(contaId, tx) {
+  const referenciaImportacao = normalizarReferenciaImportacao(tx);
   const insert = await pool.query(
-    `INSERT INTO transacoes (conta_id, data, descricao, valor, tipo, categoria_id, categoria_macro_id, categoria_detalhada_id, categoria_origem, hash_transacao, criado_em, atualizado_em)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'IMPORTACAO', $9, NOW(), NOW())
+    `INSERT INTO transacoes (conta_id, data, descricao, valor, tipo, categoria_id, categoria_macro_id, categoria_detalhada_id, categoria_origem, referencia_banco, hash_transacao, criado_em, atualizado_em)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'IMPORTACAO', $9, $10, NOW(), NOW())
      ON CONFLICT (hash_transacao) DO NOTHING
      RETURNING id`,
-    [contaId, tx.data, tx.descricao, tx.valor, tx.tipo, tx.categoria_id, tx.categoria_macro_id, tx.categoria_detalhada_id, tx.hash_transacao]
+    [contaId, tx.data, tx.descricao, tx.valor, tx.tipo, tx.categoria_id, tx.categoria_macro_id, tx.categoria_detalhada_id, referenciaImportacao, tx.hash_transacao]
   );
 
   return insert.rows[0]?.id || null;
 }
 
 async function atualizarTransacaoImportacao(usuarioId, tx) {
+  const referenciaImportacao = normalizarReferenciaImportacao(tx);
   const result = await pool.query(
     `UPDATE transacoes t
      SET conta_id = $1,
@@ -2547,15 +2625,16 @@ async function atualizarTransacaoImportacao(usuarioId, tx) {
          categoria_macro_id = $7,
          categoria_detalhada_id = $8,
          categoria_origem = 'IMPORTACAO',
-         hash_transacao = $9,
+         referencia_banco = COALESCE(t.referencia_banco, $9),
+         hash_transacao = $10,
          atualizado_em = NOW()
      FROM contas c
      WHERE c.id = t.conta_id
-       AND c.usuario_id = $10
-       AND t.id = $11
+       AND c.usuario_id = $11
+       AND t.id = $12
        AND t.deletado_em IS NULL
      RETURNING t.id`,
-    [tx.conta_id, tx.data, tx.descricao, tx.valor, tx.tipo, tx.categoria_id, tx.categoria_macro_id, tx.categoria_detalhada_id, tx.hash_transacao, usuarioId, tx.transacaoId]
+    [tx.conta_id, tx.data, tx.descricao, tx.valor, tx.tipo, tx.categoria_id, tx.categoria_macro_id, tx.categoria_detalhada_id, referenciaImportacao, tx.hash_transacao, usuarioId, tx.transacaoId]
   );
 
   return result.rows.length > 0;
@@ -2600,15 +2679,29 @@ app.post('/api/importacoes/xlsx/confirmar', verificarToken, async (req, res) => 
     let atualizadas = 0;
     let ignoradas = 0;
     const transacaoPorTempId = new Map();
+    const idsExistentesConsumidos = new Set();
 
     for (const tx of (preview.transacoesValidadas || [])) {
       const contaResolvida = contasResolvidas.get(String(tx.conta || '').trim());
       if (!contaResolvida) throw new Error(`Resolva a conta da planilha "${tx.conta}" antes de concluir a importação.`);
 
       const txConfirmada = await prepararTransacaoConfirmacao(req.usuario.usuario_id, tx, mapeamentoCategorias);
-      const hash = gerarHashTransacao(txConfirmada, contaResolvida.id);
-      const existente = await buscarTransacaoExistenteParaImportacao(req.usuario.usuario_id, txConfirmada, contaResolvida.id, hash);
-      const txComConta = { ...txConfirmada, conta_id: contaResolvida.id, conta_nome: contaResolvida.nome, hash_transacao: hash };
+      const hash = gerarHashTransacaoImportacao(txConfirmada, contaResolvida.id);
+      const existente = await buscarTransacaoExistenteParaImportacao(
+        req.usuario.usuario_id,
+        txConfirmada,
+        contaResolvida.id,
+        hash,
+        idsExistentesConsumidos
+      );
+      if (existente?._match_importacao === 'HASH_NATURAL') idsExistentesConsumidos.add(existente.id);
+      const txComConta = {
+        ...txConfirmada,
+        conta_id: contaResolvida.id,
+        conta_nome: contaResolvida.nome,
+        referencia_banco: normalizarReferenciaImportacao(txConfirmada),
+        hash_transacao: hash,
+      };
 
       if (!existente) {
         if (importarNovas) {
@@ -2622,6 +2715,15 @@ app.post('/api/importacoes/xlsx/confirmar', verificarToken, async (req, res) => 
           ignoradas++;
         }
         continue;
+      }
+
+      if (txComConta.referencia_banco && !existente.referencia_banco) {
+        await associarReferenciaImportacao(
+          req.usuario.usuario_id,
+          existente.id,
+          contaResolvida.id,
+          txComConta.referencia_banco
+        );
       }
 
       const categoriasComparacao = {
@@ -2719,16 +2821,34 @@ app.post('/api/importar', verificarToken, async (req, res) => {
 
     let inseridas = 0;
     let duplicadas = 0;
+    const idsExistentesConsumidos = new Set();
 
     for (const tx of transacoesValidadas) {
-      const hash = gerarHashTransacao(tx, contaId);
+      const hash = gerarHashTransacaoImportacao(tx, contaId);
+      const existente = await buscarTransacaoExistenteParaImportacao(
+        req.usuario.usuario_id,
+        tx,
+        contaId,
+        hash,
+        idsExistentesConsumidos
+      );
+      if (existente) {
+        if (existente._match_importacao === 'HASH_NATURAL') idsExistentesConsumidos.add(existente.id);
+        const referenciaImportacao = normalizarReferenciaImportacao(tx);
+        if (referenciaImportacao && !existente.referencia_banco) {
+          await associarReferenciaImportacao(req.usuario.usuario_id, existente.id, contaId, referenciaImportacao);
+        }
+        duplicadas++;
+        continue;
+      }
+
       const regra = await buscarRegraCompatível(req.usuario.usuario_id, tx.descricao);
       const categoriasImportacao = regra
         ? await validarParCategoriasDoUsuario(req.usuario.usuario_id, regra.categoria_id, null)
         : await resolverCategoriasImportacao(req.usuario.usuario_id, tx, { criar: true });
       const insert = await pool.query(
-        `INSERT INTO transacoes (conta_id, data, descricao, valor, tipo, categoria_id, categoria_macro_id, categoria_detalhada_id, categoria_origem, regra_categorizacao_id, hash_transacao, criado_em)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+        `INSERT INTO transacoes (conta_id, data, descricao, valor, tipo, categoria_id, categoria_macro_id, categoria_detalhada_id, categoria_origem, regra_categorizacao_id, referencia_banco, hash_transacao, criado_em)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
          ON CONFLICT (hash_transacao) DO NOTHING
          RETURNING id`,
         [
@@ -2742,6 +2862,7 @@ app.post('/api/importar', verificarToken, async (req, res) => {
           categoriasImportacao.categoriaDetalhadaId || categoriasImportacao.detalhadaId || null,
           regra ? 'AUTO' : 'IMPORTACAO',
           regra?.id || null,
+          normalizarReferenciaImportacao(tx),
           hash,
         ]
       );
