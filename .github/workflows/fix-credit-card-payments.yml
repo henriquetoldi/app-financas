@@ -22,7 +22,7 @@ jobs:
           node-version: 20
           cache: npm
 
-      - name: Aplicar regra de pagamentos de cartão
+      - name: Aplicar correção de pagamentos de cartão
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -30,16 +30,27 @@ jobs:
           path = Path('backend-server.js')
           text = path.read_text()
 
-          old = """function descricaoIndicaTransferencia(descricao) {
+          def replace_once(source, old, new, label):
+              count = source.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: esperado 1 ocorrência, encontrado {count}')
+              return source.replace(old, new, 1)
+
+          def replace_in_section(source, start_marker, end_marker, old, new, label):
+              start = source.index(start_marker)
+              end = source.index(end_marker, start)
+              section = source[start:end]
+              count = section.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: esperado 1 ocorrência na seção, encontrado {count}')
+              section = section.replace(old, new, 1)
+              return source[:start] + section + source[end:]
+
+          transfer_marker = """function descricaoIndicaTransferencia(descricao) {
             return /\\b(PIX|TRANSFERENCIA|TRANSFERÊNCIA|TED|DOC|ENVIO|ENVIADO|RECEBIDA|RECEBIDO|ENTRE CONTAS)\\b/i.test(String(descricao || '').normalize('NFD').replace(/[\\u0300-\\u036f]/g, ''));
           }
-
-          function montarTransacaoTransferencia(tx) {
           """
-          new = """function descricaoIndicaTransferencia(descricao) {
-            return /\\b(PIX|TRANSFERENCIA|TRANSFERÊNCIA|TED|DOC|ENVIO|ENVIADO|RECEBIDA|RECEBIDO|ENTRE CONTAS)\\b/i.test(String(descricao || '').normalize('NFD').replace(/[\\u0300-\\u036f]/g, ''));
-          }
-
+          helpers = transfer_marker + """
           function descricaoIndicaPagamentoCartao(descricao) {
             const texto = String(descricao || '')
               .normalize('NFD')
@@ -63,6 +74,20 @@ jobs:
               .filter((id) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)))];
             if (ids.length === 0) return { pareadas: 0, ambiguas: 0, semContrapartida: 0 };
 
+            const importadas = new Set(ids);
+            const intervaloResult = await pool.query(
+              `SELECT MIN(t.data) AS data_inicial, MAX(t.data) AS data_final
+               FROM transacoes t
+               JOIN contas c ON c.id = t.conta_id
+               WHERE c.usuario_id = $1
+                 AND t.id = ANY($2::uuid[])
+                 AND t.deletado_em IS NULL`,
+              [usuarioId, ids]
+            );
+            const dataInicial = intervaloResult.rows[0]?.data_inicial;
+            const dataFinal = intervaloResult.rows[0]?.data_final;
+            if (!dataInicial || !dataFinal) return { pareadas: 0, ambiguas: 0, semContrapartida: 0 };
+
             const pagamentosResult = await pool.query(
               `SELECT t.id, t.data, t.descricao, t.valor, t.tipo, t.conta_id,
                       c.nome AS conta_nome, c.tipo AS conta_tipo
@@ -70,12 +95,12 @@ jobs:
                JOIN contas c ON c.id = t.conta_id
                WHERE c.usuario_id = $1
                  AND c.tipo = 'CREDIT_CARD'
-                 AND t.id = ANY($2::uuid[])
                  AND t.tipo = 'CREDITO'
+                 AND t.data BETWEEN $2::date AND $3::date
                  AND t.deletado_em IS NULL
                  AND COALESCE(t.eh_transferencia_interna, false) = false
                ORDER BY t.data ASC, t.criado_em ASC, t.id ASC`,
-              [usuarioId, ids]
+              [usuarioId, dataInicial, dataFinal]
             );
 
             let pareadas = 0;
@@ -101,14 +126,21 @@ jobs:
                 [usuarioId, pagamento.data, pagamento.valor]
               );
 
-              if (candidatosResult.rows.length === 0) {
-                semContrapartida++;
+              let candidatos = candidatosResult.rows;
+              if (!importadas.has(String(pagamento.id))) {
+                candidatos = candidatos.filter((tx) => importadas.has(String(tx.id)));
+              }
+
+              if (candidatos.length === 0) {
+                if (importadas.has(String(pagamento.id))) semContrapartida++;
                 continue;
               }
 
-              const pontuar = (tx) => descricaoIndicaPagamentoCartao(tx.descricao) ? 3 : descricaoIndicaTransferencia(tx.descricao) ? 2 : 1;
-              const maiorPontuacao = Math.max(...candidatosResult.rows.map(pontuar));
-              const melhores = candidatosResult.rows.filter((tx) => pontuar(tx) === maiorPontuacao);
+              const pontuar = (tx) => descricaoIndicaPagamentoCartao(tx.descricao)
+                ? 3
+                : descricaoIndicaTransferencia(tx.descricao) ? 2 : 1;
+              const maiorPontuacao = Math.max(...candidatos.map(pontuar));
+              const melhores = candidatos.filter((tx) => pontuar(tx) === maiorPontuacao);
               if (melhores.length !== 1) {
                 ambiguas++;
                 continue;
@@ -126,7 +158,7 @@ jobs:
                      AND t.id = ANY($2::uuid[])
                      AND t.deletado_em IS NULL
                      AND COALESCE(t.eh_transferencia_interna, false) = false
-                   FOR UPDATE`,
+                   FOR UPDATE OF t`,
                   [usuarioId, [debito.id, pagamento.id]]
                 );
 
@@ -163,202 +195,200 @@ jobs:
 
             return { pareadas, ambiguas, semContrapartida };
           }
+          """
+          text = replace_once(text, transfer_marker, helpers, 'helpers de pagamento de cartão')
 
-          function montarTransacaoTransferencia(tx) {
-          """
-          if old not in text:
-              raise SystemExit('Bloco de helpers de transferência não encontrado')
-          text = text.replace(old, new, 1)
+          text = replace_once(
+              text,
+              "    conta_nome: tx.conta_nome,\n    descricao: tx.descricao,",
+              "    conta_nome: tx.conta_nome,\n    conta_tipo: tx.conta_tipo || null,\n    descricao: tx.descricao,",
+              'conta_tipo no resumo de transferência'
+          )
 
-          old = """    conta_id: tx.conta_id,
-              conta_nome: tx.conta_nome,
-              descricao: tx.descricao,
-          """
-          new = """    conta_id: tx.conta_id,
-              conta_nome: tx.conta_nome,
-              conta_tipo: tx.conta_tipo || null,
-              descricao: tx.descricao,
-          """
-          if old not in text:
-              raise SystemExit('Resumo de transação de transferência não encontrado')
-          text = text.replace(old, new, 1)
+          text = replace_in_section(
+              text,
+              'async function buscarTransacoesUsuario(usuarioId, filtros = {}) {',
+              "app.get('/api/transacoes', verificarToken",
+              '            conta.nome AS conta_nome,\n            cat.nome AS categoria_nome,',
+              '            conta.nome AS conta_nome,\n            conta.tipo AS conta_tipo,\n            cat.nome AS categoria_nome,',
+              'conta_tipo no SELECT principal'
+          )
 
-          old = """            conta.nome AS conta_nome,
-                  cat.nome AS categoria_nome,
-          """
-          new = """            conta.nome AS conta_nome,
-                  conta.tipo AS conta_tipo,
-                  cat.nome AS categoria_nome,
-          """
-          if text.count(old) != 1:
-              raise SystemExit(f'SELECT principal esperado 1 vez, encontrado {text.count(old)}')
-          text = text.replace(old, new, 1)
+          text = replace_in_section(
+              text,
+              "app.get('/api/transferencias-internas/sugestoes'",
+              "app.post('/api/transferencias-internas/marcar'",
+              "    const creditos = candidatas.filter((tx) => tx.tipo === 'CREDITO');",
+              "    const creditos = candidatas\n      .filter((tx) => tx.tipo === 'CREDITO')\n      .sort((a, b) => Number(contaEhCartao(b) && descricaoIndicaPagamentoCartao(b.descricao)) - Number(contaEhCartao(a) && descricaoIndicaPagamentoCartao(a.descricao)));",
+              'priorização de créditos de pagamento de cartão'
+          )
 
-          old = """    const debitos = candidatas.filter((tx) => tx.tipo === 'DEBITO');
-              const creditos = candidatas.filter((tx) => tx.tipo === 'CREDITO');
-          """
-          new = """    const debitos = candidatas.filter((tx) => tx.tipo === 'DEBITO');
-              const creditos = candidatas
-                .filter((tx) => tx.tipo === 'CREDITO')
-                .sort((a, b) => Number(contaEhCartao(b) && descricaoIndicaPagamentoCartao(b.descricao)) - Number(contaEhCartao(a) && descricaoIndicaPagamentoCartao(a.descricao)));
-          """
-          if old not in text:
-              raise SystemExit('Separação de débitos/créditos não encontrada')
-          text = text.replace(old, new, 1)
-
-          old = """        const descricaoTransferencia = descricaoIndicaTransferencia(debito.descricao) || descricaoIndicaTransferencia(credito.descricao);
+          text = replace_in_section(
+              text,
+              "app.get('/api/transferencias-internas/sugestoes'",
+              "app.post('/api/transferencias-internas/marcar'",
+              """        const descricaoTransferencia = descricaoIndicaTransferencia(debito.descricao) || descricaoIndicaTransferencia(credito.descricao);
                   if (descricaoTransferencia) motivos.push('Descrição contém Pix/transferência');
                   const confianca = dias === 0 && descricaoTransferencia ? 'alta' : descricaoTransferencia ? 'média' : 'baixa';
-          """
-          new = """        const pagamentoCartao = contaEhCartao(credito) && descricaoIndicaPagamentoCartao(credito.descricao);
+          """,
+              """        const pagamentoCartao = contaEhCartao(credito) && descricaoIndicaPagamentoCartao(credito.descricao);
                   const descricaoTransferencia = descricaoIndicaTransferencia(debito.descricao) || descricaoIndicaTransferencia(credito.descricao);
                   if (pagamentoCartao) motivos.push('Pagamento de fatura do cartão');
                   if (descricaoTransferencia) motivos.push('Descrição contém Pix/transferência');
                   const confianca = pagamentoCartao
                     ? (dias === 0 ? 'alta' : 'média')
                     : dias === 0 && descricaoTransferencia ? 'alta' : descricaoTransferencia ? 'média' : 'baixa';
-          """
-          if old not in text:
-              raise SystemExit('Regra de confiança das sugestões não encontrada')
-          text = text.replace(old, new, 1)
+          """,
+              'confiança de pagamento de cartão'
+          )
 
-          old = """    let ignoradas = 0;
-              const transacaoPorTempId = new Map();
-          """
-          new = """    let ignoradas = 0;
-              const transacaoPorTempId = new Map();
-              const transacoesImportadasIds = new Set();
-          """
-          if old not in text:
-              raise SystemExit('Contadores do confirm não encontrados')
-          text = text.replace(old, new, 1)
+          text = replace_in_section(
+              text,
+              "app.post('/api/importar/:arquivoId'",
+              "app.get('/api/notificacoes'",
+              "            tipo = valor < 0 ? 'DEBITO' : 'CREDITO';",
+              "            tipo = valor < 0 ? 'CREDITO' : 'DEBITO';",
+              'sinal de cartão no importador do Drive'
+          )
 
-          old = """            transacaoPorTempId.set(tx.hash_transacao || hash, transacaoInseridaId);
-          """
-          new = """            transacaoPorTempId.set(tx.hash_transacao || hash, transacaoInseridaId);
-                    transacoesImportadasIds.add(transacaoInseridaId);
-          """
-          if old not in text:
-              raise SystemExit('Registro de transação inserida no confirm não encontrado')
-          text = text.replace(old, new, 1)
+          text = replace_in_section(
+              text,
+              "app.post('/api/importar/:arquivoId'",
+              "app.get('/api/notificacoes'",
+              "        let inseridas = 0, duplicadas = 0;",
+              "        let inseridas = 0, duplicadas = 0;\n        const transacoesImportadasIds = [];",
+              'IDs importados no Drive'
+          )
 
-          old = """      tx.transacaoIdConfirmada = existente.id;
-              transacaoPorTempId.set(tx.hash_transacao || hash, existente.id);
-          """
-          new = """      tx.transacaoIdConfirmada = existente.id;
-              transacaoPorTempId.set(tx.hash_transacao || hash, existente.id);
-              transacoesImportadasIds.add(existente.id);
-          """
-          if old not in text:
-              raise SystemExit('Registro de transação existente no confirm não encontrado')
-          text = text.replace(old, new, 1)
+          text = replace_in_section(
+              text,
+              "app.post('/api/importar/:arquivoId'",
+              "app.get('/api/notificacoes'",
+              """          const regra = await buscarRegraCompatível(req.usuario.usuario_id, tx.descricao);
 
-          old = """    let conciliacoesAplicadas = 0;
-          """
-          new = """    const pagamentosCartao = await conciliarPagamentosCartaoImportados(
-              req.usuario.usuario_id,
-              [...transacoesImportadasIds]
-            );
+                    await pool.query(
+          """,
+              """          const regra = await buscarRegraCompatível(req.usuario.usuario_id, tx.descricao);
+                    const transacaoId = crypto.randomUUID();
 
-            let conciliacoesAplicadas = 0;
-          """
-          if old not in text:
-              raise SystemExit('Ponto de conciliação pós-importação não encontrado')
-          text = text.replace(old, new, 1)
+                    await pool.query(
+          """,
+              'UUID explícito no importador do Drive'
+          )
 
-          old = """      conciliacoesAplicadas,
-              erros: preview.erros.length,
-          """
-          new = """      conciliacoesAplicadas,
-              pagamentosCartaoPareados: pagamentosCartao.pareadas,
-              erros: preview.erros.length,
-          """
-          if old not in text:
-              raise SystemExit('Resposta do confirm não encontrada')
-          text = text.replace(old, new, 1)
+          text = replace_in_section(
+              text,
+              "app.post('/api/importar/:arquivoId'",
+              "app.get('/api/notificacoes'",
+              "              crypto.randomUUID(),\n              contaId,",
+              "              transacaoId,\n              contaId,",
+              'uso do UUID explícito no Drive'
+          )
 
-          old = """    let inseridas = 0;
-              let duplicadas = 0;
+          text = replace_in_section(
+              text,
+              "app.post('/api/importar/:arquivoId'",
+              "app.get('/api/notificacoes'",
+              "          inseridas++;\n        }\n\n        res.json({",
+              "          inseridas++;\n          transacoesImportadasIds.push(transacaoId);\n        }\n\n        const pagamentosCartao = await conciliarPagamentosCartaoImportados(req.usuario.usuario_id, transacoesImportadasIds);\n\n        res.json({",
+              'conciliação após importação do Drive'
+          )
 
-              for (const tx of transacoesValidadas) {
-          """
-          new = """    let inseridas = 0;
-              let duplicadas = 0;
-              const transacoesImportadasIds = [];
+          text = replace_in_section(
+              text,
+              "app.post('/api/importar/:arquivoId'",
+              "app.get('/api/notificacoes'",
+              "          duplicadas,\n          total: transacoes.length",
+              "          duplicadas,\n          pagamentosCartaoPareados: pagamentosCartao.pareadas,\n          total: transacoes.length",
+              'resposta do Drive'
+          )
 
-              for (const tx of transacoesValidadas) {
-          """
-          if old not in text:
-              raise SystemExit('Contadores da rota legada não encontrados')
-          text = text.replace(old, new, 1)
+          text = replace_in_section(
+              text,
+              "app.post('/api/importacoes/xlsx/confirmar'",
+              "app.post('/api/importar', verificarToken",
+              "    const transacaoPorTempId = new Map();",
+              "    const transacaoPorTempId = new Map();\n    const transacoesImportadasIds = new Set();",
+              'IDs importados no confirmar XLSX'
+          )
 
-          old = """      } else {
-                inseridas++;
-              }
-            }
+          text = replace_in_section(
+              text,
+              "app.post('/api/importacoes/xlsx/confirmar'",
+              "app.post('/api/importar', verificarToken",
+              "            transacaoPorTempId.set(tx.hash_transacao || hash, transacaoInseridaId);",
+              "            transacaoPorTempId.set(tx.hash_transacao || hash, transacaoInseridaId);\n            transacoesImportadasIds.add(transacaoInseridaId);",
+              'nova transação no conjunto XLSX'
+          )
 
-            const arquivoHash = gerarHashArquivo(nome_arquivo, transacoesValidadas);
-          """
-          new = """      } else {
-                inseridas++;
-                transacoesImportadasIds.push(insert.rows[0].id);
-              }
-            }
+          text = replace_in_section(
+              text,
+              "app.post('/api/importacoes/xlsx/confirmar'",
+              "app.post('/api/importar', verificarToken",
+              """      if (alteracoes.length > 0 && atualizarExistentes) {
+                if (await atualizarTransacaoImportacao(req.usuario.usuario_id, { ...txComConta, transacaoId: existente.id })) atualizadas++;
+              } else {
+          """,
+              """      if (alteracoes.length > 0 && atualizarExistentes) {
+                if (await atualizarTransacaoImportacao(req.usuario.usuario_id, { ...txComConta, transacaoId: existente.id })) {
+                  atualizadas++;
+                  transacoesImportadasIds.add(existente.id);
+                }
+              } else {
+          """,
+              'transação atualizada no conjunto XLSX'
+          )
 
-            const pagamentosCartao = await conciliarPagamentosCartaoImportados(
-              req.usuario.usuario_id,
-              transacoesImportadasIds
-            );
+          text = replace_in_section(
+              text,
+              "app.post('/api/importacoes/xlsx/confirmar'",
+              "app.post('/api/importar', verificarToken",
+              "    let conciliacoesAplicadas = 0;",
+              "    const pagamentosCartao = await conciliarPagamentosCartaoImportados(req.usuario.usuario_id, [...transacoesImportadasIds]);\n\n    let conciliacoesAplicadas = 0;",
+              'conciliação pós XLSX'
+          )
 
-            const arquivoHash = gerarHashArquivo(nome_arquivo, transacoesValidadas);
-          """
-          if old not in text:
-              raise SystemExit('Pós-loop da rota legada não encontrado')
-          text = text.replace(old, new, 1)
+          text = replace_in_section(
+              text,
+              "app.post('/api/importacoes/xlsx/confirmar'",
+              "app.post('/api/importar', verificarToken",
+              "      conciliacoesAplicadas,\n      erros: preview.erros.length,",
+              "      conciliacoesAplicadas,\n      pagamentosCartaoPareados: pagamentosCartao.pareadas,\n      erros: preview.erros.length,",
+              'resposta XLSX'
+          )
 
-          old = """      duplicadas,
-              total: transacoesValidadas.length,
-          """
-          new = """      duplicadas,
-              pagamentosCartaoPareados: pagamentosCartao.pareadas,
-              total: transacoesValidadas.length,
-          """
-          if old not in text:
-              raise SystemExit('Resposta da rota legada não encontrada')
-          text = text.replace(old, new, 1)
+          text = replace_in_section(
+              text,
+              "app.post('/api/importar', verificarToken",
+              "app.get('/api/notificacoes'",
+              "    let duplicadas = 0;\n\n    for (const tx of transacoesValidadas) {",
+              "    let duplicadas = 0;\n    const transacoesImportadasIds = [];\n\n    for (const tx of transacoesValidadas) {",
+              'IDs importados na rota legada'
+          )
+
+          text = replace_in_section(
+              text,
+              "app.post('/api/importar', verificarToken",
+              "app.get('/api/notificacoes'",
+              "      } else {\n        inseridas++;\n      }\n    }\n\n    const arquivoHash",
+              "      } else {\n        inseridas++;\n        transacoesImportadasIds.push(insert.rows[0].id);\n      }\n    }\n\n    const pagamentosCartao = await conciliarPagamentosCartaoImportados(req.usuario.usuario_id, transacoesImportadasIds);\n\n    const arquivoHash",
+              'conciliação na rota legada'
+          )
+
+          text = replace_in_section(
+              text,
+              "app.post('/api/importar', verificarToken",
+              "app.get('/api/notificacoes'",
+              "      duplicadas,\n      total: transacoesValidadas.length,",
+              "      duplicadas,\n      pagamentosCartaoPareados: pagamentosCartao.pareadas,\n      total: transacoesValidadas.length,",
+              'resposta da rota legada'
+          )
 
           path.write_text(text)
-
-          parser = Path('drive-finance-parser.js')
-          parser_text = parser.read_text()
-
-          old = """    const tipo = parseFloat(valor.replace(/[.,]/g, (m, i) => m === ',' ? '.' : m)) < 0 
-                ? 'DEBITO' 
-                : 'CREDITO';
-          """
-          new = """    const valorNumerico = parseFloat(String(valor).replace(/\\s/g, '').replace(/\\.(?=\\d{3}(?:\\D|$))/g, '').replace(',', '.'));
-              const tipo = tipoConta === 'CREDIT_CARD'
-                ? (valorNumerico < 0 ? 'CREDITO' : 'DEBITO')
-                : (valorNumerico < 0 ? 'DEBITO' : 'CREDITO');
-          """
-          if old not in parser_text:
-              raise SystemExit('Regra de sinal do parser Nubank não encontrada')
-          parser_text = parser_text.replace(old, new, 1)
-
-          old = """      valor: Math.abs(parseFloat(valor.replace(/[.,]/g, (m, i) => m === ',' ? '.' : m))),
-          """
-          new = """      valor: Math.abs(valorNumerico),
-          """
-          if old not in parser_text:
-              raise SystemExit('Valor do parser Nubank não encontrado')
-          parser_text = parser_text.replace(old, new, 1)
-          parser.write_text(parser_text)
           PY
 
-      - name: Validar sintaxe
-        run: |
-          node --check backend-server.js
-          node --check drive-finance-parser.js
+      - name: Validar sintaxe do backend
+        run: node --check backend-server.js
 
       - name: Instalar dependências
         run: npm ci
@@ -373,19 +403,19 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
-          backend = Path('backend-server.js').read_text()
-          parser = Path('drive-finance-parser.js').read_text()
-          assert 'function descricaoIndicaPagamentoCartao' in backend
-          assert 'async function conciliarPagamentosCartaoImportados' in backend
-          assert "c.tipo = 'CREDIT_CARD'" in backend
-          assert "c.tipo <> 'CREDIT_CARD'" in backend
-          assert 'pagamentosCartaoPareados' in backend
-          assert 'Pagamento de fatura do cartão' in backend
-          assert "tipoConta === 'CREDIT_CARD'" in parser
-          assert "valorNumerico < 0 ? 'CREDITO' : 'DEBITO'" in parser
+          text = Path('backend-server.js').read_text()
+          assert 'function descricaoIndicaPagamentoCartao' in text
+          assert 'async function conciliarPagamentosCartaoImportados' in text
+          assert "c.tipo = 'CREDIT_CARD'" in text
+          assert "c.tipo <> 'CREDIT_CARD'" in text
+          assert 'FOR UPDATE OF t' in text
+          assert 'conta.tipo AS conta_tipo' in text
+          assert 'Pagamento de fatura do cartão' in text
+          assert "tipo = valor < 0 ? 'CREDITO' : 'DEBITO';" in text
+          assert text.count('pagamentosCartaoPareados: pagamentosCartao.pareadas') == 3
           PY
 
-      - name: Testar descrições de pagamento e sinal de cartão
+      - name: Testar descrições e regra de sinal
         run: |
           node - <<'NODE'
           const normalizar = (descricao) => String(descricao || '')
@@ -401,7 +431,7 @@ jobs:
           }
           if (ehPagamento('Supermercado')) throw new Error('Falso positivo em compra comum');
           const tipoCartao = (valor) => valor < 0 ? 'CREDITO' : 'DEBITO';
-          if (tipoCartao(-1041.34) !== 'CREDITO' || tipoCartao(296) !== 'DEBITO') throw new Error('Sinal do cartão incorreto');
+          if (tipoCartao(-100) !== 'CREDITO' || tipoCartao(100) !== 'DEBITO') throw new Error('Regra de sinal do cartão incorreta');
           NODE
 
       - name: Remover workflow temporário e commitar correção
@@ -410,5 +440,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "Corrigir pagamentos de cartão como transferências internas"
+          git commit -m "Tratar pagamentos de cartão como transferências internas"
           git push origin HEAD:fix/pagamentos-cartao-transferencia-interna
