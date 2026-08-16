@@ -2383,8 +2383,8 @@ async function buscarTransacaoExistenteParaImportacao(usuarioId, tx, contaId, ha
     const porId = await pool.query(
       `SELECT ${campos}
        ${joins}
-       WHERE t.id = $1 AND t.conta_id = $2 AND c.usuario_id = $3 AND t.deletado_em IS NULL`,
-      [referencia, contaId, usuarioId]
+       WHERE t.id = $1 AND c.usuario_id = $2 AND t.deletado_em IS NULL`,
+      [referencia, usuarioId]
     );
     if (porId.rows[0]) return { ...porId.rows[0], _match_importacao: 'REFERENCIA' };
   }
@@ -2414,11 +2414,11 @@ async function buscarTransacaoExistenteParaImportacao(usuarioId, tx, contaId, ha
   }
 
   const hashLegado = gerarHashTransacaoLegado(tx);
-  const params = [[hashBase, hashLegado], usuarioId, contaId];
+  const params = [[hashBase, hashLegado], usuarioId, contaId, hashBase];
   let filtroReferencia = '';
   if (referencia) {
     params.push(referencia);
-    filtroReferencia = `AND (t.referencia_banco IS NULL OR t.referencia_banco = $4)`;
+    filtroReferencia = `AND (t.referencia_banco IS NULL OR t.referencia_banco = $5)`;
   }
   const porHash = await pool.query(
     `SELECT ${campos}
@@ -2428,7 +2428,7 @@ async function buscarTransacaoExistenteParaImportacao(usuarioId, tx, contaId, ha
        AND t.conta_id = $3
        AND t.deletado_em IS NULL
        ${filtroReferencia}
-     ORDER BY CASE WHEN t.hash_transacao = $1[1] THEN 0 ELSE 1 END, t.criado_em ASC, t.id ASC`,
+     ORDER BY CASE WHEN t.hash_transacao = $4 THEN 0 ELSE 1 END, t.criado_em ASC, t.id ASC`,
     params
   );
 
@@ -2613,7 +2613,7 @@ async function inserirTransacaoImportacao(contaId, tx) {
 }
 
 async function atualizarTransacaoImportacao(usuarioId, tx) {
-  const referenciaImportacao = normalizarReferenciaImportacao(tx);
+  const referenciaImportacao = String(tx.referencia_banco || '').trim() || null;
   const result = await pool.query(
     `UPDATE transacoes t
      SET conta_id = $1,
@@ -2695,11 +2695,15 @@ app.post('/api/importacoes/xlsx/confirmar', verificarToken, async (req, res) => 
         idsExistentesConsumidos
       );
       if (existente?._match_importacao === 'HASH_NATURAL') idsExistentesConsumidos.add(existente.id);
+      const referenciaImportacao = normalizarReferenciaImportacao(txConfirmada);
+      const referenciaPersistida = !existente || existente._match_importacao === 'HASH_NATURAL'
+        ? referenciaImportacao
+        : (existente.referencia_banco || null);
       const txComConta = {
         ...txConfirmada,
         conta_id: contaResolvida.id,
         conta_nome: contaResolvida.nome,
-        referencia_banco: normalizarReferenciaImportacao(txConfirmada),
+        referencia_banco: referenciaPersistida,
         hash_transacao: hash,
       };
 
@@ -2717,7 +2721,7 @@ app.post('/api/importacoes/xlsx/confirmar', verificarToken, async (req, res) => 
         continue;
       }
 
-      if (txComConta.referencia_banco && !existente.referencia_banco) {
+      if (existente._match_importacao === 'HASH_NATURAL' && txComConta.referencia_banco && !existente.referencia_banco) {
         await associarReferenciaImportacao(
           req.usuario.usuario_id,
           existente.id,
@@ -2835,7 +2839,7 @@ app.post('/api/importar', verificarToken, async (req, res) => {
       if (existente) {
         if (existente._match_importacao === 'HASH_NATURAL') idsExistentesConsumidos.add(existente.id);
         const referenciaImportacao = normalizarReferenciaImportacao(tx);
-        if (referenciaImportacao && !existente.referencia_banco) {
+        if (existente._match_importacao === 'HASH_NATURAL' && referenciaImportacao && !existente.referencia_banco) {
           await associarReferenciaImportacao(req.usuario.usuario_id, existente.id, contaId, referenciaImportacao);
         }
         duplicadas++;
