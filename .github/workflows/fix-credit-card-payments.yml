@@ -198,191 +198,30 @@ jobs:
           """
           text = replace_once(text, transfer_marker, helpers, 'helpers de pagamento de cartão')
 
-          text = replace_once(
-              text,
-              "    conta_nome: tx.conta_nome,\n    descricao: tx.descricao,",
-              "    conta_nome: tx.conta_nome,\n    conta_tipo: tx.conta_tipo || null,\n    descricao: tx.descricao,",
-              'conta_tipo no resumo de transferência'
-          )
+          text = replace_once(text, "    conta_nome: tx.conta_nome,\n    descricao: tx.descricao,", "    conta_nome: tx.conta_nome,\n    conta_tipo: tx.conta_tipo || null,\n    descricao: tx.descricao,", 'conta_tipo no resumo de transferência')
 
-          text = replace_in_section(
-              text,
-              'async function buscarTransacoesUsuario(usuarioId, filtros = {}) {',
-              "app.get('/api/transacoes', verificarToken",
-              '            conta.nome AS conta_nome,\n            cat.nome AS categoria_nome,',
-              '            conta.nome AS conta_nome,\n            conta.tipo AS conta_tipo,\n            cat.nome AS categoria_nome,',
-              'conta_tipo no SELECT principal'
-          )
+          text = replace_in_section(text, 'async function buscarTransacoesUsuario(usuarioId, filtros = {}) {', "app.get('/api/transacoes', verificarToken", '            conta.nome AS conta_nome,\n            cat.nome AS categoria_nome,', '            conta.nome AS conta_nome,\n            conta.tipo AS conta_tipo,\n            cat.nome AS categoria_nome,', 'conta_tipo no SELECT principal')
 
-          text = replace_in_section(
-              text,
-              "app.get('/api/transferencias-internas/sugestoes'",
-              "app.post('/api/transferencias-internas/marcar'",
-              "    const creditos = candidatas.filter((tx) => tx.tipo === 'CREDITO');",
-              "    const creditos = candidatas\n      .filter((tx) => tx.tipo === 'CREDITO')\n      .sort((a, b) => Number(contaEhCartao(b) && descricaoIndicaPagamentoCartao(b.descricao)) - Number(contaEhCartao(a) && descricaoIndicaPagamentoCartao(a.descricao)));",
-              'priorização de créditos de pagamento de cartão'
-          )
+          text = replace_in_section(text, "app.get('/api/transferencias-internas/sugestoes'", "app.post('/api/transferencias-internas/marcar'", "    const creditos = candidatas.filter((tx) => tx.tipo === 'CREDITO');", "    const creditos = candidatas\n      .filter((tx) => tx.tipo === 'CREDITO')\n      .sort((a, b) => Number(contaEhCartao(b) && descricaoIndicaPagamentoCartao(b.descricao)) - Number(contaEhCartao(a) && descricaoIndicaPagamentoCartao(a.descricao)));", 'priorização de créditos de pagamento de cartão')
 
-          text = replace_in_section(
-              text,
-              "app.get('/api/transferencias-internas/sugestoes'",
-              "app.post('/api/transferencias-internas/marcar'",
-              """        const descricaoTransferencia = descricaoIndicaTransferencia(debito.descricao) || descricaoIndicaTransferencia(credito.descricao);
-                  if (descricaoTransferencia) motivos.push('Descrição contém Pix/transferência');
-                  const confianca = dias === 0 && descricaoTransferencia ? 'alta' : descricaoTransferencia ? 'média' : 'baixa';
-          """,
-              """        const pagamentoCartao = contaEhCartao(credito) && descricaoIndicaPagamentoCartao(credito.descricao);
-                  const descricaoTransferencia = descricaoIndicaTransferencia(debito.descricao) || descricaoIndicaTransferencia(credito.descricao);
-                  if (pagamentoCartao) motivos.push('Pagamento de fatura do cartão');
-                  if (descricaoTransferencia) motivos.push('Descrição contém Pix/transferência');
-                  const confianca = pagamentoCartao
-                    ? (dias === 0 ? 'alta' : 'média')
-                    : dias === 0 && descricaoTransferencia ? 'alta' : descricaoTransferencia ? 'média' : 'baixa';
-          """,
-              'confiança de pagamento de cartão'
-          )
+          text = replace_in_section(text, "app.get('/api/transferencias-internas/sugestoes'", "app.post('/api/transferencias-internas/marcar'", "        const descricaoTransferencia = descricaoIndicaTransferencia(debito.descricao) || descricaoIndicaTransferencia(credito.descricao);\n        if (descricaoTransferencia) motivos.push('Descrição contém Pix/transferência');\n        const confianca = dias === 0 && descricaoTransferencia ? 'alta' : descricaoTransferencia ? 'média' : 'baixa';", "        const pagamentoCartao = contaEhCartao(credito) && descricaoIndicaPagamentoCartao(credito.descricao);\n        const descricaoTransferencia = descricaoIndicaTransferencia(debito.descricao) || descricaoIndicaTransferencia(credito.descricao);\n        if (pagamentoCartao) motivos.push('Pagamento de fatura do cartão');\n        if (descricaoTransferencia) motivos.push('Descrição contém Pix/transferência');\n        const confianca = pagamentoCartao\n          ? (dias === 0 ? 'alta' : 'média')\n          : dias === 0 && descricaoTransferencia ? 'alta' : descricaoTransferencia ? 'média' : 'baixa';", 'confiança de pagamento de cartão')
 
-          text = replace_in_section(
-              text,
-              "app.post('/api/importar/:arquivoId'",
-              "app.get('/api/notificacoes'",
-              "            tipo = valor < 0 ? 'DEBITO' : 'CREDITO';",
-              "            tipo = valor < 0 ? 'CREDITO' : 'DEBITO';",
-              'sinal de cartão no importador do Drive'
-          )
+          text = replace_in_section(text, "app.post('/api/importar/:arquivoId'", "app.get('/api/notificacoes'", "            tipo = valor < 0 ? 'DEBITO' : 'CREDITO';", "            tipo = valor < 0 ? 'CREDITO' : 'DEBITO';", 'sinal de cartão no importador do Drive')
+          text = replace_in_section(text, "app.post('/api/importar/:arquivoId'", "app.get('/api/notificacoes'", "        let inseridas = 0, duplicadas = 0;", "        let inseridas = 0, duplicadas = 0;\n        const transacoesImportadasIds = [];", 'IDs importados no Drive')
+          text = replace_in_section(text, "app.post('/api/importar/:arquivoId'", "app.get('/api/notificacoes'", "          const regra = await buscarRegraCompatível(req.usuario.usuario_id, tx.descricao);\n\n          await pool.query(", "          const regra = await buscarRegraCompatível(req.usuario.usuario_id, tx.descricao);\n          const transacaoId = crypto.randomUUID();\n\n          await pool.query(", 'UUID explícito no importador do Drive')
+          text = replace_in_section(text, "app.post('/api/importar/:arquivoId'", "app.get('/api/notificacoes'", "              crypto.randomUUID(),\n              contaId,", "              transacaoId,\n              contaId,", 'uso do UUID explícito no Drive')
+          text = replace_in_section(text, "app.post('/api/importar/:arquivoId'", "app.get('/api/notificacoes'", "          inseridas++;\n        }\n\n        res.json({", "          inseridas++;\n          transacoesImportadasIds.push(transacaoId);\n        }\n\n        const pagamentosCartao = await conciliarPagamentosCartaoImportados(req.usuario.usuario_id, transacoesImportadasIds);\n\n        res.json({", 'conciliação após importação do Drive')
+          text = replace_in_section(text, "app.post('/api/importar/:arquivoId'", "app.get('/api/notificacoes'", "          duplicadas,\n          total: transacoes.length", "          duplicadas,\n          pagamentosCartaoPareados: pagamentosCartao.pareadas,\n          total: transacoes.length", 'resposta do Drive')
 
-          text = replace_in_section(
-              text,
-              "app.post('/api/importar/:arquivoId'",
-              "app.get('/api/notificacoes'",
-              "        let inseridas = 0, duplicadas = 0;",
-              "        let inseridas = 0, duplicadas = 0;\n        const transacoesImportadasIds = [];",
-              'IDs importados no Drive'
-          )
+          text = replace_in_section(text, "app.post('/api/importacoes/xlsx/confirmar'", "app.post('/api/importar', verificarToken", "    const transacaoPorTempId = new Map();", "    const transacaoPorTempId = new Map();\n    const transacoesImportadasIds = new Set();", 'IDs importados no confirmar XLSX')
+          text = replace_in_section(text, "app.post('/api/importacoes/xlsx/confirmar'", "app.post('/api/importar', verificarToken", "            transacaoPorTempId.set(tx.hash_transacao || hash, transacaoInseridaId);", "            transacaoPorTempId.set(tx.hash_transacao || hash, transacaoInseridaId);\n            transacoesImportadasIds.add(transacaoInseridaId);", 'nova transação no conjunto XLSX')
+          text = replace_in_section(text, "app.post('/api/importacoes/xlsx/confirmar'", "app.post('/api/importar', verificarToken", "        if (await atualizarTransacaoImportacao(req.usuario.usuario_id, { ...txComConta, transacaoId: existente.id })) atualizadas++;", "        if (await atualizarTransacaoImportacao(req.usuario.usuario_id, { ...txComConta, transacaoId: existente.id })) {\n          atualizadas++;\n          transacoesImportadasIds.add(existente.id);\n        }", 'transação atualizada no conjunto XLSX')
+          text = replace_in_section(text, "app.post('/api/importacoes/xlsx/confirmar'", "app.post('/api/importar', verificarToken", "    let conciliacoesAplicadas = 0;", "    const pagamentosCartao = await conciliarPagamentosCartaoImportados(req.usuario.usuario_id, [...transacoesImportadasIds]);\n\n    let conciliacoesAplicadas = 0;", 'conciliação pós XLSX')
+          text = replace_in_section(text, "app.post('/api/importacoes/xlsx/confirmar'", "app.post('/api/importar', verificarToken", "      conciliacoesAplicadas,\n      erros: preview.erros.length,", "      conciliacoesAplicadas,\n      pagamentosCartaoPareados: pagamentosCartao.pareadas,\n      erros: preview.erros.length,", 'resposta XLSX')
 
-          text = replace_in_section(
-              text,
-              "app.post('/api/importar/:arquivoId'",
-              "app.get('/api/notificacoes'",
-              """          const regra = await buscarRegraCompatível(req.usuario.usuario_id, tx.descricao);
-
-                    await pool.query(
-          """,
-              """          const regra = await buscarRegraCompatível(req.usuario.usuario_id, tx.descricao);
-                    const transacaoId = crypto.randomUUID();
-
-                    await pool.query(
-          """,
-              'UUID explícito no importador do Drive'
-          )
-
-          text = replace_in_section(
-              text,
-              "app.post('/api/importar/:arquivoId'",
-              "app.get('/api/notificacoes'",
-              "              crypto.randomUUID(),\n              contaId,",
-              "              transacaoId,\n              contaId,",
-              'uso do UUID explícito no Drive'
-          )
-
-          text = replace_in_section(
-              text,
-              "app.post('/api/importar/:arquivoId'",
-              "app.get('/api/notificacoes'",
-              "          inseridas++;\n        }\n\n        res.json({",
-              "          inseridas++;\n          transacoesImportadasIds.push(transacaoId);\n        }\n\n        const pagamentosCartao = await conciliarPagamentosCartaoImportados(req.usuario.usuario_id, transacoesImportadasIds);\n\n        res.json({",
-              'conciliação após importação do Drive'
-          )
-
-          text = replace_in_section(
-              text,
-              "app.post('/api/importar/:arquivoId'",
-              "app.get('/api/notificacoes'",
-              "          duplicadas,\n          total: transacoes.length",
-              "          duplicadas,\n          pagamentosCartaoPareados: pagamentosCartao.pareadas,\n          total: transacoes.length",
-              'resposta do Drive'
-          )
-
-          text = replace_in_section(
-              text,
-              "app.post('/api/importacoes/xlsx/confirmar'",
-              "app.post('/api/importar', verificarToken",
-              "    const transacaoPorTempId = new Map();",
-              "    const transacaoPorTempId = new Map();\n    const transacoesImportadasIds = new Set();",
-              'IDs importados no confirmar XLSX'
-          )
-
-          text = replace_in_section(
-              text,
-              "app.post('/api/importacoes/xlsx/confirmar'",
-              "app.post('/api/importar', verificarToken",
-              "            transacaoPorTempId.set(tx.hash_transacao || hash, transacaoInseridaId);",
-              "            transacaoPorTempId.set(tx.hash_transacao || hash, transacaoInseridaId);\n            transacoesImportadasIds.add(transacaoInseridaId);",
-              'nova transação no conjunto XLSX'
-          )
-
-          text = replace_in_section(
-              text,
-              "app.post('/api/importacoes/xlsx/confirmar'",
-              "app.post('/api/importar', verificarToken",
-              """      if (alteracoes.length > 0 && atualizarExistentes) {
-                if (await atualizarTransacaoImportacao(req.usuario.usuario_id, { ...txComConta, transacaoId: existente.id })) atualizadas++;
-              } else {
-          """,
-              """      if (alteracoes.length > 0 && atualizarExistentes) {
-                if (await atualizarTransacaoImportacao(req.usuario.usuario_id, { ...txComConta, transacaoId: existente.id })) {
-                  atualizadas++;
-                  transacoesImportadasIds.add(existente.id);
-                }
-              } else {
-          """,
-              'transação atualizada no conjunto XLSX'
-          )
-
-          text = replace_in_section(
-              text,
-              "app.post('/api/importacoes/xlsx/confirmar'",
-              "app.post('/api/importar', verificarToken",
-              "    let conciliacoesAplicadas = 0;",
-              "    const pagamentosCartao = await conciliarPagamentosCartaoImportados(req.usuario.usuario_id, [...transacoesImportadasIds]);\n\n    let conciliacoesAplicadas = 0;",
-              'conciliação pós XLSX'
-          )
-
-          text = replace_in_section(
-              text,
-              "app.post('/api/importacoes/xlsx/confirmar'",
-              "app.post('/api/importar', verificarToken",
-              "      conciliacoesAplicadas,\n      erros: preview.erros.length,",
-              "      conciliacoesAplicadas,\n      pagamentosCartaoPareados: pagamentosCartao.pareadas,\n      erros: preview.erros.length,",
-              'resposta XLSX'
-          )
-
-          text = replace_in_section(
-              text,
-              "app.post('/api/importar', verificarToken",
-              "app.get('/api/notificacoes'",
-              "    let duplicadas = 0;\n\n    for (const tx of transacoesValidadas) {",
-              "    let duplicadas = 0;\n    const transacoesImportadasIds = [];\n\n    for (const tx of transacoesValidadas) {",
-              'IDs importados na rota legada'
-          )
-
-          text = replace_in_section(
-              text,
-              "app.post('/api/importar', verificarToken",
-              "app.get('/api/notificacoes'",
-              "      } else {\n        inseridas++;\n      }\n    }\n\n    const arquivoHash",
-              "      } else {\n        inseridas++;\n        transacoesImportadasIds.push(insert.rows[0].id);\n      }\n    }\n\n    const pagamentosCartao = await conciliarPagamentosCartaoImportados(req.usuario.usuario_id, transacoesImportadasIds);\n\n    const arquivoHash",
-              'conciliação na rota legada'
-          )
-
-          text = replace_in_section(
-              text,
-              "app.post('/api/importar', verificarToken",
-              "app.get('/api/notificacoes'",
-              "      duplicadas,\n      total: transacoesValidadas.length,",
-              "      duplicadas,\n      pagamentosCartaoPareados: pagamentosCartao.pareadas,\n      total: transacoesValidadas.length,",
-              'resposta da rota legada'
-          )
+          text = replace_in_section(text, "app.post('/api/importar', verificarToken", "app.get('/api/notificacoes'", "    let duplicadas = 0;\n\n    for (const tx of transacoesValidadas) {", "    let duplicadas = 0;\n    const transacoesImportadasIds = [];\n\n    for (const tx of transacoesValidadas) {", 'IDs importados na rota legada')
+          text = replace_in_section(text, "app.post('/api/importar', verificarToken", "app.get('/api/notificacoes'", "      } else {\n        inseridas++;\n      }\n    }\n\n    const arquivoHash", "      } else {\n        inseridas++;\n        transacoesImportadasIds.push(insert.rows[0].id);\n      }\n    }\n\n    const pagamentosCartao = await conciliarPagamentosCartaoImportados(req.usuario.usuario_id, transacoesImportadasIds);\n\n    const arquivoHash", 'conciliação na rota legada')
+          text = replace_in_section(text, "app.post('/api/importar', verificarToken", "app.get('/api/notificacoes'", "      duplicadas,\n      total: transacoesValidadas.length,", "      duplicadas,\n      pagamentosCartaoPareados: pagamentosCartao.pareadas,\n      total: transacoesValidadas.length,", 'resposta da rota legada')
 
           path.write_text(text)
           PY
