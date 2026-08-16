@@ -1,0 +1,141 @@
+name: Refine import duplicate external id
+
+on:
+  push:
+    branches:
+      - fix/importacao-duplicidade-id-externo
+
+permissions:
+  contents: write
+
+jobs:
+  refine-and-validate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/importacao-duplicidade-id-externo
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Refinar SQL e associação de referência
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('backend-server.js')
+          text = path.read_text()
+
+          old = """  const hashLegado = gerarHashTransacaoLegado(tx);
+            const params = [[hashBase, hashLegado], usuarioId, contaId];
+            let filtroReferencia = '';
+            if (referencia) {
+              params.push(referencia);
+              filtroReferencia = `AND (t.referencia_banco IS NULL OR t.referencia_banco = $4)`;
+            }
+            const porHash = await pool.query(
+              `SELECT ${campos}
+               ${joins}
+               WHERE t.hash_transacao = ANY($1::text[])
+                 AND c.usuario_id = $2
+                 AND t.conta_id = $3
+                 AND t.deletado_em IS NULL
+                 ${filtroReferencia}
+               ORDER BY CASE WHEN t.hash_transacao = $1[1] THEN 0 ELSE 1 END, t.criado_em ASC, t.id ASC`,
+              params
+            );
+          """
+          new = """  const hashLegado = gerarHashTransacaoLegado(tx);
+            const params = [[hashBase, hashLegado], usuarioId, contaId, hashBase];
+            let filtroReferencia = '';
+            if (referencia) {
+              params.push(referencia);
+              filtroReferencia = `AND (t.referencia_banco IS NULL OR t.referencia_banco = $5)`;
+            }
+            const porHash = await pool.query(
+              `SELECT ${campos}
+               ${joins}
+               WHERE t.hash_transacao = ANY($1::text[])
+                 AND c.usuario_id = $2
+                 AND t.conta_id = $3
+                 AND t.deletado_em IS NULL
+                 ${filtroReferencia}
+               ORDER BY CASE WHEN t.hash_transacao = $4 THEN 0 ELSE 1 END, t.criado_em ASC, t.id ASC`,
+              params
+            );
+          """
+          if old not in text:
+              raise SystemExit('Bloco SQL de fallback não encontrado')
+          text = text.replace(old, new, 1)
+
+          old = """      if (txComConta.referencia_banco && !existente.referencia_banco) {
+                await associarReferenciaImportacao(
+                  req.usuario.usuario_id,
+                  existente.id,
+                  contaResolvida.id,
+                  txComConta.referencia_banco
+                );
+              }
+          """
+          new = """      if (existente._match_importacao === 'HASH_NATURAL' && txComConta.referencia_banco && !existente.referencia_banco) {
+                await associarReferenciaImportacao(
+                  req.usuario.usuario_id,
+                  existente.id,
+                  contaResolvida.id,
+                  txComConta.referencia_banco
+                );
+              }
+          """
+          if old not in text:
+              raise SystemExit('Associação na confirmação não encontrada')
+          text = text.replace(old, new, 1)
+
+          old = """          if (referenciaImportacao && !existente.referencia_banco) {
+                      await associarReferenciaImportacao(req.usuario.usuario_id, existente.id, contaId, referenciaImportacao);
+                    }
+          """
+          new = """          if (existente._match_importacao === 'HASH_NATURAL' && referenciaImportacao && !existente.referencia_banco) {
+                      await associarReferenciaImportacao(req.usuario.usuario_id, existente.id, contaId, referenciaImportacao);
+                    }
+          """
+          if old not in text:
+              raise SystemExit('Associação na rota legada não encontrada')
+          text = text.replace(old, new, 1)
+
+          path.write_text(text)
+          PY
+
+      - name: Validar sintaxe do backend
+        run: node --check backend-server.js
+
+      - name: Instalar dependências
+        run: npm ci
+
+      - name: Validar build
+        run: npm run build
+
+      - name: Validar diff
+        run: git diff --check
+
+      - name: Guardrails finais
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          text = Path('backend-server.js').read_text()
+          assert 'ORDER BY CASE WHEN t.hash_transacao = $4 THEN 0 ELSE 1 END' in text
+          assert '$1[1]' not in text
+          assert "existente._match_importacao === 'HASH_NATURAL' && txComConta.referencia_banco" in text
+          assert "existente._match_importacao === 'HASH_NATURAL' && referenciaImportacao" in text
+          PY
+
+      - name: Remover workflow temporário e commitar refinamento
+        run: |
+          rm -f .github/workflows/refine-import-duplicate-external-id.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Refinar compatibilidade da deduplicação por referência"
+          git push origin HEAD:fix/importacao-duplicidade-id-externo
