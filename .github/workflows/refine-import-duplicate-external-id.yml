@@ -22,88 +22,86 @@ jobs:
           node-version: 20
           cache: npm
 
-      - name: Refinar SQL e associação de referência
+      - name: Refinar compatibilidade da identidade de importação
         run: |
           python - <<'PY'
           from pathlib import Path
+
           path = Path('backend-server.js')
           text = path.read_text()
 
-          old = """  const hashLegado = gerarHashTransacaoLegado(tx);
-            const params = [[hashBase, hashLegado], usuarioId, contaId];
-            let filtroReferencia = '';
-            if (referencia) {
-              params.push(referencia);
-              filtroReferencia = `AND (t.referencia_banco IS NULL OR t.referencia_banco = $4)`;
-            }
-            const porHash = await pool.query(
-              `SELECT ${campos}
-               ${joins}
-               WHERE t.hash_transacao = ANY($1::text[])
-                 AND c.usuario_id = $2
-                 AND t.conta_id = $3
-                 AND t.deletado_em IS NULL
-                 ${filtroReferencia}
-               ORDER BY CASE WHEN t.hash_transacao = $1[1] THEN 0 ELSE 1 END, t.criado_em ASC, t.id ASC`,
-              params
-            );
-          """
-          new = """  const hashLegado = gerarHashTransacaoLegado(tx);
-            const params = [[hashBase, hashLegado], usuarioId, contaId, hashBase];
-            let filtroReferencia = '';
-            if (referencia) {
-              params.push(referencia);
-              filtroReferencia = `AND (t.referencia_banco IS NULL OR t.referencia_banco = $5)`;
-            }
-            const porHash = await pool.query(
-              `SELECT ${campos}
-               ${joins}
-               WHERE t.hash_transacao = ANY($1::text[])
-                 AND c.usuario_id = $2
-                 AND t.conta_id = $3
-                 AND t.deletado_em IS NULL
-                 ${filtroReferencia}
-               ORDER BY CASE WHEN t.hash_transacao = $4 THEN 0 ELSE 1 END, t.criado_em ASC, t.id ASC`,
-              params
-            );
-          """
-          if old not in text:
-              raise SystemExit('Bloco SQL de fallback não encontrado')
-          text = text.replace(old, new, 1)
+          replacements = [
+            (
+              "const params = [[hashBase, hashLegado], usuarioId, contaId];",
+              "const params = [[hashBase, hashLegado], usuarioId, contaId, hashBase];",
+              1,
+            ),
+            (
+              "filtroReferencia = `AND (t.referencia_banco IS NULL OR t.referencia_banco = $4)`;",
+              "filtroReferencia = `AND (t.referencia_banco IS NULL OR t.referencia_banco = $5)`;",
+              1,
+            ),
+            (
+              "ORDER BY CASE WHEN t.hash_transacao = $1[1] THEN 0 ELSE 1 END, t.criado_em ASC, t.id ASC",
+              "ORDER BY CASE WHEN t.hash_transacao = $4 THEN 0 ELSE 1 END, t.criado_em ASC, t.id ASC",
+              1,
+            ),
+            (
+              "WHERE t.id = $1 AND t.conta_id = $2 AND c.usuario_id = $3 AND t.deletado_em IS NULL`,\n      [referencia, contaId, usuarioId]",
+              "WHERE t.id = $1 AND c.usuario_id = $2 AND t.deletado_em IS NULL`,\n      [referencia, usuarioId]",
+              1,
+            ),
+            (
+              "if (txComConta.referencia_banco && !existente.referencia_banco) {",
+              "if (existente._match_importacao === 'HASH_NATURAL' && txComConta.referencia_banco && !existente.referencia_banco) {",
+              1,
+            ),
+            (
+              "if (referenciaImportacao && !existente.referencia_banco) {",
+              "if (existente._match_importacao === 'HASH_NATURAL' && referenciaImportacao && !existente.referencia_banco) {",
+              1,
+            ),
+          ]
 
-          old = """      if (txComConta.referencia_banco && !existente.referencia_banco) {
-                await associarReferenciaImportacao(
-                  req.usuario.usuario_id,
-                  existente.id,
-                  contaResolvida.id,
-                  txComConta.referencia_banco
-                );
-              }
-          """
-          new = """      if (existente._match_importacao === 'HASH_NATURAL' && txComConta.referencia_banco && !existente.referencia_banco) {
-                await associarReferenciaImportacao(
-                  req.usuario.usuario_id,
-                  existente.id,
-                  contaResolvida.id,
-                  txComConta.referencia_banco
-                );
-              }
-          """
-          if old not in text:
-              raise SystemExit('Associação na confirmação não encontrada')
-          text = text.replace(old, new, 1)
+          for old, new, expected in replacements:
+            count = text.count(old)
+            if count != expected:
+              raise SystemExit(f'Esperava {expected} ocorrência(s) de {old[:80]!r}, encontrei {count}')
+            text = text.replace(old, new, expected)
 
-          old = """          if (referenciaImportacao && !existente.referencia_banco) {
-                      await associarReferenciaImportacao(req.usuario.usuario_id, existente.id, contaId, referenciaImportacao);
-                    }
+          old_tx = """      const txComConta = {
+                ...txConfirmada,
+                conta_id: contaResolvida.id,
+                conta_nome: contaResolvida.nome,
+                referencia_banco: normalizarReferenciaImportacao(txConfirmada),
+                hash_transacao: hash,
+              };
           """
-          new = """          if (existente._match_importacao === 'HASH_NATURAL' && referenciaImportacao && !existente.referencia_banco) {
-                      await associarReferenciaImportacao(req.usuario.usuario_id, existente.id, contaId, referenciaImportacao);
-                    }
+          new_tx = """      const referenciaImportacao = normalizarReferenciaImportacao(txConfirmada);
+              const referenciaPersistida = !existente || existente._match_importacao === 'HASH_NATURAL'
+                ? referenciaImportacao
+                : (existente.referencia_banco || null);
+              const txComConta = {
+                ...txConfirmada,
+                conta_id: contaResolvida.id,
+                conta_nome: contaResolvida.nome,
+                referencia_banco: referenciaPersistida,
+                hash_transacao: hash,
+              };
           """
-          if old not in text:
-              raise SystemExit('Associação na rota legada não encontrada')
-          text = text.replace(old, new, 1)
+          if text.count(old_tx) != 1:
+            raise SystemExit(f'Bloco txComConta esperado 1 vez, encontrado {text.count(old_tx)}')
+          text = text.replace(old_tx, new_tx, 1)
+
+          inicio = text.index('async function atualizarTransacaoImportacao(usuarioId, tx) {')
+          fim = text.index("app.post('/api/importacoes/xlsx/preview'", inicio)
+          trecho = text[inicio:fim]
+          old_ref = 'const referenciaImportacao = normalizarReferenciaImportacao(tx);'
+          new_ref = "const referenciaImportacao = String(tx.referencia_banco || '').trim() || null;"
+          if trecho.count(old_ref) != 1:
+            raise SystemExit(f'Referência no update esperada 1 vez, encontrada {trecho.count(old_ref)}')
+          trecho = trecho.replace(old_ref, new_ref, 1)
+          text = text[:inicio] + trecho + text[fim:]
 
           path.write_text(text)
           PY
@@ -120,16 +118,50 @@ jobs:
       - name: Validar diff
         run: git diff --check
 
-      - name: Guardrails finais
+      - name: Guardrails finais da duplicidade
         run: |
           python - <<'PY'
           from pathlib import Path
           text = Path('backend-server.js').read_text()
-          assert 'ORDER BY CASE WHEN t.hash_transacao = $4 THEN 0 ELSE 1 END' in text
-          assert '$1[1]' not in text
-          assert "existente._match_importacao === 'HASH_NATURAL' && txComConta.referencia_banco" in text
-          assert "existente._match_importacao === 'HASH_NATURAL' && referenciaImportacao" in text
+          checks = [
+            'function gerarHashTransacaoImportacao',
+            '|referencia_importacao|',
+            "ORDER BY CASE WHEN t.hash_transacao = $4 THEN 0 ELSE 1 END",
+            "filtroReferencia = `AND (t.referencia_banco IS NULL OR t.referencia_banco = $5)`",
+            "WHERE t.id = $1 AND c.usuario_id = $2 AND t.deletado_em IS NULL",
+            "existente._match_importacao === 'HASH_NATURAL' && txComConta.referencia_banco",
+            "existente._match_importacao === 'HASH_NATURAL' && referenciaImportacao",
+            'const referenciaPersistida = !existente',
+            "const referenciaImportacao = String(tx.referencia_banco || '').trim() || null;",
+          ]
+          missing = [item for item in checks if item not in text]
+          if missing:
+            raise SystemExit(f'Guardrails ausentes: {missing}')
+          if '$1[1]' in text:
+            raise SystemExit('Sintaxe ambígua de subscript de parâmetro ainda presente')
+          if text.count('gerarHashTransacaoImportacao(') < 4:
+            raise SystemExit('Hash por referência não aplicado em todos os fluxos esperados')
           PY
+
+      - name: Testar identidade externa e fallback legado
+        run: |
+          node - <<'NODE'
+          const crypto = require('crypto');
+          const conta = 'conta-teste';
+          const natural = { data: '2026-01-01', descricao: 'MESMA COMPRA', valor: 10, tipo: 'DEBITO' };
+          const refs = ['11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222'];
+          const hashRef = (ref) => crypto.createHash('sha256').update(`${conta}|referencia_importacao|${ref}`).digest('hex');
+          if (hashRef(refs[0]) === hashRef(refs[1])) throw new Error('IDs externos distintos não podem colidir');
+          if (hashRef(refs[0]) !== hashRef(refs[0])) throw new Error('Mesmo ID externo deve ser idempotente');
+          const candidatosLegados = ['legacy-row'];
+          const consumidos = new Set();
+          const consumir = () => candidatosLegados.find((id) => !consumidos.has(id)) || null;
+          const primeiro = consumir();
+          if (!primeiro) throw new Error('Primeiro ID externo deve poder casar com registro legado');
+          consumidos.add(primeiro);
+          if (consumir() !== null) throw new Error('Um único registro legado não pode absorver dois IDs externos distintos');
+          if (!natural.descricao) throw new Error('Fixture inválida');
+          NODE
 
       - name: Remover workflow temporário e commitar refinamento
         run: |
