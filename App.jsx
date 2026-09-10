@@ -1623,7 +1623,6 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
   const [editandoItem, setEditandoItem] = useState(null);
   const [escopoEdicao, setEscopoEdicao] = useState('APENAS_ESTE');
   const [formularioAberto, setFormularioAberto] = useState(false);
-  const [abaPlanejamento, setAbaPlanejamento] = useState('resumo');
   const formularioInicial = { descricao: '', categoria: '', categoria_id: '', tipo_despesa: 'FIXA', valor_previsto: '', dia_previsto: '', observacao: '', recorrencia_tipo: 'UNICA', recorrencia_termino: 'SEM_FIM', mes_fim: String(hoje.getMonth() + 1), ano_fim: String(hoje.getFullYear()), quantidade_parcelas: '', parcela_inicial: '1' };
   const [form, setForm] = useState(formularioInicial);
 
@@ -1740,7 +1739,6 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
 
   const editarPlanejamento = (item) => {
     setFormularioAberto(true);
-    setAbaPlanejamento('planejamentos');
     setEditandoId(item.id);
     setEditandoItem(item);
     setEscopoEdicao('APENAS_ESTE');
@@ -1801,9 +1799,6 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
     <div style={{ minHeight: 0, background: '#f5f5f5', padding: '20px' }}>
       <div style={{ maxWidth: '100%', margin: '0 auto' }}>
         <PageHeader icone="🗓️" titulo="Planejamento Mensal" descricao="Planeje seus gastos antes do mês acontecer." breadcrumb={<Breadcrumb atual="Planejamento Mensal" onVoltar={onVoltar} />} />
-        <div className="admin-tabs">
-          {[['resumo', '📊 Resumo'], ['projecoes', '📈 Projeções'], ['categorias', '🏷️ Categorias'], ['planejamentos', '🧾 Planejamentos']].map(([id, label]) => <button key={id} className={abaPlanejamento === id ? 'active' : ''} onClick={() => setAbaPlanejamento(id)}>{label}</button>)}
-        </div>
         <div style={{ background: 'white', borderRadius: '16px', padding: '22px', boxShadow: '0 2px 10px rgba(15,23,42,0.08)', marginBottom: '18px' }}>
           <p style={{ color: '#64748b', marginTop: 0 }}>Esta tela é de orçamento e previsão: planejamento não é conciliação com transações individuais.</p>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '12px', margin: '18px 0' }}>
@@ -1820,37 +1815,20 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
               <Btn variant="ghost" size="sm" onClick={limparFiltrosPlanejamento}>Limpar filtros</Btn>
             </div>
           </div>
-          <h2 style={{ margin: '18px 0 12px', display: abaPlanejamento === 'resumo' ? 'block' : 'none' }}>Resumo planejado de {rotuloMesAnoSelecionado}</h2>
-          <div style={{ display: abaPlanejamento === 'resumo' ? 'grid' : 'none', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '12px', marginTop: '16px' }}>
+          <h2 style={{ margin: '18px 0 12px', display: 'block' }}>Resumo planejado de {rotuloMesAnoSelecionado}</h2>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '12px', marginTop: '16px' }}>
             <KpiCard titulo="Fixas planejadas" valor={formatarMoeda(resumo.totalFixas)} detalhe="Compromissos fixos do mês" cor="#2563eb" fundo="#eff6ff" />
             <KpiCard titulo="Variáveis planejadas" valor={formatarMoeda(resumo.totalVariaveis)} detalhe="Estimativas variáveis" cor="#f97316" fundo="#fff7ed" />
             <KpiCard titulo="Total previsto no mês" valor={formatarMoeda(resumo.totalPrevisto)} detalhe="Soma do planejamento" cor="#0f766e" fundo="#f0fdfa" />
             <KpiCard titulo="Itens planejados" valor={Number(resumo.quantidade || 0)} detalhe="Despesas cadastradas" cor="#475569" fundo="#f8fafc" />
             {parcelasPlanejadas.length > 0 && <KpiCard titulo="Parcelas previstas" valor={formatarMoeda(totalParcelasPlanejadas)} detalhe={`${parcelasPlanejadas.length} parcela(s) no mês`} cor="#7c3aed" fundo="#f5f3ff" />}
           </div>
-          <div style={{ display: abaPlanejamento === 'resumo' ? 'block' : 'none', marginTop: '12px', background: '#f8fafc', border: '1px solid #e5e7eb', borderRadius: '10px', padding: '12px', color: '#64748b' }}>
+          <div style={{ display: 'block', marginTop: '12px', background: '#f8fafc', border: '1px solid #e5e7eb', borderRadius: '10px', padding: '12px', color: '#64748b' }}>
             <strong style={{ color: '#334155' }}>Comparativo com realizado:</strong> realizado no mês {formatarMoeda(resumo.totalRealizado)} · diferença {formatarMoeda(resumo.diferencaPrevistoRealizado)}.
           </div>
         </div>
 
-        <div style={{ display: abaPlanejamento === 'categorias' ? 'block' : 'none', background: 'white', borderRadius: '16px', padding: '22px', boxShadow: '0 2px 10px rgba(15,23,42,0.08)', marginBottom: '18px' }}>
-          <h2 style={{ margin: '0 0 6px' }}>Planejado x Realizado por categoria</h2>
-          <p style={{ color: '#64748b', marginTop: 0 }}>Comparativo secundário do mês selecionado. O planejado vem das despesas planejadas e o realizado soma transações de saída categorizadas no mês, sem transferências internas.</p>
-          {comparativoCategorias.length === 0 ? <p style={{ color: '#64748b' }}>Sem valores planejados ou realizados por categoria neste mês.</p> : (
-            <div style={{ overflowX: 'auto' }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '720px' }}>
-                <thead style={{ background: '#f8fafc' }}><tr>{['Categoria','Valor planejado','Valor realizado','Diferença','Percentual utilizado'].map((h) => <th key={h} style={{ padding: '10px', textAlign: 'left' }}>{h}</th>)}</tr></thead>
-                <tbody>{comparativoCategorias.map((item) => {
-                  const diferenca = Number(item.diferenca || 0);
-                  const percentual = item.percentualUtilizado === null || item.percentualUtilizado === undefined ? '—' : formatarPercentual(Number(item.percentualUtilizado));
-                  return <tr key={item.categoriaId || item.categoria} style={{ borderTop: '1px solid #e5e7eb' }}><td style={{ padding: '10px', fontWeight: 'bold' }}>{item.categoria || 'Sem categoria'}</td><td style={{ padding: '10px' }}>{formatarMoeda(item.valorPlanejado)}</td><td style={{ padding: '10px' }}>{formatarMoeda(item.valorRealizado)}</td><td style={{ padding: '10px', color: diferenca < 0 ? '#dc2626' : '#0f766e', fontWeight: 'bold' }}>{formatarMoeda(diferenca)}</td><td style={{ padding: '10px' }}>{percentual}</td></tr>;
-                })}</tbody>
-              </table>
-            </div>
-          )}
-        </div>
-
-        <div style={{ display: abaPlanejamento === 'projecoes' ? 'block' : 'none', background: 'white', borderRadius: '16px', padding: '22px', boxShadow: '0 2px 10px rgba(15,23,42,0.08)', marginBottom: '18px' }}>
+        <div style={{ display: 'block', background: 'white', borderRadius: '16px', padding: '22px', boxShadow: '0 2px 10px rgba(15,23,42,0.08)', marginBottom: '18px' }}>
           <h2 style={{ margin: '0 0 6px' }}>Compromissos previstos para os próximos meses</h2>
           <p style={{ color: '#64748b', marginTop: 0 }}>Valores calculados com base nas despesas únicas, recorrentes e parceladas cadastradas no planejamento.</p>
           <div style={{ display: 'flex', gap: '14px', flexWrap: 'wrap', marginBottom: '16px', color: '#475569', fontSize: '13px' }}>
@@ -1892,7 +1870,24 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
           )}
         </div>
 
-        <div style={{ display: abaPlanejamento === 'categorias' ? 'block' : 'none', background: 'white', borderRadius: '16px', padding: '22px', boxShadow: '0 2px 10px rgba(15,23,42,0.08)', marginBottom: '18px' }}>
+        <div style={{ display: 'block', background: 'white', borderRadius: '16px', padding: '22px', boxShadow: '0 2px 10px rgba(15,23,42,0.08)', marginBottom: '18px' }}>
+          <h2 style={{ margin: '0 0 6px' }}>Planejado x Realizado por categoria</h2>
+          <p style={{ color: '#64748b', marginTop: 0 }}>Comparativo secundário do mês selecionado. O planejado vem das despesas planejadas e o realizado soma transações de saída categorizadas no mês, sem transferências internas.</p>
+          {comparativoCategorias.length === 0 ? <p style={{ color: '#64748b' }}>Sem valores planejados ou realizados por categoria neste mês.</p> : (
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '720px' }}>
+                <thead style={{ background: '#f8fafc' }}><tr>{['Categoria','Valor planejado','Valor realizado','Diferença','Percentual utilizado'].map((h) => <th key={h} style={{ padding: '10px', textAlign: 'left' }}>{h}</th>)}</tr></thead>
+                <tbody>{comparativoCategorias.map((item) => {
+                  const diferenca = Number(item.diferenca || 0);
+                  const percentual = item.percentualUtilizado === null || item.percentualUtilizado === undefined ? '—' : formatarPercentual(Number(item.percentualUtilizado));
+                  return <tr key={item.categoriaId || item.categoria} style={{ borderTop: '1px solid #e5e7eb' }}><td style={{ padding: '10px', fontWeight: 'bold' }}>{item.categoria || 'Sem categoria'}</td><td style={{ padding: '10px' }}>{formatarMoeda(item.valorPlanejado)}</td><td style={{ padding: '10px' }}>{formatarMoeda(item.valorRealizado)}</td><td style={{ padding: '10px', color: diferenca < 0 ? '#dc2626' : '#0f766e', fontWeight: 'bold' }}>{formatarMoeda(diferenca)}</td><td style={{ padding: '10px' }}>{percentual}</td></tr>;
+                })}</tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        <div style={{ display: 'block', background: 'white', borderRadius: '16px', padding: '22px', boxShadow: '0 2px 10px rgba(15,23,42,0.08)', marginBottom: '18px' }}>
           <h2 style={{ margin: '0 0 6px' }}>Distribuição planejada por categoria</h2>
           <p style={{ color: '#64748b', marginTop: 0 }}>Veja como os gastos planejados de cada mês estão distribuídos entre as categorias.</p>
           {linhasResumoCategorias.length === 0 ? <p style={{ color: '#64748b' }}>{planejamentos.length === 0 && haDadosResumoMensal ? 'Não há despesas planejadas para este mês, mas existem valores previstos em outros meses do período analisado.' : 'Nenhuma despesa planejada encontrada para os filtros selecionados.'}</p> : (
@@ -1930,11 +1925,11 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
           )}
         </div>
 
-        <div style={{ display: abaPlanejamento === 'planejamentos' ? 'block' : 'none', marginBottom: '14px' }}>
-          <Btn variant="primary" onClick={() => { setFormularioAberto(true); setAbaPlanejamento('planejamentos'); }}>+ Adicionar despesa planejada</Btn>
+        <div style={{ display: 'block', marginBottom: '14px' }}>
+          <Btn variant="primary" onClick={() => setFormularioAberto(true)}>+ Adicionar despesa planejada</Btn>
         </div>
 
-        <div style={{ display: abaPlanejamento === 'planejamentos' ? 'grid' : 'none', gridTemplateColumns: formularioAberto ? 'repeat(auto-fit, minmax(320px, 1fr))' : '1fr', gap: '18px' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: formularioAberto ? 'repeat(auto-fit, minmax(320px, 1fr))' : '1fr', gap: '18px' }}>
           {formularioAberto && <form onSubmit={salvarPlanejamento} style={{ background: 'white', borderRadius: '14px', padding: '18px', display: 'grid', gap: '12px', border: '1px solid #e5e7eb' }}>
             <h2 style={{ margin: 0 }}>{editandoId ? 'Editar despesa planejada' : 'Adicionar despesa planejada'}</h2>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
