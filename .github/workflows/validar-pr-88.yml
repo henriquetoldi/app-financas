@@ -1,0 +1,40 @@
+name: Validar PR 88
+
+on:
+  push:
+    branches:
+      - chatgpt-orcamento-tela-unica
+
+permissions:
+  contents: write
+
+jobs:
+  validar:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validar backend sem alteração
+        run: node --check backend-server.js
+
+      - name: Instalar dependências
+        run: npm ci
+
+      - name: Validar build
+        run: npm run build
+
+      - name: Validar diff
+        run: git diff 37185bb10455f5fcc9c6ea05d71bee7f9dcc18f0...HEAD --check
+
+      - name: Remover workflow temporário
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/validar-pr-88.yml
+          git commit -m "chore: remover workflow temporário de validação"
+          git push origin HEAD:chatgpt-orcamento-tela-unica
