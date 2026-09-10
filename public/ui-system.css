@@ -390,28 +390,3 @@ body {
     padding: 10px 14px !important;
   }
 }
-
-/* Orçamento em tela única: mantém apenas a aba principal Orçamento e exibe todos os blocos internos em sequência. */
-.content-card:not(.admin-screen) > .admin-tabs + div:has(> div > .page-header + .admin-tabs) > div > .admin-tabs {
-  display: none !important;
-}
-
-.content-card:not(.admin-screen) > .admin-tabs + div:has(> div > .page-header + .admin-tabs) > div > .admin-tabs ~ div {
-  display: block !important;
-}
-
-.content-card:not(.admin-screen) > .admin-tabs + div:has(> div > .page-header + .admin-tabs) > div > .admin-tabs ~ div:last-child {
-  display: grid !important;
-}
-
-.content-card:not(.admin-screen) > .admin-tabs + div:has(> div > .page-header + .admin-tabs) > div > .admin-tabs + div > h2 {
-  display: block !important;
-}
-
-.content-card:not(.admin-screen) > .admin-tabs + div:has(> div > .page-header + .admin-tabs) > div > .admin-tabs + div > div:has(> .kpi-card) {
-  display: grid !important;
-}
-
-.content-card:not(.admin-screen) > .admin-tabs + div:has(> div > .page-header + .admin-tabs) > div > .admin-tabs + div > div:last-child {
-  display: block !important;
-}
