@@ -1616,6 +1616,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
   const [comparativoCategorias, setComparativoCategorias] = useState([]);
   const [resumoCategorias, setResumoCategorias] = useState([]);
   const [categorias, setCategorias] = useState([]);
+  const [contasPlanejamento, setContasPlanejamento] = useState([]);
   const [filtrosPlanejamento, setFiltrosPlanejamento] = useState({ tipo: 'TODOS', recorrencia: 'TODAS', categoria: '', periodo: 12 });
   const [carregandoResumoMensal, setCarregandoResumoMensal] = useState(false);
   const [carregando, setCarregando] = useState(false);
@@ -1623,12 +1624,23 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
   const [editandoItem, setEditandoItem] = useState(null);
   const [escopoEdicao, setEscopoEdicao] = useState('APENAS_ESTE');
   const [formularioAberto, setFormularioAberto] = useState(false);
-  const formularioInicial = { descricao: '', categoria: '', categoria_id: '', tipo_despesa: 'FIXA', valor_previsto: '', dia_previsto: '', observacao: '', recorrencia_tipo: 'UNICA', recorrencia_termino: 'SEM_FIM', mes_fim: String(hoje.getMonth() + 1), ano_fim: String(hoje.getFullYear()), quantidade_parcelas: '', parcela_inicial: '1' };
+  const formularioInicial = { descricao: '', categoria: '', categoria_id: '', tipo_despesa: 'FIXA', valor_previsto: '', dia_previsto: '', forma_pagamento: '', conta_id: '', observacao: '', recorrencia_tipo: 'UNICA', recorrencia_termino: 'SEM_FIM', mes_fim: String(hoje.getMonth() + 1), ano_fim: String(hoje.getFullYear()), quantidade_parcelas: '', parcela_inicial: '1' };
   const [form, setForm] = useState(formularioInicial);
 
   const authHeaders = { Authorization: `Bearer ${token}` };
   const nomesMesesCurtos = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
   const opcoesPeriodoGraficos = [3, 6, 12, 24];
+  const formasPagamentoPlanejamento = [
+    ['', 'Não informado'],
+    ['PIX', 'PIX'],
+    ['CARTAO_CREDITO', 'Cartão de crédito'],
+    ['CARTAO_DEBITO', 'Cartão de débito'],
+    ['BOLETO', 'Boleto'],
+    ['DEBITO_AUTOMATICO', 'Débito automático'],
+    ['TRANSFERENCIA', 'Transferência'],
+    ['DINHEIRO', 'Dinheiro'],
+    ['OUTRO', 'Outro'],
+  ];
   const escopoEdicaoInfo = editandoItem?.recorrencia_tipo === 'PARCELADA'
     ? {
         titulo: 'Esta despesa faz parte de um parcelamento. Como deseja aplicar a alteração?',
@@ -1686,6 +1698,15 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
     }
   };
 
+  const carregarContasPlanejamento = async () => {
+    try {
+      const response = await axios.get(`${API_URL}/contas`, { headers: authHeaders });
+      setContasPlanejamento(response.data.contas || []);
+    } catch (error) {
+      console.warn('Não foi possível carregar contas e cartões para o planejamento:', error.response?.data?.erro || error.message);
+    }
+  };
+
   const carregarResumoMensal = async () => {
     setCarregandoResumoMensal(true);
     try {
@@ -1708,7 +1729,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
   };
 
   useEffect(() => { carregarPlanejamento(); carregarResumoMensal(); carregarResumoCategorias(); }, [mes, ano, filtrosPlanejamento.tipo, filtrosPlanejamento.recorrencia, filtrosPlanejamento.categoria, filtrosPlanejamento.periodo]);
-  useEffect(() => { carregarCategorias(); }, []);
+  useEffect(() => { carregarCategorias(); carregarContasPlanejamento(); }, []);
 
   const limparFormulario = () => {
     setEditandoId(null);
@@ -1749,6 +1770,8 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
       tipo_despesa: item.tipo_despesa || 'FIXA',
       valor_previsto: item.valor_previsto || '',
       dia_previsto: item.dia_previsto || '',
+      forma_pagamento: item.forma_pagamento || '',
+      conta_id: item.conta_id || '',
       observacao: item.observacao || '',
       recorrencia_tipo: item.recorrencia_tipo || 'UNICA',
       recorrencia_termino: item.mes_fim && item.ano_fim ? 'COM_FIM' : 'SEM_FIM',
@@ -1779,6 +1802,23 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
     if (item.recorrencia_tipo === 'MENSAL') return item.mes_fim && item.ano_fim ? `Mensal até ${nomesMesesCurtos[Number(item.mes_fim) - 1]}/${item.ano_fim}` : 'Mensal sem fim';
     if (item.recorrencia_tipo === 'PARCELADA') return `Parcelada ${item.parcela_atual || 1}/${item.quantidade_parcelas || '?'}`;
     return 'Única';
+  };
+
+  const rotuloFormaPagamentoPlanejamento = (formaPagamento) => formasPagamentoPlanejamento.find(([valor]) => valor === (formaPagamento || ''))?.[1] || String(formaPagamento || 'Não informado');
+  const rotuloContaPlanejamento = (contaId) => {
+    if (!contaId) return '';
+    const conta = contasPlanejamento.find((item) => item.id === contaId);
+    if (!conta) return 'Conta/cartão não encontrado';
+    const nome = conta.nome || conta.banco || 'Conta/cartão';
+    const status = conta.ativo === false ? ' (inativa)' : '';
+    return `${conta.banco && conta.banco !== nome ? `${nome} · ${conta.banco}` : nome}${status}`;
+  };
+  const rotuloOrigemPagamentoPlanejamento = (item) => {
+    const partes = [];
+    const conta = rotuloContaPlanejamento(item.conta_id);
+    if (conta) partes.push(conta);
+    if (item.forma_pagamento) partes.push(rotuloFormaPagamentoPlanejamento(item.forma_pagamento));
+    return partes.length > 0 ? partes.join(' · ') : 'Pagamento não informado';
   };
 
   const maiorTotalResumoMensal = Math.max(...resumoMensal.map((item) => Number(item.total_previsto || 0)), 0);
@@ -1925,6 +1965,7 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
                           <div style={{ minWidth: 0 }}>
                             <div title={item.descricao || 'Despesa planejada'} style={{ color: '#334155', fontSize: '12px', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.descricao || 'Despesa planejada'}</div>
                             <div style={{ color: '#94a3b8', fontSize: '10px', marginTop: '2px' }}>{item.categoria || 'Sem categoria'} · {rotuloRecorrencia(item)}</div>
+                            <div title={rotuloOrigemPagamentoPlanejamento(item)} style={{ color: item.conta_id || item.forma_pagamento ? '#475569' : '#c2410c', fontSize: '10px', marginTop: '3px', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>💳 {rotuloOrigemPagamentoPlanejamento(item)}</div>
                           </div>
                           <span style={{ color: '#475569', fontSize: '11px', fontWeight: 700, whiteSpace: 'nowrap' }}>{formatarMoeda(item.valor_previsto)}</span>
                         </div>
@@ -2079,10 +2120,15 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
                 <label>Parcela inicial<input type="number" min="1" value={form.parcela_inicial} onChange={(e) => setForm({ ...form, parcela_inicial: e.target.value })} placeholder="1" style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} /></label>
               </div>
             )}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: '10px' }}>
               <label>Valor previsto<input type="number" step="0.01" min="0.01" value={form.valor_previsto} onChange={(e) => setForm({ ...form, valor_previsto: e.target.value })} required placeholder="1500" style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} /></label>
               <label>Dia previsto de pagamento<input type="number" min="1" max="31" value={form.dia_previsto} onChange={(e) => setForm({ ...form, dia_previsto: e.target.value })} placeholder="5" style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} /></label>
             </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: '10px' }}>
+              <label>Forma de pagamento<select value={form.forma_pagamento} onChange={(e) => setForm({ ...form, forma_pagamento: e.target.value })} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}>{formasPagamentoPlanejamento.map(([valor, label]) => <option key={valor || 'NAO_INFORMADO'} value={valor}>{label}</option>)}</select></label>
+              <label>Conta / cartão<select value={form.conta_id} onChange={(e) => setForm({ ...form, conta_id: e.target.value })} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }}><option value="">Não informado</option>{contasPlanejamento.map((conta) => <option key={conta.id} value={conta.id}>{conta.nome || conta.banco || 'Conta/cartão'}{conta.banco && conta.banco !== conta.nome ? ` · ${conta.banco}` : ''}{conta.ativo === false ? ' (inativa)' : ''}</option>)}</select></label>
+            </div>
+            <div style={{ color: '#64748b', fontSize: '11px', marginTop: '-2px' }}>Opcional. Informe para saber por onde cada pagamento sairá na linha do tempo.</div>
             <label>Observação<textarea value={form.observacao} onChange={(e) => setForm({ ...form, observacao: e.target.value })} rows="3" placeholder="Detalhes opcionais" style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #d1d5db' }} /></label>
             {editandoItem?.recorrencia_tipo && editandoItem.recorrencia_tipo !== 'UNICA' && (
               <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '12px', padding: '12px', display: 'grid', gap: '10px' }}>
@@ -2103,8 +2149,8 @@ function TelaPlanejamentoMensal({ token, onVoltar }) {
             <h2 style={{ marginTop: 0 }}>Despesas planejadas de {rotuloMesAnoSelecionado}</h2>
             {carregando ? <Spinner texto="Carregando..." /> : planejamentos.length === 0 ? <p style={{ color: '#64748b' }}>Nenhuma despesa planejada para este mês.</p> : (
               <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '760px' }}>
-                <thead style={{ background: '#f8fafc' }}><tr>{['Descrição','Categoria','Tipo','Recorrência','Valor previsto','Dia previsto','Observação','Ações'].map((h) => <th key={h} style={{ padding: '10px', textAlign: 'left' }}>{h}</th>)}</tr></thead>
-                <tbody>{planejamentos.map((item) => <tr key={item.id} style={{ borderTop: '1px solid #e5e7eb' }}><td style={{ padding: '10px' }}>{item.descricao}</td><td style={{ padding: '10px' }}>{item.categoria || '-'}</td><td style={{ padding: '10px' }}>{item.tipo_despesa === 'FIXA' ? 'Fixa' : 'Variável'}</td><td style={{ padding: '10px' }}>{rotuloRecorrencia(item)}</td><td style={{ padding: '10px' }}>{formatarMoeda(item.valor_previsto)}</td><td style={{ padding: '10px' }}>{item.dia_previsto || '-'}</td><td style={{ padding: '10px' }}>{item.observacao || '-'}</td><td style={{ padding: '10px', display: 'flex', gap: '6px' }}><Btn variant="secondary" size="sm" onClick={() => editarPlanejamento(item)}>Editar</Btn><Btn variant="danger" size="sm" onClick={() => excluirPlanejamento(item)}>Excluir</Btn></td></tr>)}</tbody>
+                <thead style={{ background: '#f8fafc' }}><tr>{['Descrição','Categoria','Tipo','Recorrência','Valor previsto','Dia previsto','Pagamento / origem','Observação','Ações'].map((h) => <th key={h} style={{ padding: '10px', textAlign: 'left' }}>{h}</th>)}</tr></thead>
+                <tbody>{planejamentos.map((item) => <tr key={item.id} style={{ borderTop: '1px solid #e5e7eb' }}><td style={{ padding: '10px' }}>{item.descricao}</td><td style={{ padding: '10px' }}>{item.categoria || '-'}</td><td style={{ padding: '10px' }}>{item.tipo_despesa === 'FIXA' ? 'Fixa' : 'Variável'}</td><td style={{ padding: '10px' }}>{rotuloRecorrencia(item)}</td><td style={{ padding: '10px' }}>{formatarMoeda(item.valor_previsto)}</td><td style={{ padding: '10px' }}>{item.dia_previsto || '-'}</td><td style={{ padding: '10px', color: item.conta_id || item.forma_pagamento ? '#334155' : '#9a3412', fontWeight: 600 }}>{rotuloOrigemPagamentoPlanejamento(item)}</td><td style={{ padding: '10px' }}>{item.observacao || '-'}</td><td style={{ padding: '10px', display: 'flex', gap: '6px' }}><Btn variant="secondary" size="sm" onClick={() => editarPlanejamento(item)}>Editar</Btn><Btn variant="danger" size="sm" onClick={() => excluirPlanejamento(item)}>Excluir</Btn></td></tr>)}</tbody>
               </table>
             )}
           </div>

@@ -599,6 +599,8 @@ CREATE TABLE planejamentos_mensais (
   tipo_despesa VARCHAR(20) NOT NULL CHECK (tipo_despesa IN ('FIXA', 'VARIAVEL')),
   valor_previsto DECIMAL(12, 2) NOT NULL CHECK (valor_previsto > 0),
   dia_previsto INT CHECK (dia_previsto IS NULL OR dia_previsto BETWEEN 1 AND 31),
+  forma_pagamento VARCHAR(30) CHECK (forma_pagamento IS NULL OR forma_pagamento IN ('PIX', 'CARTAO_CREDITO', 'CARTAO_DEBITO', 'BOLETO', 'DEBITO_AUTOMATICO', 'TRANSFERENCIA', 'DINHEIRO', 'OUTRO')),
+  conta_id UUID REFERENCES contas(id) ON DELETE SET NULL,
   observacao TEXT,
   recorrencia_tipo VARCHAR(20) NOT NULL DEFAULT 'UNICA' CHECK (recorrencia_tipo IN ('UNICA', 'MENSAL', 'PARCELADA')),
   recorrencia_id UUID,
