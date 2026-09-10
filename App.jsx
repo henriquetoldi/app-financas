@@ -552,6 +552,56 @@ function criarXlsxTransacoes(linhas) {
   return criarZipSemCompressao(arquivos);
 }
 
+function criarXlsxBaseAnalitica(linhas) {
+  const cabecalhos = [
+    'Data', 'Ano', 'Mês', 'Ano-Mês', 'Descrição', 'Valor', 'Valor com sinal', 'Tipo',
+    'Conta / Cartão', 'Banco', 'Tipo da conta', 'Categoria Macro', 'Categoria Detalhada', 'Categoria',
+    'Origem da categoria', 'Transferência interna?', 'Impacta resultado?', 'Grupo transferência',
+    'Conciliada?', 'Conta prevista conciliada', 'Observação', 'Referência bancária', 'Saldo acumulado',
+    'ID da transação', 'ID da conta', 'ID categoria macro', 'ID categoria detalhada', 'ID da importação',
+    'Criado em', 'Atualizado em'
+  ];
+  const todasLinhas = [cabecalhos, ...linhas];
+  const sheetRows = todasLinhas.map((linha, rowIndex) => {
+    const numeroLinha = rowIndex + 1;
+    const cells = linha.map((valor, colIndex) => criarCelulaXlsx(valor, numeroLinha, colIndex, rowIndex === 0 ? 1 : 0)).join('');
+    return `<row r="${numeroLinha}">${cells}</row>`;
+  }).join('');
+  const larguraColunas = cabecalhos.map((cabecalho, index) => {
+    const largura = Math.min(44, Math.max(11, ...todasLinhas.slice(0, 501).map((linha) => String(linha[index] ?? '').length + 2)));
+    return `<col min="${index + 1}" max="${index + 1}" width="${largura}" customWidth="1"/>`;
+  }).join('');
+  const ultimaColuna = colunaExcel(cabecalhos.length - 1);
+
+  const sheet = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>
+  <cols>${larguraColunas}</cols>
+  <sheetData>${sheetRows}</sheetData>
+  <autoFilter ref="A1:${ultimaColuna}${todasLinhas.length}"/>
+</worksheet>`;
+
+  const workbook = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Base Analítica" sheetId="1" r:id="rId1"/></sheets></workbook>`;
+  const styles = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs></styleSheet>`;
+
+  return criarZipSemCompressao([
+    { nome: '[Content_Types].xml', conteudo: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>` },
+    { nome: '_rels/.rels', conteudo: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>` },
+    { nome: 'xl/workbook.xml', conteudo: workbook },
+    { nome: 'xl/_rels/workbook.xml.rels', conteudo: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>` },
+    { nome: 'xl/worksheets/sheet1.xml', conteudo: sheet },
+    { nome: 'xl/styles.xml', conteudo: styles },
+  ]);
+}
+
+function nomeArquivoBaseAnalitica(dataInicial, dataFinal) {
+  const prefixo = 'base_analitica_transacoes';
+  if (dataInicial && dataFinal) return `${prefixo}_${dataInicial}_a_${dataFinal}.xlsx`;
+  if (dataInicial) return `${prefixo}_a_partir_de_${dataInicial}.xlsx`;
+  if (dataFinal) return `${prefixo}_ate_${dataFinal}.xlsx`;
+  return `${prefixo}.xlsx`;
+}
+
 function baixarArquivo(bytes, nomeArquivo, tipo) {
   const url = URL.createObjectURL(new Blob([bytes], { type: tipo }));
   const link = document.createElement('a');
@@ -5366,7 +5416,71 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
     tx.categoria_origem || '',
   ]);
 
-  const exportarExcel = async (apenasSelecionadas = false) => {
+  const montarLinhasBaseAnalitica = (items) => items.map((tx) => {
+  const data = normalizarDataFiltro(tx.data);
+  const [anoTx = '', mesTx = ''] = data ? data.split('-') : [];
+  const conta = contas.find((item) => item.id === tx.conta_id);
+  const valor = Number(tx.valor || 0);
+  const valorComSinal = tx.tipo === 'CREDITO' ? valor : -valor;
+  const macro = nomeCategoriaMacro(tx);
+  const detalhada = nomeCategoriaDetalhada(tx);
+  return [
+    formatarDataExcel(tx.data),
+    anoTx ? Number(anoTx) : '',
+    mesTx ? Number(mesTx) : '',
+    anoTx && mesTx ? `${anoTx}-${mesTx}` : '',
+    tx.descricao || '',
+    valor,
+    valorComSinal,
+    tx.tipo === 'CREDITO' ? 'Crédito' : 'Débito',
+    tx.conta_nome || conta?.nome || '',
+    conta?.banco || tx.conta_banco || '',
+    tx.conta_tipo || conta?.tipo || '',
+    macro === 'Sem categoria' ? '' : macro,
+    detalhada === '-' ? '' : detalhada,
+    tx.categoria_nome || (macro === 'Sem categoria' ? '' : macro),
+    tx.categoria_origem || '',
+    tx.eh_transferencia_interna ? 'Sim' : 'Não',
+    tx.eh_transferencia_interna ? 'Não' : 'Sim',
+    tx.transferencia_grupo_id || '',
+    tx.conciliacao_id ? 'Sim' : 'Não',
+    tx.provisao_conciliada_descricao || '',
+    tx.nota_usuario || '',
+    tx.referencia_banco || '',
+    Number.isFinite(tx.saldo_acumulado_calculado) ? Number(tx.saldo_acumulado_calculado) : '',
+    tx.id || '',
+    tx.conta_id || '',
+    tx.categoria_macro_id || '',
+    tx.categoria_detalhada_id || '',
+    tx.importacao_id || '',
+    tx.criado_em ? String(tx.criado_em) : '',
+    tx.atualizado_em ? String(tx.atualizado_em) : '',
+  ];
+});
+
+const exportarBaseAnalitica = async () => {
+  if (exportandoExcel) return;
+  setExportandoExcel(true);
+  try {
+    const baseExportacao = (await carregarTodasTransacoesFiltradas())
+      .sort((a, b) => compararTransacoes(a, b, sortField || 'data', sortDirection || 'desc'));
+    if (baseExportacao.length === 0) {
+      mostrarToast('Não há transações para exportar com os filtros atuais.');
+      return;
+    }
+    const linhas = montarLinhasBaseAnalitica(baseExportacao);
+    const bytes = criarXlsxBaseAnalitica(linhas);
+    baixarArquivo(bytes, nomeArquivoBaseAnalitica(dataInicial, dataFinal), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    mostrarToast(`Base analítica exportada com ${baseExportacao.length.toLocaleString('pt-BR')} transação(ões).`, 'sucesso');
+  } catch (error) {
+    console.error('Erro ao exportar base analítica:', error);
+    mostrarToast('Erro ao exportar a base analítica. Tente novamente.', 'erro');
+  } finally {
+    setExportandoExcel(false);
+  }
+};
+
+const exportarExcel = async (apenasSelecionadas = false) => {
     if (exportandoExcel) return;
     setExportandoExcel(true);
     try {
@@ -5515,6 +5629,7 @@ function TelaTransacoes({ contaInicial, contas = [], token, onVoltar, onAtualiza
               <div className="more-actions">
                 <Btn variant="secondary" size="sm" onClick={() => setMaisAcoesAberto((aberto) => !aberto)} disabled={exportandoExcel}>{exportandoExcel ? 'Exportando...' : '⬇️ Exportar Excel ▾'}</Btn>
                 {maisAcoesAberto && <div className="more-actions-menu">
+                  <Btn variant="ghost" size="sm" onClick={() => { exportarBaseAnalitica(); setMaisAcoesAberto(false); }} disabled={transacoesOrdenadas.length === 0}>📊 Base analítica completa</Btn>
                   <Btn variant="ghost" size="sm" onClick={() => { exportarExcel(false); setMaisAcoesAberto(false); }} disabled={transacoesOrdenadas.length === 0}>Exportar todas filtradas</Btn>
                   <Btn variant="ghost" size="sm" onClick={() => { exportarExcel(true); setMaisAcoesAberto(false); }} disabled={selecionadas.length === 0}>Exportar selecionadas</Btn>
                   <Btn variant="ghost" size="sm" onClick={() => { verificarTransferenciasInternas(); setMaisAcoesAberto(false); }}>Verificar transferências</Btn>
