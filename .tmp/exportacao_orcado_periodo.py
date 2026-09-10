@@ -1,0 +1,131 @@
+from pathlib import Path
+
+p = Path('App.jsx')
+s = p.read_text()
+fn_start = s.index('function TelaPlanejamentoMensal({ token, onVoltar }) {')
+
+state_anchor = "  const [exportandoOrcado, setExportandoOrcado] = useState(false);\n"
+assert state_anchor in s[fn_start:]
+state_insert = "  const competenciaAtualOrcado = `${ano}-${String(mes).padStart(2, '0')}`;\n  const [competenciaInicialExportacaoOrcado, setCompetenciaInicialExportacaoOrcado] = useState(() => `${hoje.getFullYear()}-${String(hoje.getMonth() + 1).padStart(2, '0')}`);\n  const [competenciaFinalExportacaoOrcado, setCompetenciaFinalExportacaoOrcado] = useState(() => `${hoje.getFullYear()}-${String(hoje.getMonth() + 1).padStart(2, '0')}`);\n"
+if 'competenciaInicialExportacaoOrcado' not in s[fn_start:]:
+    s = s.replace(state_anchor, state_anchor + state_insert, 1)
+
+effect_anchor = "  useEffect(() => { carregarCategorias(); carregarContasPlanejamento(); }, []);\n"
+assert effect_anchor in s[fn_start:]
+effect_insert = "  useEffect(() => {\n    setCompetenciaInicialExportacaoOrcado(competenciaAtualOrcado);\n    setCompetenciaFinalExportacaoOrcado(competenciaAtualOrcado);\n  }, [mes, ano]);\n"
+if 'setCompetenciaInicialExportacaoOrcado(competenciaAtualOrcado)' not in s[fn_start:]:
+    s = s.replace(effect_anchor, effect_anchor + effect_insert, 1)
+
+export_start = s.index('  const exportarBaseAnaliticaOrcado = () => {', fn_start)
+export_end = s.index('  const excluirPlanejamento = async (item) => {', export_start)
+new_export = '''  const exportarBaseAnaliticaOrcado = async () => {
+    if (exportandoOrcado) return;
+
+    const interpretarCompetencia = (valor) => {
+      const match = String(valor || '').match(/^(\\d{4})-(\\d{2})$/);
+      if (!match) return null;
+      const anoCompetencia = Number(match[1]);
+      const mesCompetencia = Number(match[2]);
+      if (!Number.isInteger(anoCompetencia) || mesCompetencia < 1 || mesCompetencia > 12) return null;
+      return { ano: anoCompetencia, mes: mesCompetencia, indice: anoCompetencia * 12 + mesCompetencia };
+    };
+
+    const inicio = interpretarCompetencia(competenciaInicialExportacaoOrcado);
+    const fim = interpretarCompetencia(competenciaFinalExportacaoOrcado);
+    if (!inicio || !fim) {
+      mostrarToast('Informe a competência inicial e final para exportar o Orçado.', 'erro');
+      return;
+    }
+    if (fim.indice < inicio.indice) {
+      mostrarToast('A competência final não pode ser anterior à competência inicial.', 'erro');
+      return;
+    }
+
+    const quantidadeMeses = fim.indice - inicio.indice + 1;
+    if (quantidadeMeses > 60) {
+      mostrarToast('Para proteger o desempenho, exporte no máximo 60 competências por vez.', 'erro');
+      return;
+    }
+
+    setExportandoOrcado(true);
+    try {
+      const registros = [];
+      for (let indice = inicio.indice; indice <= fim.indice; indice += 1) {
+        const anoConsulta = Math.floor((indice - 1) / 12);
+        const mesConsulta = ((indice - 1) % 12) + 1;
+        const response = await axios.get(`${API_URL}/planejamento?mes=${mesConsulta}&ano=${anoConsulta}&${montarQueryFiltrosPlanejamento()}`, { headers: authHeaders });
+        registros.push(...(response.data.planejamentos || []));
+      }
+
+      if (registros.length === 0) {
+        mostrarToast('Não há despesas orçadas para exportar no período e filtros selecionados.');
+        return;
+      }
+
+      const linhas = registros.map((item) => {
+        const conta = contasPlanejamento.find((c) => c.id === item.conta_id);
+        const categoria = item.categoria_nome || item.categoria || categorias.find((c) => c.id === item.categoria_id)?.nome || '';
+        return [
+          Number(item.ano || 0),
+          Number(item.mes || 0),
+          `${item.ano}-${String(item.mes).padStart(2, '0')}`,
+          item.descricao || '',
+          categoria,
+          item.tipo_despesa || '',
+          Number(item.valor_previsto || 0),
+          item.dia_previsto === null || item.dia_previsto === undefined || item.dia_previsto === '' ? '' : Number(item.dia_previsto),
+          rotuloFormaPagamentoPlanejamento(item.forma_pagamento),
+          conta?.nome || item.conta_nome || '',
+          conta?.banco || '',
+          conta?.tipo || '',
+          rotuloRecorrencia(item),
+          item.parcela_atual || '',
+          item.quantidade_parcelas || '',
+          item.mes_fim || '',
+          item.ano_fim || '',
+          item.observacao || '',
+          item.ativa === false ? 'Não' : 'Sim',
+          item.id || '',
+          item.categoria_id || '',
+          item.conta_id || '',
+          item.recorrencia_grupo_id || '',
+          item.criado_em ? String(item.criado_em) : '',
+          item.atualizado_em ? String(item.atualizado_em) : '',
+        ];
+      });
+
+      const bytes = criarXlsxBaseAnaliticaOrcado(linhas);
+      const nomeArquivo = competenciaInicialExportacaoOrcado === competenciaFinalExportacaoOrcado
+        ? `base_analitica_orcado_${competenciaInicialExportacaoOrcado}.xlsx`
+        : `base_analitica_orcado_${competenciaInicialExportacaoOrcado}_a_${competenciaFinalExportacaoOrcado}.xlsx`;
+      baixarArquivo(bytes, nomeArquivo, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      mostrarToast(`Base analítica do Orçado exportada com ${registros.length.toLocaleString('pt-BR')} registro(s) de ${quantidadeMeses} competência(s).`, 'sucesso');
+    } catch (error) {
+      console.error('Erro ao exportar base analítica do Orçado:', error);
+      mostrarToast('Erro ao exportar a base analítica do Orçado. Tente novamente.', 'erro');
+    } finally {
+      setExportandoOrcado(false);
+    }
+  };
+
+'''
+s = s[:export_start] + new_export + s[export_end:]
+
+old_button = '''          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+            <Btn variant="secondary" onClick={exportarBaseAnaliticaOrcado} disabled={exportandoOrcado || planejamentos.length === 0}>{exportandoOrcado ? 'Exportando...' : '📊 Exportar analítico do Orçado'}</Btn>
+            <Btn variant="primary" onClick={() => setFormularioAberto(true)}>+ Adicionar despesa planejada</Btn>
+          </div>'''
+assert old_button in s
+new_button = '''          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'end' }}>
+            <label style={{ display: 'grid', gap: '4px', fontSize: '12px', color: '#475569' }}>Exportar de
+              <input type="month" value={competenciaInicialExportacaoOrcado} onChange={(e) => setCompetenciaInicialExportacaoOrcado(e.target.value)} style={{ padding: '8px 10px', borderRadius: '8px', border: '1px solid #d1d5db' }} />
+            </label>
+            <label style={{ display: 'grid', gap: '4px', fontSize: '12px', color: '#475569' }}>Até
+              <input type="month" value={competenciaFinalExportacaoOrcado} onChange={(e) => setCompetenciaFinalExportacaoOrcado(e.target.value)} style={{ padding: '8px 10px', borderRadius: '8px', border: '1px solid #d1d5db' }} />
+            </label>
+            <Btn variant="secondary" onClick={exportarBaseAnaliticaOrcado} disabled={exportandoOrcado}>{exportandoOrcado ? 'Exportando...' : '📊 Exportar analítico do Orçado'}</Btn>
+            <Btn variant="primary" onClick={() => setFormularioAberto(true)}>+ Adicionar despesa planejada</Btn>
+          </div>'''
+s = s.replace(old_button, new_button, 1)
+
+p.write_text(s)
