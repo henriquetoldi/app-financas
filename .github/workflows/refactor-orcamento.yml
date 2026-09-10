@@ -1,0 +1,117 @@
+name: Refatorar orçamento para tela única
+
+on:
+  push:
+    branches:
+      - chatgpt-orcamento-tela-unica
+
+permissions:
+  contents: write
+
+jobs:
+  refactor:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout da branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Refatorar TelaPlanejamentoMensal
+        shell: bash
+        run: |
+          python <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('App.jsx')
+          source = path.read_text(encoding='utf-8')
+
+          start = source.index('function TelaPlanejamentoMensal')
+          end = source.index('\nfunction TelaPrevisoes', start)
+          component = source[start:end]
+          original_component = component
+
+          state_line = "  const [abaPlanejamento, setAbaPlanejamento] = useState('resumo');\n"
+          if component.count(state_line) != 1:
+              raise RuntimeError('Estado abaPlanejamento não encontrado exatamente uma vez.')
+          component = component.replace(state_line, '', 1)
+
+          tabs_pattern = re.compile(
+              r'\n\s*<div className="admin-tabs">\n\s*\{\[\[\'resumo\', \'📊 Resumo\'\], \[\'projecoes\', \'📈 Projeções\'\], \[\'categorias\', \'🏷️ Categorias\'\], \[\'planejamentos\', \'🧾 Planejamentos\'\]\]\.map\(\(\[id, label\]\) => <button.*?</button>\)\}\n\s*</div>',
+              re.S,
+          )
+          component, count_tabs = tabs_pattern.subn('', component, count=1)
+          if count_tabs != 1:
+              raise RuntimeError('Navegação interna do orçamento não foi localizada.')
+
+          inline_add = "onClick={() => { setFormularioAberto(true); setAbaPlanejamento('planejamentos'); }}"
+          if component.count(inline_add) != 1:
+              raise RuntimeError('Ação de adicionar planejamento não encontrada.')
+          component = component.replace(inline_add, "onClick={() => setFormularioAberto(true)}", 1)
+
+          edit_line = "    setAbaPlanejamento('planejamentos');\n"
+          if component.count(edit_line) != 1:
+              raise RuntimeError('Ação de edição ligada à aba não encontrada.')
+          component = component.replace(edit_line, '', 1)
+
+          # Coloca Projeções antes dos dois blocos de Categorias para a leitura seguir
+          # Resumo -> Projeções -> Categorias -> Planejamentos.
+          cat_heading = "<h2 style={{ margin: '0 0 6px' }}>Planejado x Realizado por categoria</h2>"
+          proj_heading = "<h2 style={{ margin: '0 0 6px' }}>Compromissos previstos para os próximos meses</h2>"
+          dist_heading = "<h2 style={{ margin: '0 0 6px' }}>Distribuição planejada por categoria</h2>"
+
+          cat_heading_pos = component.index(cat_heading)
+          proj_heading_pos = component.index(proj_heading)
+          dist_heading_pos = component.index(dist_heading)
+          cat_start = component.rfind("        <div style={{", 0, cat_heading_pos)
+          proj_start = component.rfind("        <div style={{", 0, proj_heading_pos)
+          dist_start = component.rfind("        <div style={{", 0, dist_heading_pos)
+
+          if not (0 <= cat_start < proj_start < dist_start):
+              raise RuntimeError('Ordem original dos blocos não corresponde ao esperado.')
+
+          cat_block = component[cat_start:proj_start]
+          proj_block = component[proj_start:dist_start]
+          component = component[:cat_start] + proj_block + cat_block + component[dist_start:]
+
+          component, count_visibility = re.subn(
+              r"display: abaPlanejamento === '(?:resumo|projecoes|categorias|planejamentos)' \? '(block|grid)' : 'none'",
+              r"display: '\1'",
+              component,
+          )
+          if count_visibility < 7:
+              raise RuntimeError(f'Foram ajustadas apenas {count_visibility} condições de visibilidade; esperado pelo menos 7.')
+
+          if 'abaPlanejamento' in component or 'setAbaPlanejamento' in component:
+              raise RuntimeError('Ainda restaram referências à navegação interna do orçamento.')
+
+          if component == original_component:
+              raise RuntimeError('Nenhuma alteração foi aplicada ao componente.')
+
+          source = source[:start] + component + source[end:]
+          path.write_text(source, encoding='utf-8')
+          PY
+
+      - name: Remover workaround visual temporário
+        shell: bash
+        run: |
+          git checkout 37185bb10455f5fcc9c6ea05d71bee7f9dcc18f0 -- public/ui-system.css
+
+      - name: Validar build
+        shell: bash
+        run: |
+          npm ci
+          npm run build
+
+      - name: Remover workflow temporário e publicar refatoração
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/refactor-orcamento.yml
+          git add App.jsx public/ui-system.css
+          git diff --cached --check
+          git commit -m "Refatorar Orçamento para tela única"
+          git push origin HEAD:chatgpt-orcamento-tela-unica
