@@ -602,6 +602,53 @@ function nomeArquivoBaseAnalitica(dataInicial, dataFinal) {
   return `${prefixo}.xlsx`;
 }
 
+
+function criarXlsxBaseAnaliticaProvisoes(linhas) {
+  const cabecalhos = [
+    'Data prevista', 'Vencimento', 'Descrição', 'Valor previsto', 'Tipo', 'Conta / Cartão',
+    'Categoria Macro', 'Categoria Detalhada', 'Status', 'Recorrente?', 'Periodicidade',
+    'Conciliada?', 'Transação conciliada', 'Data transação conciliada', 'Valor transação conciliada',
+    'Confiança conciliação', 'Observação', 'ID da provisão', 'ID da conta', 'ID categoria macro',
+    'ID categoria detalhada', 'ID transação conciliada', 'Criado em', 'Atualizado em'
+  ];
+  const todasLinhas = [cabecalhos, ...linhas];
+  const sheetRows = todasLinhas.map((linha, rowIndex) => {
+    const numeroLinha = rowIndex + 1;
+    const cells = linha.map((valor, colIndex) => criarCelulaXlsx(valor, numeroLinha, colIndex, rowIndex === 0 ? 1 : 0)).join('');
+    return `<row r="${numeroLinha}">${cells}</row>`;
+  }).join('');
+  const larguraColunas = cabecalhos.map((cabecalho, index) => {
+    const largura = Math.min(44, Math.max(11, ...todasLinhas.slice(0, 501).map((linha) => String(linha[index] ?? '').length + 2)));
+    return `<col min="${index + 1}" max="${index + 1}" width="${largura}" customWidth="1"/>`;
+  }).join('');
+  const ultimaColuna = colunaExcel(cabecalhos.length - 1);
+  const sheet = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>
+  <cols>${larguraColunas}</cols>
+  <sheetData>${sheetRows}</sheetData>
+  <autoFilter ref="A1:${ultimaColuna}${todasLinhas.length}"/>
+</worksheet>`;
+  const workbook = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Base Provisões" sheetId="1" r:id="rId1"/></sheets></workbook>`;
+  const styles = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs></styleSheet>`;
+  return criarZipSemCompressao([
+    { nome: '[Content_Types].xml', conteudo: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>` },
+    { nome: '_rels/.rels', conteudo: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>` },
+    { nome: 'xl/workbook.xml', conteudo: workbook },
+    { nome: 'xl/_rels/workbook.xml.rels', conteudo: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>` },
+    { nome: 'xl/worksheets/sheet1.xml', conteudo: sheet },
+    { nome: 'xl/styles.xml', conteudo: styles },
+  ]);
+}
+
+function nomeArquivoBaseProvisoes(dataInicial, dataFinal) {
+  const prefixo = 'base_analitica_provisoes';
+  if (dataInicial && dataFinal) return `${prefixo}_${dataInicial}_a_${dataFinal}.xlsx`;
+  if (dataInicial) return `${prefixo}_a_partir_de_${dataInicial}.xlsx`;
+  if (dataFinal) return `${prefixo}_ate_${dataFinal}.xlsx`;
+  return `${prefixo}.xlsx`;
+}
+
 function baixarArquivo(bytes, nomeArquivo, tipo) {
   const url = URL.createObjectURL(new Blob([bytes], { type: tipo }));
   const link = document.createElement('a');
@@ -4572,6 +4619,7 @@ function TelaProvisoes({ contas = [], token, onVoltar }) {
   const [sugestoes, setSugestoes] = useState([]);
   const [provisaoConciliando, setProvisaoConciliando] = useState(null);
   const [carregando, setCarregando] = useState(false);
+  const [exportandoProvisoes, setExportandoProvisoes] = useState(false);
   const authHeaders = { Authorization: `Bearer ${token}` };
   const nomesMesesCurtos = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
   const opcoesPeriodoGraficos = [3, 6, 12, 24];
@@ -4615,6 +4663,51 @@ function TelaProvisoes({ contas = [], token, onVoltar }) {
   };
 
   useEffect(() => { carregarDados(); }, []);
+
+  const exportarBaseAnaliticaProvisoes = () => {
+    if (exportandoProvisoes) return;
+    if (provisoes.length === 0) {
+      mostrarToast('Não há provisões para exportar com os filtros atuais.');
+      return;
+    }
+    setExportandoProvisoes(true);
+    try {
+      const linhas = provisoes.map((p) => [
+        formatarDataExcel(p.data_prevista),
+        formatarDataExcel(p.data_vencimento),
+        p.descricao || '',
+        Number(p.valor_previsto || 0),
+        p.tipo === 'CREDITO' ? 'Crédito' : 'Débito',
+        p.conta_nome || '',
+        p.categoria_macro_nome || '',
+        p.categoria_detalhada_nome || '',
+        p.status || '',
+        p.recorrente ? 'Sim' : 'Não',
+        p.periodicidade || '',
+        p.conciliacao_id ? 'Sim' : 'Não',
+        p.transacao_conciliada_descricao || '',
+        formatarDataExcel(p.transacao_conciliada_data),
+        p.transacao_conciliada_valor === null || p.transacao_conciliada_valor === undefined ? '' : Number(p.transacao_conciliada_valor),
+        p.conciliacao_confianca || '',
+        p.observacao || '',
+        p.id || '',
+        p.conta_id || '',
+        p.categoria_macro_id || '',
+        p.categoria_detalhada_id || '',
+        p.transacao_conciliada_id || '',
+        p.criado_em ? String(p.criado_em) : '',
+        p.atualizado_em ? String(p.atualizado_em) : '',
+      ]);
+      const bytes = criarXlsxBaseAnaliticaProvisoes(linhas);
+      baixarArquivo(bytes, nomeArquivoBaseProvisoes(filtros.dataInicial, filtros.dataFinal), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      mostrarToast(`Base analítica de provisões exportada com ${provisoes.length.toLocaleString('pt-BR')} registro(s).`, 'sucesso');
+    } catch (error) {
+      console.error('Erro ao exportar provisões:', error);
+      mostrarToast('Erro ao exportar a base analítica de provisões. Tente novamente.', 'erro');
+    } finally {
+      setExportandoProvisoes(false);
+    }
+  };
 
   const abrirNova = () => {
     setEditando(null);
@@ -4736,7 +4829,7 @@ function TelaProvisoes({ contas = [], token, onVoltar }) {
         <div className="filter-card">
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap', marginBottom: '12px' }}>
             <h2 style={{ margin: 0 }}>Contas provisionadas</h2>
-            <Btn variant="primary" onClick={abrirNova}>+ Nova provisão</Btn>
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}><Btn variant="secondary" onClick={exportarBaseAnaliticaProvisoes} disabled={exportandoProvisoes || provisoes.length === 0}>{exportandoProvisoes ? 'Exportando...' : '📊 Exportar base analítica'}</Btn><Btn variant="primary" onClick={abrirNova}>+ Nova provisão</Btn></div>
           </div>
           <div className="filter-grid">
             <input type="date" value={filtros.dataInicial} onChange={(e) => setFiltros({ ...filtros, dataInicial: e.target.value })} style={{ padding: '10px', border: '1px solid #d1d5db', borderRadius: '8px' }} />
