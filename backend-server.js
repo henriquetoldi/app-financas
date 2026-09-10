@@ -457,6 +457,8 @@ async function inicializarBanco() {
       tipo_despesa VARCHAR(20) NOT NULL,
       valor_previsto DECIMAL(12, 2) NOT NULL,
       dia_previsto INT,
+      forma_pagamento VARCHAR(30),
+      conta_id UUID REFERENCES contas(id) ON DELETE SET NULL,
       observacao TEXT,
       recorrencia_tipo VARCHAR(20) NOT NULL DEFAULT 'UNICA',
       recorrencia_id UUID,
@@ -493,7 +495,9 @@ async function inicializarBanco() {
       ADD COLUMN IF NOT EXISTS mes_fim INT,
       ADD COLUMN IF NOT EXISTS ano_fim INT,
       ADD COLUMN IF NOT EXISTS ativa BOOLEAN DEFAULT true,
-      ADD COLUMN IF NOT EXISTS categoria_id UUID REFERENCES categorias(id) ON DELETE SET NULL
+      ADD COLUMN IF NOT EXISTS categoria_id UUID REFERENCES categorias(id) ON DELETE SET NULL,
+      ADD COLUMN IF NOT EXISTS forma_pagamento VARCHAR(30),
+      ADD COLUMN IF NOT EXISTS conta_id UUID REFERENCES contas(id) ON DELETE SET NULL
   `);
 
   await pool.query(`
@@ -5914,6 +5918,8 @@ function compararPeriodoPlanejamento(aMes, aAno, bMes, bAno) {
   return (Number(aAno) * 12 + Number(aMes)) - (Number(bAno) * 12 + Number(bMes));
 }
 
+const FORMAS_PAGAMENTO_PLANEJAMENTO = ['PIX', 'CARTAO_CREDITO', 'CARTAO_DEBITO', 'BOLETO', 'DEBITO_AUTOMATICO', 'TRANSFERENCIA', 'DINHEIRO', 'OUTRO'];
+
 function validarPayloadPlanejamento(body = {}, parcial = false) {
   const payload = {};
   if (!parcial || body.mes !== undefined || body.ano !== undefined) Object.assign(payload, validarMesAnoPlanejamento(body.mes, body.ano));
@@ -5967,8 +5973,27 @@ function validarPayloadPlanejamento(body = {}, parcial = false) {
   }
   if (body.categoria !== undefined) payload.categoria = String(body.categoria || '').trim() || null;
   if (body.categoria_id !== undefined || body.categoriaId !== undefined) payload.categoriaId = String(body.categoria_id || body.categoriaId || '').trim() || null;
+  if (!parcial || body.forma_pagamento !== undefined || body.formaPagamento !== undefined) {
+    const formaPagamento = body.forma_pagamento ?? body.formaPagamento;
+    payload.formaPagamento = formaPagamento === '' || formaPagamento === null || formaPagamento === undefined ? null : String(formaPagamento).trim().toUpperCase();
+    if (payload.formaPagamento && !FORMAS_PAGAMENTO_PLANEJAMENTO.includes(payload.formaPagamento)) throw new Error('Forma de pagamento inválida.');
+  }
+  if (!parcial || body.conta_id !== undefined || body.contaId !== undefined) {
+    const contaId = body.conta_id ?? body.contaId;
+    payload.contaId = contaId === '' || contaId === null || contaId === undefined ? null : String(contaId).trim();
+  }
   if (body.observacao !== undefined) payload.observacao = String(body.observacao || '').trim() || null;
   return payload;
+}
+
+async function validarContaPlanejamentoUsuario(usuarioId, contaId) {
+  if (!contaId) return null;
+  const result = await pool.query(
+    `SELECT id, nome, banco, tipo FROM contas WHERE id = $1 AND usuario_id = $2 LIMIT 1`,
+    [contaId, usuarioId]
+  );
+  if (result.rows.length === 0) throw new Error('Conta ou cartão selecionado não pertence ao usuário.');
+  return result.rows[0];
 }
 
 function montarLancamentosPlanejamento(usuarioId, payload, recorrenciaId = crypto.randomUUID()) {
@@ -5982,7 +6007,7 @@ function montarLancamentosPlanejamento(usuarioId, payload, recorrenciaId = crypt
     const periodo = adicionarMesesPlanejamento(payload.mes, payload.ano, indice);
     const parcelaAtual = payload.recorrenciaTipo === 'PARCELADA' ? payload.parcelaInicial + indice : null;
     const descricao = payload.recorrenciaTipo === 'PARCELADA' ? `${payload.descricao} (${parcelaAtual}/${payload.quantidadeParcelas})` : payload.descricao;
-    return [usuarioId, periodo.mes, periodo.ano, descricao, payload.categoria || null, payload.categoriaId || null, payload.tipoDespesa, payload.valorPrevisto, payload.diaPrevisto ?? null, payload.observacao || null, payload.recorrenciaTipo, recorrenciaId, payload.quantidadeParcelas, parcelaAtual, payload.mes, payload.ano, payload.mesFim, payload.anoFim, true];
+    return [usuarioId, periodo.mes, periodo.ano, descricao, payload.categoria || null, payload.categoriaId || null, payload.tipoDespesa, payload.valorPrevisto, payload.diaPrevisto ?? null, payload.formaPagamento || null, payload.contaId || null, payload.observacao || null, payload.recorrenciaTipo, recorrenciaId, payload.quantidadeParcelas, parcelaAtual, payload.mes, payload.ano, payload.mesFim, payload.anoFim, true];
   });
 }
 
@@ -6009,9 +6034,9 @@ async function materializarRecorrenciasMensaisUsuario(usuarioId, mes, ano) {
     if (existente.rows.length > 0) continue;
 
     await pool.query(
-      `INSERT INTO planejamentos_mensais (usuario_id, mes, ano, descricao, categoria, categoria_id, tipo_despesa, valor_previsto, dia_previsto, observacao, recorrencia_tipo, recorrencia_id, quantidade_parcelas, parcela_atual, mes_inicio, ano_inicio, mes_fim, ano_fim, ativa)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'MENSAL',$11,NULL,NULL,$12,$13,$14,$15,true)`,
-      [usuarioId, mes, ano, item.descricao, item.categoria, item.categoria_id, item.tipo_despesa, item.valor_previsto, item.dia_previsto, item.observacao, item.recorrencia_id, item.mes_inicio, item.ano_inicio, item.mes_fim, item.ano_fim]
+      `INSERT INTO planejamentos_mensais (usuario_id, mes, ano, descricao, categoria, categoria_id, tipo_despesa, valor_previsto, dia_previsto, forma_pagamento, conta_id, observacao, recorrencia_tipo, recorrencia_id, quantidade_parcelas, parcela_atual, mes_inicio, ano_inicio, mes_fim, ano_fim, ativa)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'MENSAL',$13,NULL,NULL,$14,$15,$16,$17,true)`,
+      [usuarioId, mes, ano, item.descricao, item.categoria, item.categoria_id, item.tipo_despesa, item.valor_previsto, item.dia_previsto, item.forma_pagamento, item.conta_id, item.observacao, item.recorrencia_id, item.mes_inicio, item.ano_inicio, item.mes_fim, item.ano_fim]
     );
   }
 }
@@ -6275,13 +6300,14 @@ app.post('/api/planejamento', verificarToken, async (req, res) => {
       const categoria = await validarCategoriaPlanejamentoUsuario(req.usuario.usuario_id, p.categoriaId);
       p.categoria = p.categoria || categoria.nome;
     }
+    await validarContaPlanejamentoUsuario(req.usuario.usuario_id, p.contaId);
     const lancamentos = montarLancamentosPlanejamento(req.usuario.usuario_id, p);
     const placeholders = lancamentos.map((_, indice) => {
-      const base = indice * 19;
-      return `(${Array.from({ length: 19 }, (__, coluna) => `$${base + coluna + 1}`).join(',')})`;
+      const base = indice * 21;
+      return `(${Array.from({ length: 21 }, (__, coluna) => `$${base + coluna + 1}`).join(',')})`;
     }).join(',');
     const result = await pool.query(
-      `INSERT INTO planejamentos_mensais (usuario_id, mes, ano, descricao, categoria, categoria_id, tipo_despesa, valor_previsto, dia_previsto, observacao, recorrencia_tipo, recorrencia_id, quantidade_parcelas, parcela_atual, mes_inicio, ano_inicio, mes_fim, ano_fim, ativa)
+      `INSERT INTO planejamentos_mensais (usuario_id, mes, ano, descricao, categoria, categoria_id, tipo_despesa, valor_previsto, dia_previsto, forma_pagamento, conta_id, observacao, recorrencia_tipo, recorrencia_id, quantidade_parcelas, parcela_atual, mes_inicio, ano_inicio, mes_fim, ano_fim, ativa)
        VALUES ${placeholders} RETURNING *`,
       lancamentos.flat()
     );
@@ -6299,6 +6325,8 @@ app.put('/api/planejamento/:id', verificarToken, async (req, res) => {
       p.categoria = p.categoria || categoria.nome;
     }
 
+    await validarContaPlanejamentoUsuario(req.usuario.usuario_id, p.contaId);
+
     const atualResult = await pool.query(
       `SELECT * FROM planejamentos_mensais WHERE id = $1 AND usuario_id = $2 LIMIT 1`,
       [req.params.id, req.usuario.usuario_id]
@@ -6315,6 +6343,8 @@ app.put('/api/planejamento/:id', verificarToken, async (req, res) => {
       p.tipoDespesa,
       p.valorPrevisto,
       p.diaPrevisto ?? null,
+      p.formaPagamento || null,
+      p.contaId || null,
       p.observacao || null,
       p.recorrenciaTipo,
       p.quantidadeParcelas,
@@ -6326,20 +6356,20 @@ app.put('/api/planejamento/:id', verificarToken, async (req, res) => {
     if (escopoEfetivo === 'APENAS_ESTE') {
       result = await pool.query(
         `UPDATE planejamentos_mensais
-         SET mes=$1, ano=$2, descricao=$3, categoria=$4, categoria_id=$5, tipo_despesa=$6, valor_previsto=$7, dia_previsto=$8, observacao=$9, recorrencia_tipo=$10, quantidade_parcelas=$11, parcela_atual=$12, mes_inicio=$13, ano_inicio=$14, mes_fim=$15, ano_fim=$16, atualizado_em=NOW()
-         WHERE id=$17 AND usuario_id=$18 RETURNING *`,
-        [p.mes, p.ano, p.descricao, p.categoria || null, p.categoriaId || null, p.tipoDespesa, p.valorPrevisto, p.diaPrevisto ?? null, p.observacao || null, p.recorrenciaTipo, p.quantidadeParcelas, p.parcelaInicial, p.mes, p.ano, p.mesFim, p.anoFim, req.params.id, req.usuario.usuario_id]
+         SET mes=$1, ano=$2, descricao=$3, categoria=$4, categoria_id=$5, tipo_despesa=$6, valor_previsto=$7, dia_previsto=$8, forma_pagamento=$9, conta_id=$10, observacao=$11, recorrencia_tipo=$12, quantidade_parcelas=$13, parcela_atual=$14, mes_inicio=$15, ano_inicio=$16, mes_fim=$17, ano_fim=$18, atualizado_em=NOW()
+         WHERE id=$19 AND usuario_id=$20 RETURNING *`,
+        [p.mes, p.ano, p.descricao, p.categoria || null, p.categoriaId || null, p.tipoDespesa, p.valorPrevisto, p.diaPrevisto ?? null, p.formaPagamento || null, p.contaId || null, p.observacao || null, p.recorrenciaTipo, p.quantidadeParcelas, p.parcelaInicial, p.mes, p.ano, p.mesFim, p.anoFim, req.params.id, req.usuario.usuario_id]
       );
     } else {
       const condicaoEscopo = escopoEfetivo === 'ESTE_E_PROXIMOS'
-        ? `AND (ano * 12 + mes) >= ($15::int * 12 + $14::int)`
+        ? `AND (ano * 12 + mes) >= ($17::int * 12 + $16::int)`
         : '';
       const valoresEscopo = [...valoresComuns, req.usuario.usuario_id, atual.recorrencia_id];
       if (escopoEfetivo === 'ESTE_E_PROXIMOS') valoresEscopo.push(atual.mes, atual.ano);
       result = await pool.query(
         `UPDATE planejamentos_mensais
-         SET descricao=$1, categoria=$2, categoria_id=$3, tipo_despesa=$4, valor_previsto=$5, dia_previsto=$6, observacao=$7, recorrencia_tipo=$8, quantidade_parcelas=$9, mes_fim=$10, ano_fim=$11, atualizado_em=NOW()
-         WHERE usuario_id=$12 AND recorrencia_id=$13 ${condicaoEscopo}
+         SET descricao=$1, categoria=$2, categoria_id=$3, tipo_despesa=$4, valor_previsto=$5, dia_previsto=$6, forma_pagamento=$7, conta_id=$8, observacao=$9, recorrencia_tipo=$10, quantidade_parcelas=$11, mes_fim=$12, ano_fim=$13, atualizado_em=NOW()
+         WHERE usuario_id=$14 AND recorrencia_id=$15 ${condicaoEscopo}
          RETURNING *`,
         valoresEscopo
       );
